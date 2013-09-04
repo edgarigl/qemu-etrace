@@ -1,0 +1,83 @@
+qemu-etrace
+-----------
+qemu-etrace is a tool to process QEMU binary execution traces.
+It can display the binary logs in a human readable way and generate
+coverage and profiling reports. The traces can be generated and processed
+without modifying the guest application, i.e it is to some extent
+un-intrusive.
+
+BUILD
+-----
+qemu-etrace depends on binutils libraries and on binutils programs at runtime.
+On debian/ubuntu machines, the package is binutils and binutils-dev.
+Preferably the binutils installation should be multi-arch.
+
+If your system is lacking these, you will have to download binutils and
+install it somewhere. Plus edit the Makefile.
+
+To simplify the binutils build, the Makefile has a rule that will download,
+build and install a local binutils installation (in the qemu-etrace src dir).
+
+The make binutils step is optional, depending on your system:
+$ make binutils -j4
+
+To build qemu-etrace:
+$ make -j4
+
+USAGE
+-----
+QEMU needs to run with etrace tracing.
+Flags -etrace-flags exec enables the execution tracing.
+-no-tb-chain disables direct tb jumps so that QEMU can trace all executed code.
+$ qemu ... -kernel vmlinux -etrace /tmp/elog -etrace-flags exec -no-tb-chain
+
+Examples:
+To view a trace:
+$ qemu-etrace --trace /tmp/elog
+
+To view a trace (with symbol info):
+$ qemu-etrace --trace /tmp/elog --elf vmlinux
+
+To create coverage lcov style info:
+$ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --trace-output none
+
+Binutils
+--------
+qemu-etrace uses binutils, both its libraries and its programs (nm,
+objdump, addr2line). It was tested with binutils 2.22.
+qemu-etrace has cmdline options to choose which binutils programs to
+use, see --help, --nm, --addr2line, --objdump.
+
+Coverage
+--------
+qemu-etrace is able to process and collect execution statistics
+in a way that allows it to generate coverage and profiling information.
+It supports several coverage or profiling output file-formats.
+
+etrace
+	An internal ascii format, human readable. May change at
+	any time so don't build tools around this yet.
+
+cachegrind
+	cachegrind compatible profiling format.
+
+qcov
+	Creates qcov files, which are a variation of .gcov files similar to
+	what the gcov tool would emit.
+
+lcov
+	Generates an lcov info file to be further processed
+	by genhtml to generate coverage reports.
+
+gcov-bad
+	Generates binary gcov gcda files. This format does not work
+	very well. It was an experiment that turns out to be hard to
+	support.
+
+TODO
+----
+1. Add sorting support when displaying traces.
+   Possibly with a barrier package in the trace.
+
+2. Stop using binutils programs and instead implement the features directly
+   towards libbfd and friends (+ possibly libelf, libdwarf).
