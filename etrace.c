@@ -312,7 +312,10 @@ void etrace_show(int fd, FILE *fp_out,
 			etrace_process_info(&t);
 			break;
 		default:
-			assert(0);
+			fprintf(stderr, "Unknown etrace package type %u\n"
+					"Maybe you need to update qemu-etrace?",
+					t.pkg->hdr.type);
+			exit(EXIT_FAILURE);
 			break;
 		}
 	}
