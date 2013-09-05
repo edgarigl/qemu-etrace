@@ -22,6 +22,8 @@
 #include "coverage.h"
 #include "etrace.h"
 
+#define ETRACE_MIN_VERSION_MAJOR 0
+
 #define MAX_PKG (2 * 1024 * 1024)
 
 struct etracer {
@@ -30,6 +32,7 @@ struct etracer {
 	void **sym_tree;
 
 	struct etrace_info_data info;
+	struct etrace_arch arch;
 
 	struct {
 		const char *objdump;
@@ -68,15 +71,33 @@ static bool etrace_read_pkg(struct etracer *t, struct etrace_pkg *pkg)
 	return true;
 }
 
+static void bad_version(struct etracer *t)
+{
+	fprintf(stderr,
+		"Trace-file has version %u.%u but qemu-etrace only supports "
+		"%u.x\n", t->info.version.major, t->info.version.minor,
+		ETRACE_MIN_VERSION_MAJOR);
+	exit(1);
+}
+
 void etrace_process_info(struct etracer *t)
 {
 	t->info = t->pkg->info;
 
+	/* Validate version.  */
+	if (t->info.version.major > ETRACE_MIN_VERSION_MAJOR)
+		bad_version(t);
+}
+
+void etrace_process_arch(struct etracer *t)
+{
+	t->arch = t->pkg->arch;
+
 	if (t->fp_out) {
 		fprintf(t->fp_out, "guest arch=%d %dbit\n",
-			t->info.guest.arch_id, t->info.guest.arch_bits);
+			t->arch.guest.arch_id, t->arch.guest.arch_bits);
 		fprintf(t->fp_out, "host arch=%d %dbit\n",
-			t->info.host.arch_id, t->info.host.arch_bits);
+			t->arch.host.arch_id, t->arch.host.arch_bits);
 	}
 }
 
@@ -91,7 +112,7 @@ void etrace_process_tb(struct etracer *t)
 		fprintf(t->fp_out, "guest virt=%" PRIx64 " phys=%" PRIx64 "\n",
 			pkg->tb.vaddr, pkg->tb.paddr);
 		disas(t->fp_out, t->guest.objdump, t->guest.machine,
-			t->info.guest.big_endian,
+			t->arch.guest.big_endian,
 			pkg->tb.vaddr, &pkg->tb.data8[0],
 			pkg->tb.guest_code_len);
 		fputc('\n', t->fp_out);
@@ -100,7 +121,7 @@ void etrace_process_tb(struct etracer *t)
 	if (t->host.machine) {
 		fprintf(t->fp_out, "host\n");
 		disas(t->fp_out, t->host.objdump, t->host.machine,
-			t->info.host.big_endian,
+			t->arch.host.big_endian,
 			pkg->tb.host_addr,
 			&pkg->tb.data8[pkg->tb.guest_code_len],
 			pkg->tb.host_code_len);
@@ -169,9 +190,9 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 	size_t ent_size;
 	struct etrace_exec *ex = &t->pkg->ex;
 
-	if (t->info.guest.arch_bits == 32)
+	if (t->arch.guest.arch_bits == 32)
 		ent_size = sizeof ex->t32[0];
-	else if (t->info.guest.arch_bits == 32)
+	else if (t->arch.guest.arch_bits == 32)
 		ent_size = sizeof ex->t64[0];
 	else
 		assert(0);
@@ -185,7 +206,7 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 		uint64_t start, end;
 		uint32_t duration;
 
-		switch (t->info.guest.arch_bits) {
+		switch (t->arch.guest.arch_bits) {
 		case 32:
 			start = ex->t32[i].start;
 			end = ex->t32[i].end;
@@ -307,6 +328,9 @@ void etrace_show(int fd, FILE *fp_out,
 			break;
 		case TYPE_MEM:
 			etrace_process_mem(&t);
+			break;
+		case TYPE_ARCH:
+			etrace_process_arch(&t);
 			break;
 		case TYPE_INFO:
 			etrace_process_info(&t);

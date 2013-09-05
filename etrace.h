@@ -3,6 +3,7 @@ enum {
     TYPE_TB = 2,
     TYPE_NOTE = 3,
     TYPE_MEM = 4,
+    TYPE_ARCH = 5,
     TYPE_INFO = 0x4554,
 };
 
@@ -20,6 +21,13 @@ enum etrace_info_flags {
 
 struct etrace_info_data {
     uint64_t attr;
+    struct {
+        uint16_t major;
+        uint16_t minor;
+    } version;
+};
+
+struct etrace_arch {
     struct {
         uint32_t arch_id;
         uint8_t arch_bits;
@@ -78,6 +86,7 @@ struct etrace_pkg {
 	struct etrace_hdr hdr;
 	union {
 		struct etrace_info_data info;
+		struct etrace_arch arch;
 		struct etrace_exec ex;
 		struct etrace_tb tb;
 		struct etrace_note note;
