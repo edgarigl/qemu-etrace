@@ -302,6 +302,7 @@ void etrace_show(int fd, FILE *fp_out,
 		 void **sym_tree, enum cov_format cov_fmt)
 {
 	struct etracer t;
+	bool unknown_pkg_warn = false;
 
 	fprintf(stderr, "Processing trace\n");
 
@@ -336,10 +337,17 @@ void etrace_show(int fd, FILE *fp_out,
 			etrace_process_info(&t);
 			break;
 		default:
-			fprintf(stderr, "Unknown etrace package type %u\n"
-					"Maybe you need to update qemu-etrace?",
+			/* Show a warning once. We trust the version handling
+			   to abort when the format is truly incompatible.  */
+			if (!unknown_pkg_warn) {
+				fprintf(stderr,
+					"Non-fatal warning: "
+					"Unknown etrace package type %u\n"
+					"Maybe you need to update "
+					"qemu-etrace?\n",
 					t.pkg->hdr.type);
-			exit(EXIT_FAILURE);
+				unknown_pkg_warn = true;
+			}
 			break;
 		}
 	}
