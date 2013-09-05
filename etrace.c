@@ -333,6 +333,10 @@ void etrace_show(int fd, FILE *fp_out,
 		case TYPE_ARCH:
 			etrace_process_arch(&t);
 			break;
+		case TYPE_BARRIER:
+			/* We dont yet support queueing and sorting of
+			   pkgs. Ignore.  */
+			break;
 		case TYPE_INFO:
 			etrace_process_info(&t);
 			break;

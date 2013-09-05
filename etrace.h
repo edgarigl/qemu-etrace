@@ -4,6 +4,7 @@ enum {
     TYPE_NOTE = 3,
     TYPE_MEM = 4,
     TYPE_ARCH = 5,
+    TYPE_BARRIER = 6,
     TYPE_INFO = 0x4554,
 };
 
