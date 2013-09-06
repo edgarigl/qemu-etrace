@@ -227,6 +227,10 @@ FILE *open_trace_output(const char *outname)
 
 void validate_arguments(void)
 {
+	if (!args.trace_filename) {
+		fprintf(stderr, "No tracefile selected (--trace)\n");
+		exit(EXIT_FAILURE);
+	}
 	if (!args.coverage_output
 	    && (args.coverage_format != NONE
 		&& args.coverage_format != GCOV
