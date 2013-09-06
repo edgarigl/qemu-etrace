@@ -26,6 +26,9 @@ bool filename_is_likely_header(const char *s)
 		return false;
 
 	len = strlen(s);
+	if (len < 3)
+		return false;
+
 	if (s[len - 2] == '.'
 		&& s[len - 1] == 'h')
 		return true;
