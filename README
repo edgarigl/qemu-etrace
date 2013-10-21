@@ -9,7 +9,7 @@ un-intrusive.
 BUILD
 -----
 qemu-etrace depends on binutils libraries and on binutils programs at runtime.
-On debian/ubuntu machines, the package is binutils and binutils-dev.
+On debian/ubuntu machines, the package to install is binutils and binutils-dev.
 Preferably the binutils installation should be multi-arch.
 
 If your system is lacking these, you will have to download binutils and
@@ -23,6 +23,11 @@ $ make binutils -j4
 
 To build qemu-etrace:
 $ make -j4
+
+For convenience, the Makefile generates a qemu-etrace.sh shell script that
+pre-sets the binutils programm paths to the local binutils install.
+Just copy the qemu-etrace.sh script to somewhere in your path and use it
+instead of qemu-etrace.
 
 USAGE
 -----
@@ -40,6 +45,18 @@ $ qemu-etrace --trace /tmp/elog --elf vmlinux
 
 To create coverage lcov style info:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --trace-output none
+
+These trace files can quickly get very large. It is also possible to do
+the trace processing online (without intermediate files). This is done
+through UNIX sockets. To use a UNIX socket, prepend the trace path
+with unix:.
+
+Example:
+$ qemu-etrace --trace unix:/tmp/my-etrace-socket ...
+
+The QEMU side supports the same format.
+
+$ qemu ... -etrace unix:/tmp/my-etrace-socket ...
 
 Binutils
 --------
