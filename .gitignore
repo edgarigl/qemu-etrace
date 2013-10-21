@@ -1,4 +1,5 @@
 qemu-etrace
+qemu-etrace.sh
 .gdb_history
 .gdbinit
 *.a
