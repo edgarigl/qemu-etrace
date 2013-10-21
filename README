@@ -47,10 +47,16 @@ $ qemu-etrace --trace /tmp/elog
 To view a trace (with symbol info):
 $ qemu-etrace --trace /tmp/elog --elf vmlinux
 
+To create coverage ascii etrace style info:
+$ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.etrace --coverage-format etrace --trace-output none
+
 To create coverage lcov style info:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --trace-output none
 
-These trace files can quickly get very large. It is also possible to do
+Lcov info files need to be furthered processed by lcov tools, in this case
+genhtml to create beatiful html reports.
+
+These etrace (tmp/elog) files can quickly get very large. It is also possible to do
 the trace processing online (without intermediate files). This is done
 through UNIX sockets. To use a UNIX socket, prepend the trace path
 with unix:.
