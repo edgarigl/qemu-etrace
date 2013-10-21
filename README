@@ -18,16 +18,20 @@ install it somewhere. Plus edit the Makefile.
 To simplify the binutils build, the Makefile has a rule that will download,
 build and install a local binutils installation (in the qemu-etrace src dir).
 
+For convenience, the Makefile also generates a qemu-etrace.sh shell script
+that pre-sets some qemu-etrace arguments pointing to binutils programm paths
+into to the local binutils install.
+
 The make binutils step is optional, depending on your system:
 $ make binutils -j4
 
 To build qemu-etrace:
 $ make -j4
 
-For convenience, the Makefile generates a qemu-etrace.sh shell script that
-pre-sets the binutils programm paths to the local binutils install.
-Just copy the qemu-etrace.sh script to somewhere in your path and use it
-instead of qemu-etrace.
+Copy qemu-etrace.sh (if you used a local binutils) or qemu-etrace if you
+installed the system packages to somewhere in your PATH.
+
+$ cp qemu-etrace.sh ~/bin/
 
 USAGE
 -----
