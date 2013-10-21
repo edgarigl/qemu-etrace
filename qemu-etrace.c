@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#include "trace-open.h"
 #include "coverage.h"
 #include "etrace.h"
 #include "util.h"
@@ -254,7 +255,7 @@ int main(int argc, char **argv)
 	parse_arguments(argc, argv);
 	validate_arguments();
 
-	fd = open(args.trace_filename, O_RDONLY);
+	fd = trace_open(args.trace_filename);
 	if (fd < 0) {
 		perror(args.trace_filename);
 		exit(1);

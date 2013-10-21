@@ -12,6 +12,7 @@ LDLIBS += -liberty
 LDLIBS += -lz
 
 OBJS += qemu-etrace.o
+OBJS += trace-open.o
 OBJS += util.o
 OBJS += safeio.o
 OBJS += run.o

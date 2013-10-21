@@ -814,16 +814,16 @@ static void gcov_emit_qcov_file(struct gcov_file *f,
 
 	outname = gcov_map_srcfilename(f->filename,
                                        gcov_strip, gcov_prefix, false, ".qcov");
+	printf("%s: %s\n", __func__, outname);
 	if (!outname) {
-		if (strcmp("??", f->filename))
-			fprintf(stderr, "unable to open %s\n", outname);
-		perror(outname);
 		goto done;
 	}
 
 	fp_out = fopen(outname, "w+");
-	if (!fp_out)
+	if (!fp_out) {
+		perror(outname);
 		goto done;
+	}
 
 	fprintf(stderr, "creating %s\n", outname);
 
