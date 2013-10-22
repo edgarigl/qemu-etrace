@@ -19,7 +19,7 @@ To simplify the binutils build, the Makefile has a rule that will download,
 build and install a local binutils installation (in the qemu-etrace src dir).
 
 For convenience, the Makefile also generates a qemu-etrace.sh shell script
-that pre-sets some qemu-etrace arguments pointing to binutils programm paths
+that pre-sets some qemu-etrace arguments pointing to binutils program paths
 into to the local binutils install.
 
 The make binutils step is optional, depending on your system:
@@ -47,14 +47,14 @@ $ qemu-etrace --trace /tmp/elog
 To view a trace (with symbol info):
 $ qemu-etrace --trace /tmp/elog --elf vmlinux
 
-To create coverage ascii etrace style info:
+To create coverage ASCII etrace style info:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.etrace --coverage-format etrace --trace-output none
 
 To create coverage lcov style info:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --trace-output none
 
 Lcov info files need to be furthered processed by lcov tools, in this case
-genhtml to create beatiful html reports.
+genhtml to create beautiful html reports.
 
 These etrace (tmp/elog) files can quickly get very large. It is also possible to do
 the trace processing online (without intermediate files). This is done
@@ -82,7 +82,7 @@ in a way that allows it to generate coverage and profiling information.
 It supports several coverage or profiling output file-formats.
 
 etrace
-	An internal ascii format, human readable. May change at
+	An internal ASCII format, human readable. May change at
 	any time so don't build tools around this yet.
 
 cachegrind
