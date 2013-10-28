@@ -268,7 +268,8 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 			if (!sym)
 				sym = sym_get_unknown(t->sym_tree);
 
-			sym_update_cov(sym, start, end, duration);
+			if (sym)
+				sym_update_cov(sym, start, end, duration);
 		}
 		now += duration;
 	}

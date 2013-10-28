@@ -168,6 +168,8 @@ static struct sym *sym_last_lookup(struct sym_store *ss, uint64_t addr)
 struct sym *sym_get_unknown(void **store)
 {
 	struct sym_store *ss = *store;
+	if (!ss)
+		return NULL;
 	return &ss->unknown;
 }
 
