@@ -56,6 +56,10 @@ $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --cover
 Lcov info files need to be furthered processed by lcov tools, in this case
 genhtml to create beautiful html reports.
 
+Example (cov.info beeing the output from qemu-etrace):
+$ mkdir html-outputdir
+$ genhtml -o html-outputdir cov.info
+
 These etrace (tmp/elog) files can quickly get very large. It is also possible to do
 the trace processing online (without intermediate files). This is done
 through UNIX sockets. To use a UNIX socket, prepend the trace path
