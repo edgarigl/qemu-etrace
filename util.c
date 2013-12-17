@@ -17,6 +17,13 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+bool fd_is_socket(int fd)
+{
+	struct stat statbuf;
+
+	fstat(fd, &statbuf);
+	return S_ISSOCK(statbuf.st_mode);
+}
 
 bool filename_is_likely_header(const char *s)
 {

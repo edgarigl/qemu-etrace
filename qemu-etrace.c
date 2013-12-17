@@ -12,6 +12,7 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
+#include <signal.h>
 #include <getopt.h>
 
 #include <sys/types.h>
@@ -244,6 +245,12 @@ void validate_arguments(void)
 	}
 }
 
+sig_atomic_t got_sigint = false;
+
+void sigint_handler(int s) {
+	got_sigint = true;
+}
+
 int main(int argc, char **argv)
 {
 	FILE *trace_out;
@@ -254,12 +261,6 @@ int main(int argc, char **argv)
 
 	parse_arguments(argc, argv);
 	validate_arguments();
-
-	fd = trace_open(args.trace_filename);
-	if (fd < 0) {
-		perror(args.trace_filename);
-		exit(1);
-	}
 
 	if (args.elf) {
 		sym_read_from_elf(&sym_tree, args.nm, args.elf);
@@ -273,13 +274,33 @@ int main(int argc, char **argv)
 
 	trace_out = open_trace_output(args.trace_output);
 
-	etrace_show(fd, trace_out,
-		    args.objdump, args.machine,
-		    args.guest_objdump, args.guest_machine,
-		    &sym_tree, args.coverage_format);
+
+	{
+		struct sigaction shandler;
+
+		shandler.sa_handler = sigint_handler;
+		sigemptyset(&shandler.sa_mask);
+		shandler.sa_flags = 0;
+
+		sigaction(SIGINT, &shandler, NULL);
+	}
+
+	do {
+		fd = trace_open(args.trace_filename);
+		if (fd < 0 && !got_sigint) {
+			perror(args.trace_filename);
+			exit(1);
+		}
+
+		etrace_show(fd, trace_out,
+			    args.objdump, args.machine,
+			    args.guest_objdump, args.guest_machine,
+			    &sym_tree, args.coverage_format);
+	} while (fd_is_socket(fd) && !got_sigint);
+
 	sym_show_stats(&sym_tree);
 
-
+	printf("process\n");
 	if (args.coverage_format != NONE)
 		coverage_emit(&sym_tree, args.coverage_output,
 				args.coverage_format,

@@ -65,6 +65,7 @@ static int sk_unix_client(const char *descr)
 	listen(fd, 5);
 	nfd = accept(fd, NULL, NULL);
 	close(fd);
+	printf("returning %d\n", nfd);
 	return nfd;
 fail:
 	close(fd);
