@@ -246,9 +246,14 @@ void validate_arguments(void)
 }
 
 sig_atomic_t got_sigint = false;
+sig_atomic_t block_sigint_exit = false;
 
 void sigint_handler(int s) {
 	got_sigint = true;
+
+	if (!block_sigint_exit) {
+		exit(EXIT_SUCCESS);
+	}
 }
 
 int main(int argc, char **argv)
@@ -287,9 +292,19 @@ int main(int argc, char **argv)
 
 	do {
 		fd = trace_open(args.trace_filename);
-		if (fd < 0 && !got_sigint) {
+		if (fd < 0) {
 			perror(args.trace_filename);
-			exit(1);
+			if (block_sigint_exit) {
+				break;
+			}
+			exit(EXIT_FAILURE);
+		}
+		/* If we are dealing with sockets, we want to handle
+		 * SIGINT synchronously with a post process of the
+		 * stats prior to exit().
+		 */
+		if (fd >=0 && fd_is_socket(fd)) {
+			block_sigint_exit = true;
 		}
 
 		etrace_show(fd, trace_out,
@@ -300,7 +315,6 @@ int main(int argc, char **argv)
 
 	sym_show_stats(&sym_tree);
 
-	printf("process\n");
 	if (args.coverage_format != NONE)
 		coverage_emit(&sym_tree, args.coverage_output,
 				args.coverage_format,

@@ -81,6 +81,7 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 		}
 	}
 
+	fprintf(stderr, "Generating coverage output\n");
 	switch (fmt) {
 	case ETRACE:
 		coverage_dump(s, nr_syms, unknown, fp);
