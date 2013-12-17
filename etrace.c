@@ -268,8 +268,20 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 			if (!sym)
 				sym = sym_get_unknown(t->sym_tree);
 
-			if (sym)
-				sym_update_cov(sym, start, end, duration);
+			if (sym) {
+				uint64_t addr = start;
+				while (sym && addr < end) {
+					uint32_t tend = end;
+
+					if (tend > (sym->addr + sym->size)) {
+						tend = sym->addr + sym->size;
+						printf("WARNING: fixup sym %s has spans over to another symbol\n", sym->name);
+					}
+					sym_update_cov(sym, addr, tend, duration);
+					addr = tend;
+					sym = sym_lookup_by_addr(t->sym_tree, addr);
+				}
+			}
 		}
 		now += duration;
 	}
