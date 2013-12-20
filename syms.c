@@ -415,7 +415,7 @@ void sym_build_linemap(void **store, const char *addr2line, const char *elf)
 			if (strcmp(filename, symp->src_filename) == 0)
 				loc->filename = symp->src_filename;
 			else
-				loc->filename = strdup(filename);
+				loc->filename = filename_sanitize(filename);
 			loc->linenr = linenr;
 			if (inlined)
 				loc->flags |= LOC_F_INLINED;
