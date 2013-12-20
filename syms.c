@@ -24,6 +24,7 @@
 
 #include <search.h>
 
+#include "filename.h"
 #include "util.h"
 #include "safeio.h"
 #include "syms.h"
@@ -389,7 +390,7 @@ void sym_build_linemap(void **store, const char *addr2line, const char *elf)
 
 			/* FIXME add a str store to reuse these.  */
 			if (!symp->src_filename)
-				symp->src_filename = strdup(filename);
+				symp->src_filename = filename_sanitize(filename);
 
 			if (!symp->linemap)
 				sym_alloc_linemap(symp);
