@@ -315,7 +315,8 @@ void etrace_process_event_u64(struct etracer *t)
 	if (!t->fp_out)
 		return;
 
-	fprintf(t->fp_out, "EV %s.%s %" PRIu64 "\n",
+	fprintf(t->fp_out, "EV %" PRIu64 " %u %s.%s %" PRIu64 "\n",
+		event->time, event->unit_id,
 		event->names, event->names + event->dev_name_len, event->val);
 }
 
