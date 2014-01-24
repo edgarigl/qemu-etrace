@@ -5,6 +5,7 @@ enum {
     TYPE_MEM = 4,
     TYPE_ARCH = 5,
     TYPE_BARRIER = 6,
+    TYPE_EVENT_U64 = 7,
     TYPE_INFO = 0x4554,
 } __attribute__ ((packed)) ;
 
@@ -83,6 +84,15 @@ struct etrace_tb {
     uint8_t data8[0];
 } __attribute__ ((packed));
 
+struct etrace_event_u64 {
+    uint64_t time;
+    uint64_t val;
+    uint16_t unit_id;
+    uint16_t dev_name_len;
+    uint16_t event_name_len;
+    uint8_t names[0];
+} __attribute__ ((packed));
+
 struct etrace_pkg {
 	struct etrace_hdr hdr;
 	union {
@@ -92,6 +102,7 @@ struct etrace_pkg {
 		struct etrace_tb tb;
 		struct etrace_note note;
 		struct etrace_mem mem;
+		struct etrace_event_u64 event_u64;
 		uint8_t   u8[0];
 		uint16_t u16[0];
 		uint32_t u32[0];
