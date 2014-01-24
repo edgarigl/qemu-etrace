@@ -20,6 +20,7 @@
 #include "syms.h"
 #include "disas.h"
 #include "coverage.h"
+#include "trace.h"
 #include "etrace.h"
 
 #define ETRACE_MIN_VERSION_MAJOR 0
@@ -323,7 +324,8 @@ void etrace_process_event_u64(struct etracer *t)
 void etrace_show(int fd, FILE *fp_out,
 		 const char *objdump, const char *machine,
 		 const char *guest_objdump, const char *guest_machine,
-		 void **sym_tree, enum cov_format cov_fmt)
+		 void **sym_tree, enum cov_format cov_fmt,
+		 enum trace_format trace_fmt)
 {
 	struct etracer t;
 	bool unknown_pkg_warn = false;

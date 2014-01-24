@@ -23,16 +23,19 @@
 
 #include "trace-open.h"
 #include "coverage.h"
+#include "syms.h"
+#include "trace.h"
 #include "etrace.h"
 #include "util.h"
-#include "syms.h"
 #include "run.h"
 #include <bfd.h>
 
-struct {
+struct format_map {
 	const char *str;
-	enum cov_format val;
-} covmap[] = {
+	int val;
+};
+
+struct format_map cov_fmt_map[] = {
 	{ "none", NONE },
 	{ "etrace", ETRACE },
 	{ "cachegrind", CACHEGRIND },
@@ -42,18 +45,35 @@ struct {
 	{ NULL, NONE },
 };
 
-static inline enum cov_format map_covformat(const char *s)
+struct format_map trace_fmt_map[] = {
+	{ "none", TRACE_NONE },
+	{ "etrace", TRACE_ETRACE },
+	{ "vcd", TRACE_VCD },
+	{ NULL, TRACE_NONE },
+};
+
+int map_format(struct format_map *map, const char *s)
 {
 	int i = 0;
 
-	while (covmap[i].str) {
-		if (strcmp(covmap[i].str, s) == 0)
-			return covmap[i].val;
+	while (map[i].str) {
+		if (strcmp(map[i].str, s) == 0)
+			return map[i].val;
 		i++;
 	}
 	fprintf(stderr, "Invalid coverage format %s\n", s);
 	exit(EXIT_FAILURE);
-	return NONE;
+
+}
+
+static inline enum cov_format map_covformat(const char *s)
+{
+	return map_format(cov_fmt_map, s);
+}
+
+static inline enum trace_format map_traceformat(const char *s)
+{
+	return map_format(trace_fmt_map, s);
 }
 
 struct
@@ -67,6 +87,7 @@ struct
 	char *guest_objdump;
 	char *machine;
 	char *guest_machine;
+	enum trace_format trace_format;
 	enum cov_format coverage_format;
 	char *coverage_output;
 	char *gcov_strip;
@@ -93,6 +114,7 @@ static const char etrace_usagestr[] = \
 "qemu-etrace " PACKAGE_VERSION "\n"
 "-h | --help            Help.\n"
 "--trace                Trace filename.\n"
+"--trace-format         Trace output format .\n"
 "--trace-output         Decoded trace output filename.\n"
 "--elf                  Elf file of traced app.\n"
 "--addr2line            Path to addr2line binary.\n"
@@ -112,10 +134,18 @@ void usage(void)
 	unsigned int i;
 	puts(etrace_usagestr);
 
+	printf("\nSupported trace formats:\n");
+	i = 0;
+	while (trace_fmt_map[i].str) {
+		printf("%s%s", i == 0 ? "" : ",", trace_fmt_map[i].str);
+		i++;
+	}
+	printf("\n");
+
 	printf("\nSupported coverage formats:\n");
 	i = 0;
-	while (covmap[i].str) {
-		printf("%s%s", i == 0 ? "" : ",", covmap[i].str);
+	while (cov_fmt_map[i].str) {
+		printf("%s%s", i == 0 ? "" : ",", cov_fmt_map[i].str);
 		i++;
 	}
 	printf("\n");
@@ -130,6 +160,7 @@ static void parse_arguments(int argc, char **argv)
 		static struct option long_options[] = {
 			{"help",          no_argument, 0, 'h' },
 			{"trace",         required_argument, 0, 't' },
+			{"trace-format",  required_argument, 0, 'q' },
 			{"trace-output",  required_argument, 0, 'o' },
 			{"elf",           required_argument, 0, 'e' },
 			{"addr2line",     required_argument, 0, 'a' },
@@ -194,6 +225,9 @@ static void parse_arguments(int argc, char **argv)
 			break;
 		case 'p':
 			args.gcov_prefix = optarg;
+			break;
+		case 'q':
+			args.trace_format = map_traceformat(optarg);
 			break;
 		default:
 			usage();
@@ -310,7 +344,7 @@ int main(int argc, char **argv)
 		etrace_show(fd, trace_out,
 			    args.objdump, args.machine,
 			    args.guest_objdump, args.guest_machine,
-			    &sym_tree, args.coverage_format);
+			    &sym_tree, args.coverage_format, args.trace_format);
 	} while (fd_is_socket(fd) && !got_sigint);
 
 	sym_show_stats(&sym_tree);
