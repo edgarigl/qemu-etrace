@@ -10,8 +10,7 @@ import etrace
 
 import curses
 
-from elftools.common.py3compat import maxint, bytes2str
-from elftools.elf.elffile import ELFFile
+import addr2line
 
 def usage():
 	print "--help          Show help"
@@ -34,14 +33,18 @@ class traceview(object):
 		self.line = -1
 		self.search_sym = ""
 		self.debugf = None
+		self.addrloc = {}
+
 		if elf_name != None:
+			self.a2l = addr2line.addr2line(elf_name, comp_dir)
+
 			self.screen.clear()
 			self.screen.addstr(0, 0, "Processing ELF file.")
+			s = self.a2l.map(0xc0005000)
+			self.debug(str(s))
+			s = self.a2l.map(0xff)
+			self.debug(str(s))
 			self.screen.refresh()
-			self.ef = open(elf_name, 'rb')
-			self.elffile = ELFFile(self.ef)
-			self.dw = self.elffile.get_dwarf_info()
-			self.dw_loc = self.generate_file_line()
 			self.screen.clear()
 
 	def debug(self, str):
@@ -52,72 +55,37 @@ class traceview(object):
 
 	def update_file_cache(self, fname):
 		try:
-			f = open(fname, 'r')
+			lines = self.fcache[fname]["lines"]
+			return lines
 		except:
-			return False
+			pass
 
-		self.fcache[fname] = { "f" : f }
-		self.fcache[fname] = { "lines" : f.readlines() }
-		return True
+		# populate the entry
+		full_fname = fname
+		if self.comp_dir:
+			full_fname = "%s/%s" % (self.comp_dir, fname)
+		try:
+			f = open(full_fname, 'r')
+		except:
+			return None
 
-	def generate_file_line(self):
-		arr = {}
-		prev_pos = None
+		if len(self.fcache) > 256:
+			# flush it all
+			self.fcache = {}
 
-		# Go over all the line programs in the DWARF information,
-		# looking for one that describes the given address.
-		for CU in self.dw.iter_CUs():
-			lp = self.dw.line_program_for_CU(CU)
-			prevstate = None
-			top_DIE = CU.get_top_DIE()
+		self.debug("update cahce %s" % fname)
+		lines = f.readlines()
+		self.fcache[fname] = { "lines" : lines }
+		f.close()
+		self.debug("close file and got %d lines" % len(lines))
+		return lines
 
-			if self.comp_dir == None:
-				self.comp_dir = top_DIE.attributes['DW_AT_comp_dir'].value
+	def show_file_contents(self, filename, line_nr):
+		lines = self.update_file_cache(filename)
+		if lines == None:
+			self.debug("no src for %s" % filename)
+			return
 
-			for et in lp.get_entries():
-				if et.state is None or et.state.end_sequence:
-					continue
-
-				if prev_pos:
-					for i in range(prev_pos,
-						et.state.address - 1, 4):
-						arr[i] = arr[prev_pos]
-
-				filename = lp['file_entry'][et.state.file - 1].name
-
-				dir_i = lp['file_entry'][et.state.file - 1].dir_index
-				if dir_i > 0:
-					dir = lp['include_directory'][dir_i - 1]
-				else:
-					dir = b'.'
-				filename = '%s/%s/%s' % (self.comp_dir,
-							bytes2str(dir), filename)
-				self.update_file_cache(filename)
-				arr[et.state.address] = [filename, et.state.line - 1, ""]
-				print("%x:%s\r" % (et.state.address, filename))
-				prev_pos = et.state.address
-				prevstate = et.state
-
-			for DIE in CU.iter_DIEs():
-				name = ""
-				if DIE.tag == 'DW_TAG_subprogram':
-					try:
-						lowpc = DIE.attributes['DW_AT_low_pc'].value
-						highpc = DIE.attributes['DW_AT_high_pc'].value
-					except:
-						continue
-					for adr in range(lowpc & ~3, highpc, 4):
-						try:
-							name = DIE.attributes['DW_AT_name'].value
-						except KeyError:
-							continue
-						try:
-							arr[adr][2] = name
-						except:
-							continue
-		return arr
-
-	def show_file_contents(self, lines, line_nr):
 		(h, w) = self.screen.getmaxyx()
 		h -= 4
 		start = line_nr - h / 2
@@ -125,7 +93,7 @@ class traceview(object):
 			start = 0
 		for i in range(4, h - 1):
 			try:
-				str = "%4.4d:%s" % (start + i, lines[start + i])
+				str = "%4d:%s" % (start + i, lines[start + i])
 			except:
 				break
 			if (start + i) == line_nr:
@@ -206,16 +174,23 @@ class traceview(object):
 
 			self.file = ""
 			self.line = -1
-			if self.dw_loc:
-				lines = None
-				try:
-					[self.file, self.line, self.symname] = self.dw_loc[self.record_pos]
-					lines = self.fcache[self.file]["lines"]
-				except:
-					pass
-				if lines:
-					self.prev_file = self.file
-					self.prev_line = self.line
+
+			self.debug("lookup %x" % self.record_pos)
+			try:
+				loc = self.addrloc[self.record_pos]
+			except:
+				loc = self.a2l.map(self.record_pos)
+				self.addrloc[self.record_pos] = loc
+			self.debug(str(loc))
+			self.symname = loc[0]
+			self.file = loc[1][0]
+			if self.file == "??":
+				self.file = ""
+				self.line = -1
+				return r
+			self.line = int(loc[1][1]) - 1
+#			self.debug("file=%s" % self.file)
+#			self.debug("line=%s" % self.line)
 
 		return r
 
@@ -326,12 +301,13 @@ class traceview(object):
 					curses.A_REVERSE)
 
 				try:
-					lines = self.fcache[self.file]["lines"]
-					self.show_file_contents(lines, self.line)
+					self.show_file_contents(self.file, self.line)
 				except:
 					pass
 				self.screen.refresh()
 
+			self.prev_file = self.file
+			self.prev_line = self.line
 			r = None
 			c = self.screen.getch()
 
