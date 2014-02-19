@@ -4,6 +4,7 @@
 
 import os
 import sys
+import string
 import subprocess
 
 class addr2line(object):
@@ -12,17 +13,24 @@ class addr2line(object):
 		if comp_dir == None:
 			cmd += ['-A']
 #		cmd = ["cat"]
-		self.p = subprocess.Popen(cmd,
+		self.cmd = cmd
+		self.debugf = None
+
+	def debug(self, str):
+		if self.debugf == None:
+			self.debugf = open(".debug.addr2line", 'w+')
+		self.debugf.write(str)
+		self.debugf.write("\n")
+
+	def map(self, addr):
+		self.p = subprocess.Popen(self.cmd,
 					shell=False,
 					stdin=subprocess.PIPE,
 					stdout=subprocess.PIPE,
 					stderr=subprocess.STDOUT, bufsize=0)
+		(out, err) = self.p.communicate("0x%x\n" % addr)
 
-	def map(self, addr):
-		self.p.stdin.write("0x%x\n\n" % addr);
-		sym = self.p.stdout.readline().rstrip()
-		loc = self.p.stdout.readline().rstrip()
-		loc = loc.split(':')
-		dummy = self.p.stdout.readline()
-		dummy = self.p.stdout.readline()
+		lines = string.split(out, '\n')
+		sym = lines[0]
+		loc = lines[1].split(':')
 		return [sym, loc]
