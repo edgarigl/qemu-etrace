@@ -41,10 +41,6 @@ class traceview(object):
 
 			self.screen.clear()
 			self.screen.addstr(0, 0, "Processing ELF file.")
-			s = self.a2l.map(0xc0005000)
-			self.debug(str(s))
-			s = self.a2l.map(0xff)
-			self.debug(str(s))
 			self.screen.refresh()
 			self.screen.addstr(1, 0, "Done. Step into first src line")
 			self.screen.refresh()
@@ -85,7 +81,6 @@ class traceview(object):
 	def show_file_contents(self, filename, line_nr):
 		lines = self.update_file_cache(filename)
 		if lines == None:
-			self.debug("no src for %s" % filename)
 			return
 
 		(h, w) = self.screen.getmaxyx()
