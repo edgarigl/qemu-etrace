@@ -18,7 +18,8 @@ def usage():
 
 class traceview(object):
 
-	def __init__(self, screen, e, elf_name, comp_dir):
+	def __init__(self, screen, e, elf_name, comp_dir, cfg):
+		self.cfg = cfg
 		self.fcache = {}
 		self.e = e
 		self.comp_dir = comp_dir
@@ -45,7 +46,8 @@ class traceview(object):
 			s = self.a2l.map(0xff)
 			self.debug(str(s))
 			self.screen.refresh()
-			self.screen.clear()
+			self.screen.addstr(1, 0, "Done. Step into first src line")
+			self.screen.refresh()
 
 	def debug(self, str):
 		if self.debugf == None:
@@ -73,11 +75,11 @@ class traceview(object):
 			# flush it all
 			self.fcache = {}
 
-		self.debug("update cahce %s" % fname)
+#		self.debug("update cahce %s" % fname)
 		lines = f.readlines()
 		self.fcache[fname] = { "lines" : lines }
 		f.close()
-		self.debug("close file and got %d lines" % len(lines))
+#		self.debug("close file and got %d lines" % len(lines))
 		return lines
 
 	def show_file_contents(self, filename, line_nr):
@@ -162,6 +164,14 @@ class traceview(object):
 				r = self.step_existing_record_back(None)
 		return r
 
+	def map_address_to_loc(self, address):
+		if 'map_address' in self.cfg.keys():
+			address = self.cfg['map_address'](address)
+
+		loc = self.a2l.map(address)
+		return loc
+
+
 	def step_trace_record(self, count):
 		goon = True
 		r = self.step_record(count)
@@ -175,13 +185,13 @@ class traceview(object):
 			self.file = ""
 			self.line = -1
 
-			self.debug("lookup %x" % self.record_pos)
+#			self.debug("lookup %x" % self.record_pos)
 			try:
 				loc = self.addrloc[self.record_pos]
 			except:
-				loc = self.a2l.map(self.record_pos)
+				loc = self.map_address_to_loc(self.record_pos)
 				self.addrloc[self.record_pos] = loc
-			self.debug(str(loc))
+#			self.debug(str(loc))
 			self.symname = loc[0]
 			self.file = loc[1][0]
 			if self.file == "??":
@@ -267,8 +277,11 @@ class traceview(object):
 					r = self.step_new_sym()
 				r = self.step_new_sym(self.search_sym)
 			elif c == ord('/'):
+				old_r = self.record;
 				self.search_sym = self.search_for_sym()
 				r = self.step_new_sym(self.search_sym)
+				if (r == None):
+					r = old_r
 			elif c == ord('g'):
 				self.e.reset()
 				r = self.step_new_exec(count = 1)
@@ -305,6 +318,11 @@ class traceview(object):
 				except:
 					pass
 				self.screen.refresh()
+			else:
+				self.screen.addstr(3, 0,
+					"None", curses.A_REVERSE);
+
+				self.screen.refresh()
 
 			self.prev_file = self.file
 			self.prev_line = self.line
@@ -321,6 +339,7 @@ def main(screen):
 					"h",
 					["help",
 					 "comp-dir=",
+					 "config=",
 					 "trace=",
 					 "elf=",
 					]
@@ -330,11 +349,15 @@ def main(screen):
 		usage()
 		sys.exit(1)
 
+	cfg = {}
+
 	for o, a in opts:
 		if o == "--trace":
 			args_trace = a
 		elif o == "--comp-dir":
 			args_comp_dir = a
+		elif o == "--config":
+			execfile(a, cfg)
 		elif o == "--elf":
 			args_elf = a
 		elif o in ("-h", "--help"):
@@ -352,7 +375,7 @@ def main(screen):
 	f = open(args_trace, 'rb')
 	e = etrace.etrace(f)
 
-	tv = traceview(screen, e, args_elf, args_comp_dir)
+	tv = traceview(screen, e, args_elf, args_comp_dir, cfg)
 
 	tv.loop()
 
