@@ -35,6 +35,8 @@ class traceview(object):
 		self.search_sym = ""
 		self.debugf = None
 		self.addrloc = {}
+		self.log = []
+		self.log_lines =15
 
 		if elf_name != None:
 			self.a2l = addr2line.addr2line(elf_name, comp_dir)
@@ -84,6 +86,8 @@ class traceview(object):
 			return
 
 		(h, w) = self.screen.getmaxyx()
+		if (h > 60):
+			h -= self.log_lines + 1
 		h -= 4
 		start = line_nr - h / 2
 		if start < 0:
@@ -97,6 +101,21 @@ class traceview(object):
 				self.screen.addstr(i, 0, str, curses.A_REVERSE)
 			else:
 				self.screen.addstr(i, 0, str)
+
+	def show_log(self):
+		(h, w) = self.screen.getmaxyx()
+		if (h <= 60):
+			return
+
+		if len(self.log) == 0:
+			return
+		pos = 0
+		if len(self.log) > self.log_lines:
+			pos = len(self.log) - self.log_lines - 1
+		for i in range(0, self.log_lines):
+			if i >= len(self.log):
+				break
+			self.screen.addstr(h - self.log_lines + i - 1, 0, self.log[pos + i])
 
 	def step_end_of_subrecord(self, r):
 		self.record_pos = r.all.ex.ex32[self.record_idx].end - 4
@@ -196,6 +215,26 @@ class traceview(object):
 			self.line = int(loc[1][1]) - 1
 #			self.debug("file=%s" % self.file)
 #			self.debug("line=%s" % self.line)
+		elif r.hdr.type == self.e.TYPE_MEM:
+			str = "read"
+			if r.all.mem.attr & self.e.MEM_WRITE:
+				str = "write"
+			self.log.append("mem %s %lx = %lx" %
+				(str, r.all.mem.paddr, r.all.mem.value))
+			if len(self.log) > 100:
+				self.log.pop(0)
+		elif r.hdr.type == self.e.TYPE_EVENT_U64:
+			val = r.all.event_u64.val
+			prev = r.all.event_u64.prev_val
+			if count < 0:
+				val = prev
+				prev = r.all.event_u64.val
+
+			self.log.append("event %s %s %lx prev=%s" %
+				(r.all.dev_name,
+				r.all.event_name,
+				r.all.event_u64.val, r.all.event_u64.prev_val))
+
 
 		return r
 
@@ -209,7 +248,9 @@ class traceview(object):
 			if not r:
 				return None
 
-			if r.hdr.type == self.e.TYPE_EXEC:
+			if r.hdr.type == self.e.TYPE_EXEC \
+				or r.hdr.type == self.e.TYPE_EVENT_U64 \
+				or r.hdr.type == self.e.TYPE_MEM:
 				goon = False
 		return r
 
@@ -222,6 +263,9 @@ class traceview(object):
 			r = self.step_trace_record(count)
 			if not r:
 				return None
+
+			if r.hdr.type != self.e.TYPE_EXEC:
+				return r
 
 			if pfile != self.file:
 				goon = False
@@ -290,9 +334,10 @@ class traceview(object):
 
 			if r:
 				self.screen.clear()
-				self.screen.addstr(0, 0,
-					"%d: type=%s %x len=%d PC=%x (%x-%x)" \
-					% (self.e.r_idx, self.e.type_to_name(r.hdr.type),
+				if r.hdr.type == self.e.TYPE_EXEC:
+					self.screen.addstr(0, 0,
+						"%d: type=%s %x len=%d PC=%x (%x-%x)" \
+						% (self.e.r_idx, self.e.type_to_name(r.hdr.type),
 						r.hdr.type, r.hdr.len, self.record_pos,
 						r.all.ex.ex32[self.record_idx].start,
 						r.all.ex.ex32[self.record_idx].end),
@@ -312,6 +357,7 @@ class traceview(object):
 					self.show_file_contents(self.file, self.line)
 				except:
 					pass
+				self.show_log()
 				self.screen.refresh()
 			else:
 				self.screen.addstr(3, 0,
