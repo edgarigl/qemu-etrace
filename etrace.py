@@ -64,13 +64,29 @@ class etrace_mem(Structure):
 		("padd", c_uint8 * 3),
 	]
 
+class etrace_event_u64(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("flags", c_uint32),
+		("unit_id", c_uint16),
+		("reserved", c_uint16),
+		("time", c_uint64),
+		("val", c_uint64),
+		("prev_val", c_uint64),
+		("dev_name_len", c_uint16),
+		("event_name_len", c_uint16),
+	]
+
 class etrace_all_subtypes(Union):
 	_pack_ = 1
 	_fields_ = [
 		("p8", POINTER(c_uint8)),
+		("dev_name", c_char_p),
+		("event_name", c_char_p),
 		("ex", etrace_exec_p),
 		("arch", etrace_arch_gh),
 		("mem", etrace_mem),
+		("event_u64", etrace_event_u64),
 		("texec", etrace_exec)
 	]
 class etrace_pkg(Structure):
@@ -88,11 +104,14 @@ class etrace(object):
 	TYPE_MEM = 4
 	TYPE_ARCH = 5
 	TYPE_BARRIER = 6
-	TYPE_EVENT_U64 = 7
+	TYPE_EVENT_U64_OLD = 7
+	TYPE_EVENT_U64 = 8
 	TYPE_INFO = 0x4554
 
 	MEM_READ  = (0 << 0)
 	MEM_WRITE = (1 << 0)
+
+	ETRACE_EVU64_F_PREV_VAL = (1 << 0)
 
 	R_POS_CACHESIZE = 1024
 
@@ -182,6 +201,14 @@ class etrace(object):
 
 		elif pkg.hdr.type == self.TYPE_MEM:
 			self.f.readinto(pkg.all.mem)
+		elif pkg.hdr.type == self.TYPE_EVENT_U64:
+			self.f.readinto(pkg.all.event_u64)
+			dev_name = self.f.read(pkg.all.event_u64.dev_name_len - 1)
+			dummy = self.f.read(1)
+			ev_name = self.f.read(pkg.all.event_u64.event_name_len - 1)
+			dummy = self.f.read(1)
+			pkg.all.event_name = ev_name
+			pkg.all.dev_name = dev_name
 		elif pkg.hdr.type == self.TYPE_EXEC:
 			len = (pkg.hdr.len - sizeof(pkg.all.texec))
 			len /= sizeof(self.etype)
