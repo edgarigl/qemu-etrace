@@ -310,6 +310,17 @@ void etrace_process_mem(struct etracer *t)
 		mem->value);
 }
 
+void etrace_process_old_event_u64(struct etracer *t)
+{
+	struct etrace_event_u64 *event = &t->pkg->event_u64;
+	if (!t->fp_out)
+		return;
+
+	fprintf(t->fp_out, "EV %" PRIu64 " %u %s.%s %" PRIu64 "\n",
+		event->time, event->unit_id,
+		event->names, event->names + event->dev_name_len, event->val);
+}
+
 void etrace_process_event_u64(struct etracer *t)
 {
 	struct etrace_event_u64 *event = &t->pkg->event_u64;
@@ -365,6 +376,9 @@ void etrace_show(int fd, FILE *fp_out,
 			break;
 		case TYPE_INFO:
 			etrace_process_info(&t);
+			break;
+		case TYPE_OLD_EVENT_U64:
+			etrace_process_old_event_u64(&t);
 			break;
 		case TYPE_EVENT_U64:
 			etrace_process_event_u64(&t);
