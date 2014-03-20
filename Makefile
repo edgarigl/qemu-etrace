@@ -8,6 +8,7 @@ CFLAGS  += -Wall -O3 -g
 #LDFLAGS += -static
 LDLIBS += -lbfd
 LDLIBS += -lopcodes
+LDLIBS += -lbfd
 LDLIBS += -liberty
 LDLIBS += -lz
 
