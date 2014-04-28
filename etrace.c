@@ -28,18 +28,9 @@
 #define MAX_PKG (2 * 1024 * 1024)
 
 struct etracer {
-	int fd;
-	FILE *fp_out;
-	void **sym_tree;
-
+	struct tracer tr;
 	struct etrace_info_data info;
 	struct etrace_arch arch;
-
-	struct {
-		const char *objdump;
-		const char *machine;
-	} host, guest;
-
 	struct etrace_pkg *pkg;
 };
 
@@ -57,7 +48,7 @@ static bool etrace_read_pkg(struct etracer *t, struct etrace_pkg *pkg)
 {
 	ssize_t r;
 
-	if (!etrace_read_hdr(t->fd, &pkg->hdr))
+	if (!etrace_read_hdr(t->tr.fd, &pkg->hdr))
 		return false;
 
 	if (pkg->hdr.len > MAX_PKG) {
@@ -65,7 +56,7 @@ static bool etrace_read_pkg(struct etracer *t, struct etrace_pkg *pkg)
 		return false;
 	}
 
-	r = safe_read(t->fd, &pkg->u8[0], pkg->hdr.len);
+	r = safe_read(t->tr.fd, &pkg->u8[0], pkg->hdr.len);
 	if (r != pkg->hdr.len)
 		return false;
 
@@ -94,10 +85,10 @@ void etrace_process_arch(struct etracer *t)
 {
 	t->arch = t->pkg->arch;
 
-	if (t->fp_out) {
-		fprintf(t->fp_out, "guest arch=%d %dbit\n",
+	if (t->tr.fp_out) {
+		fprintf(t->tr.fp_out, "guest arch=%d %dbit\n",
 			t->arch.guest.arch_id, t->arch.guest.arch_bits);
-		fprintf(t->fp_out, "host arch=%d %dbit\n",
+		fprintf(t->tr.fp_out, "host arch=%d %dbit\n",
 			t->arch.host.arch_id, t->arch.host.arch_bits);
 	}
 }
@@ -106,27 +97,28 @@ void etrace_process_tb(struct etracer *t)
 {
 	struct etrace_pkg *pkg = t->pkg;
 
-	if (!t->fp_out)
+	if (!t->tr.fp_out)
 		return;
 
-	if (t->guest.machine) {
-		fprintf(t->fp_out, "guest virt=%" PRIx64 " phys=%" PRIx64 "\n",
+	if (t->tr.guest.machine) {
+		fprintf(t->tr.fp_out,
+                        "guest virt=%" PRIx64 " phys=%" PRIx64 "\n",
 			pkg->tb.vaddr, pkg->tb.paddr);
-		disas(t->fp_out, t->guest.objdump, t->guest.machine,
+		disas(t->tr.fp_out, t->tr.guest.objdump, t->tr.guest.machine,
 			t->arch.guest.big_endian,
 			pkg->tb.vaddr, &pkg->tb.data8[0],
 			pkg->tb.guest_code_len);
-		fputc('\n', t->fp_out);
+		fputc('\n', t->tr.fp_out);
 	}
 
-	if (t->host.machine) {
-		fprintf(t->fp_out, "host\n");
-		disas(t->fp_out, t->host.objdump, t->host.machine,
+	if (t->tr.host.machine) {
+		fprintf(t->tr.fp_out, "host\n");
+		disas(t->tr.fp_out, t->tr.host.objdump, t->tr.host.machine,
 			t->arch.host.big_endian,
 			pkg->tb.host_addr,
 			&pkg->tb.data8[pkg->tb.guest_code_len],
 			pkg->tb.host_code_len);
-		fputc('\n', t->fp_out);
+		fputc('\n', t->tr.fp_out);
 	}
 }
 
@@ -223,10 +215,10 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 			break;
 		}
 
-		if (t && t->sym_tree && *t->sym_tree)
-			sym = sym_lookup_by_addr(t->sym_tree, start);
+		if (t && t->tr.sym_tree && *t->tr.sym_tree)
+			sym = sym_lookup_by_addr(t->tr.sym_tree, start);
 
-		if (t->fp_out) {
+		if (t->tr.fp_out) {
 #if 0
 			printf("Trace %"PRIx64  " %" PRIx64 " - %" PRIx64 " ",
 				now, start, end);
@@ -254,7 +246,7 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 				pos += namelen;
 			}
 			out[pos++] = '\n';
-			fwrite(&out, 1, pos, t->fp_out);
+			fwrite(&out, 1, pos, t->tr.fp_out);
 #endif
 		}
 
@@ -267,7 +259,7 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 				exit(EXIT_FAILURE);
                         }
 			if (!sym)
-				sym = sym_get_unknown(t->sym_tree);
+				sym = sym_get_unknown(t->tr.sym_tree);
 
 			if (sym) {
 				uint64_t addr = start;
@@ -280,7 +272,7 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 					}
 					sym_update_cov(sym, addr, tend, duration);
 					addr = tend;
-					sym = sym_lookup_by_addr(t->sym_tree, addr);
+					sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
 				}
 			}
 		}
@@ -291,20 +283,20 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 void etrace_process_note(struct etracer *t)
 {
 	struct etrace_note *nt = &t->pkg->note;
-	if (!t->fp_out)
+	if (!t->tr.fp_out)
 		return;
 
 	t->pkg->u8[t->pkg->hdr.len] = 0;
-	fprintf(t->fp_out, "%s", &nt->data8[0]);
+	fprintf(t->tr.fp_out, "%s", &nt->data8[0]);
 }
 
 void etrace_process_mem(struct etracer *t)
 {
 	struct etrace_mem *mem = &t->pkg->mem;
-	if (!t->fp_out)
+	if (!t->tr.fp_out)
 		return;
 
-	fprintf(t->fp_out, "M%u %" PRIu64 " %c %" PRIx64 " %" PRIx64 "\n",
+	fprintf(t->tr.fp_out, "M%u %" PRIu64 " %c %" PRIx64 " %" PRIx64 "\n",
 		t->pkg->hdr.unit_id,
 		mem->time, mem->attr & MEM_WRITE ? 'w' : 'r', mem->paddr,
 		mem->value);
@@ -313,10 +305,10 @@ void etrace_process_mem(struct etracer *t)
 void etrace_process_old_event_u64(struct etracer *t)
 {
 	struct etrace_event_u64 *event = &t->pkg->event_u64;
-	if (!t->fp_out)
+	if (!t->tr.fp_out)
 		return;
 
-	fprintf(t->fp_out, "EV %" PRIu64 " %u %s.%s %" PRIu64 "\n",
+	fprintf(t->tr.fp_out, "EV %" PRIu64 " %u %s.%s %" PRIu64 "\n",
 		event->time, event->unit_id,
 		event->names, event->names + event->dev_name_len, event->val);
 }
@@ -324,10 +316,10 @@ void etrace_process_old_event_u64(struct etracer *t)
 void etrace_process_event_u64(struct etracer *t)
 {
 	struct etrace_event_u64 *event = &t->pkg->event_u64;
-	if (!t->fp_out)
+	if (!t->tr.fp_out)
 		return;
 
-	fprintf(t->fp_out, "EV %" PRIu64 " %u %s.%s %" PRIu64 "\n",
+	fprintf(t->tr.fp_out, "EV %" PRIu64 " %u %s.%s %" PRIu64 "\n",
 		event->time, event->unit_id,
 		event->names, event->names + event->dev_name_len, event->val);
 }
@@ -343,13 +335,13 @@ void etrace_show(int fd, FILE *fp_out,
 
 	fprintf(stderr, "Processing trace\n");
 
-	t.fd = fd;
-	t.fp_out = fp_out;
-	t.sym_tree = sym_tree;
-	t.host.objdump = objdump;
-	t.host.machine = machine;
-	t.guest.objdump = guest_objdump;
-	t.guest.machine = guest_machine;
+	t.tr.fd = fd;
+	t.tr.fp_out = fp_out;
+	t.tr.sym_tree = sym_tree;
+	t.tr.host.objdump = objdump;
+	t.tr.host.machine = machine;
+	t.tr.guest.objdump = guest_objdump;
+	t.tr.guest.machine = guest_machine;
 
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
 

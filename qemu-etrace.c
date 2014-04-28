@@ -49,6 +49,8 @@ struct format_map trace_fmt_map[] = {
 	{ "none", TRACE_NONE },
 	{ "etrace", TRACE_ETRACE },
 	{ "vcd", TRACE_VCD },
+	{ "ascii-hex", TRACE_ASCII_HEX },
+	{ "ascii-hex-be", TRACE_ASCII_HEX_BE },
 	{ NULL, TRACE_NONE },
 };
 
