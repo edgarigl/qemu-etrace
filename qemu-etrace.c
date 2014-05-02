@@ -89,7 +89,8 @@ struct
 	char *guest_objdump;
 	char *machine;
 	char *guest_machine;
-	enum trace_format trace_format;
+	enum trace_format trace_in_format;
+	enum trace_format trace_out_format;
 	enum cov_format coverage_format;
 	char *coverage_output;
 	char *gcov_strip;
@@ -116,7 +117,8 @@ static const char etrace_usagestr[] = \
 "qemu-etrace " PACKAGE_VERSION "\n"
 "-h | --help            Help.\n"
 "--trace                Trace filename.\n"
-"--trace-format         Trace output format .\n"
+"--trace-in-format      Trace input format .\n"
+"--trace-out-format     Trace output format .\n"
 "--trace-output         Decoded trace output filename.\n"
 "--elf                  Elf file of traced app.\n"
 "--addr2line            Path to addr2line binary.\n"
@@ -162,7 +164,8 @@ static void parse_arguments(int argc, char **argv)
 		static struct option long_options[] = {
 			{"help",          no_argument, 0, 'h' },
 			{"trace",         required_argument, 0, 't' },
-			{"trace-format",  required_argument, 0, 'q' },
+			{"trace-in-format",  required_argument, 0, 'y' },
+			{"trace-out-format",  required_argument, 0, 'q' },
 			{"trace-output",  required_argument, 0, 'o' },
 			{"elf",           required_argument, 0, 'e' },
 			{"addr2line",     required_argument, 0, 'a' },
@@ -228,8 +231,11 @@ static void parse_arguments(int argc, char **argv)
 		case 'p':
 			args.gcov_prefix = optarg;
 			break;
+		case 'y':
+			args.trace_in_format = map_traceformat(optarg);
+			break;
 		case 'q':
-			args.trace_format = map_traceformat(optarg);
+			args.trace_out_format = map_traceformat(optarg);
 			break;
 		default:
 			usage();
@@ -346,7 +352,8 @@ int main(int argc, char **argv)
 		etrace_show(fd, trace_out,
 			    args.objdump, args.machine,
 			    args.guest_objdump, args.guest_machine,
-			    &sym_tree, args.coverage_format, args.trace_format);
+			    &sym_tree, args.coverage_format,
+			    args.trace_out_format);
 	} while (fd_is_socket(fd) && !got_sigint);
 
 	sym_show_stats(&sym_tree);
