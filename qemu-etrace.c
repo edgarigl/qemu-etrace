@@ -26,6 +26,7 @@
 #include "syms.h"
 #include "trace.h"
 #include "etrace.h"
+#include "trace-hex.h"
 #include "util.h"
 #include "run.h"
 #include <bfd.h>
@@ -50,33 +51,14 @@ struct format_map trace_fmt_map[] = {
 	{ "etrace", TRACE_ETRACE },
 	{ "vcd", TRACE_VCD },
 	{ "ascii-hex", TRACE_ASCII_HEX },
-	{ "ascii-hex-be", TRACE_ASCII_HEX_BE },
+	{ "ascii-hex-le16", TRACE_ASCII_HEX_LE16 },
+	{ "ascii-hex-le32", TRACE_ASCII_HEX_LE32 },
+	{ "ascii-hex-le64", TRACE_ASCII_HEX_LE64 },
+	{ "ascii-hex-be16", TRACE_ASCII_HEX_BE16 },
+	{ "ascii-hex-be32", TRACE_ASCII_HEX_BE32 },
+	{ "ascii-hex-be64", TRACE_ASCII_HEX_BE64 },
 	{ NULL, TRACE_NONE },
 };
-
-int map_format(struct format_map *map, const char *s)
-{
-	int i = 0;
-
-	while (map[i].str) {
-		if (strcmp(map[i].str, s) == 0)
-			return map[i].val;
-		i++;
-	}
-	fprintf(stderr, "Invalid coverage format %s\n", s);
-	exit(EXIT_FAILURE);
-
-}
-
-static inline enum cov_format map_covformat(const char *s)
-{
-	return map_format(cov_fmt_map, s);
-}
-
-static inline enum trace_format map_traceformat(const char *s)
-{
-	return map_format(trace_fmt_map, s);
-}
 
 struct
 {
@@ -154,6 +136,31 @@ void usage(void)
 	}
 	printf("\n");
 
+}
+
+int map_format(struct format_map *map, const char *s)
+{
+	int i = 0;
+
+	while (map[i].str) {
+		if (strcmp(map[i].str, s) == 0)
+			return map[i].val;
+		i++;
+	}
+	fprintf(stderr, "Invalid coverage format %s\n", s);
+	usage();
+	exit(EXIT_FAILURE);
+
+}
+
+static inline enum cov_format map_covformat(const char *s)
+{
+	return map_format(cov_fmt_map, s);
+}
+
+static inline enum trace_format map_traceformat(const char *s)
+{
+	return map_format(trace_fmt_map, s);
 }
 
 static void parse_arguments(int argc, char **argv)
@@ -298,6 +305,42 @@ void sigint_handler(int s) {
 	}
 }
 
+void trace_show(int fd, FILE *fp_out,
+                 const char *objdump, const char *machine,
+                 const char *guest_objdump, const char *guest_machine,
+                 void **sym_tree, enum cov_format cov_fmt,
+                 enum trace_format trace_in_fmt,
+                 enum trace_format trace_out_fmt)
+{
+	switch (trace_in_fmt) {
+	case TRACE_ETRACE:
+		etrace_show(fd, fp_out,
+			    objdump, machine,
+			    guest_objdump, guest_machine,
+			    sym_tree, cov_fmt,
+			    trace_in_fmt, trace_out_fmt);
+		break;
+	case TRACE_ASCII_HEX:
+	case TRACE_ASCII_HEX_LE16:
+	case TRACE_ASCII_HEX_LE32:
+	case TRACE_ASCII_HEX_LE64:
+	case TRACE_ASCII_HEX_BE16:
+	case TRACE_ASCII_HEX_BE32:
+	case TRACE_ASCII_HEX_BE64:
+		hextrace_show(fd, fp_out,
+			    objdump, machine,
+			    guest_objdump, guest_machine,
+			    sym_tree, cov_fmt,
+			    trace_in_fmt, trace_out_fmt);
+		break;
+	default:
+		fprintf(stderr, "Unsupported trace format\n");
+		usage();
+		exit(1);
+		break;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	FILE *trace_out;
@@ -349,11 +392,12 @@ int main(int argc, char **argv)
 			block_sigint_exit = true;
 		}
 
-		etrace_show(fd, trace_out,
-			    args.objdump, args.machine,
-			    args.guest_objdump, args.guest_machine,
-			    &sym_tree, args.coverage_format,
-			    args.trace_out_format);
+		trace_show(fd, trace_out,
+			   args.objdump, args.machine,
+			   args.guest_objdump, args.guest_machine,
+			   &sym_tree, args.coverage_format,
+			   args.trace_in_format,
+			   args.trace_out_format);
 	} while (fd_is_socket(fd) && !got_sigint);
 
 	sym_show_stats(&sym_tree);

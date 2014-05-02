@@ -24,6 +24,7 @@ OBJS += coverage.o
 OBJS += cov-gcov.o
 OBJS += cov-cachegrind.o
 OBJS += etrace.o
+OBJS += trace-hex.o
 
 TARGET = qemu-etrace
 
