@@ -28,6 +28,17 @@
 #endif
 #include <endian.h>
 
+#ifndef le64toh
+#define be16toh(x)     ((uint16_t)(((x)[0]<<8)|(x)[1]))
+#define be32toh(x)     ((uint32_t)(((x)[0]<<24)|((x)[1]<<16)|((x)[2]<<8)|(x)[3]))
+#define be64toh(x)     ((uint64_t)(((x)[0]<<56)|((x)[1]<<48)|((x)[2]<<40)| \
+         ((x)[3]<<32)|((x)[4]<<24)|((x)[5]<<16)|((x)[6]<<8)|(x)[7]))
+#define le16toh(x)     ((uint16_t)(((x)[1]<<8)|(x)[0]))
+#define le32toh(x)     ((uint32_t)(((x)[3]<<24)|((x)[2]<<16)|((x)[1]<<8)|(x)[0]))
+#define le64toh(x)     ((uint64_t)(((x)[7]<<56)|((x)[6]<<48)|((x)[5]<<40)| \
+         ((x)[4]<<32)|((x)[3]<<24)|((x)[2]<<16)|((x)[1]<<8)|(x)[0]))
+#endif
+
 #define ETRACE_MIN_VERSION_MAJOR 0
 
 #define MAX_PKG (2 * 1024 * 1024)
