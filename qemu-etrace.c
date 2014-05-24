@@ -80,6 +80,7 @@ struct
 } args = {
 	.trace_filename = NULL,
 	.trace_output = "-",
+	.trace_in_format = TRACE_ETRACE,
 	.elf = NULL,
 	.addr2line = "/usr/bin/addr2line",
 	.nm = "/usr/bin/nm",
