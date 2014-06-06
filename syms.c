@@ -486,8 +486,8 @@ static void process_nm_output(void **store, char *s, size_t len)
 		ss->nr_stored++;
 		if (sym->addr < ss->min)
 			ss->min = sym->addr;
-		if (sym->addr > ss->max)
-			ss->max = sym->addr;
+		if ((sym->addr + sym->size) > ss->max)
+			ss->max = sym->addr + sym->size;
 	} while (s < end);
 
 	qsort(ss->allsyms, ss->nr_stored, sizeof *sym, sym_compare);
