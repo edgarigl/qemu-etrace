@@ -16,6 +16,7 @@ enum trace_format {
 struct tracer {
 	int fd;
 	FILE *fp_out;
+	enum trace_format out_fmt;
 	void **sym_tree;
 
 	struct {

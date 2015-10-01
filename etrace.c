@@ -338,6 +338,7 @@ void etrace_show(int fd, FILE *fp_out,
 
 	t.tr.fd = fd;
 	t.tr.fp_out = fp_out;
+	t.tr.out_fmt = trace_out_fmt;
 	t.tr.sym_tree = sym_tree;
 	t.tr.host.objdump = objdump;
 	t.tr.host.machine = machine;
