@@ -49,6 +49,7 @@ struct format_map cov_fmt_map[] = {
 struct format_map trace_fmt_map[] = {
 	{ "none", TRACE_NONE },
 	{ "etrace", TRACE_ETRACE },
+	{ "human", TRACE_HUMAN },
 	{ "vcd", TRACE_VCD },
 	{ "ascii-hex", TRACE_ASCII_HEX },
 	{ "ascii-hex-le16", TRACE_ASCII_HEX_LE16 },
@@ -81,6 +82,7 @@ struct
 	.trace_filename = NULL,
 	.trace_output = "-",
 	.trace_in_format = TRACE_ETRACE,
+	.trace_out_format = TRACE_HUMAN,
 	.elf = NULL,
 	.addr2line = "/usr/bin/addr2line",
 	.nm = "/usr/bin/nm",
