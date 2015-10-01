@@ -71,7 +71,7 @@ fail:
 	return -1;
 }
 
-int trace_open(const char *descr)
+int trace_open(const char *descr, bool write)
 {
 	int fd = -1;
 
@@ -81,8 +81,20 @@ int trace_open(const char *descr)
 	if (memcmp(UNIX_PREFIX, descr, strlen(UNIX_PREFIX)) == 0) {
 		/* UNIX.  */
 		fd = sk_unix_client(descr);
+	} else if (!strcmp(descr, "-")) {
+		if (write)
+			fd = dup(fileno(stdout));
+		else
+			fd = dup(fileno(stdin));
 	} else {
-		fd = open(descr, O_RDONLY);
+		int flags;
+
+		if (write)
+			flags = O_WRONLY | O_CREAT | O_TRUNC;
+		else
+			flags = O_RDONLY;
+
+		fd = open(descr, flags, S_IWUSR | S_IRUSR);
 	}
 	return fd;
 }

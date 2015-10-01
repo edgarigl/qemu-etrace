@@ -23,4 +23,6 @@
  * THE SOFTWARE.
  */
 
-int trace_open(const char *descr);
+#include <stdbool.h>
+
+int trace_open(const char *descr, bool write);

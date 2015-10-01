@@ -258,14 +258,21 @@ static void parse_arguments(int argc, char **argv)
 FILE *open_trace_output(const char *outname)
 {
 	char *buf;
+	int fd;
 	FILE *fp;
 
-	if (!strcmp(outname, "-")) {
-		return stdout;
-	} else if (!strcmp(outname, "none"))
+
+	/* None is special for output. If you want a file name none,
+	   just use ./none as the name.  */
+	if (!strcmp(outname, "none"))
 		return NULL;
 
-	fp = fopen(outname, "w+");
+	fd = trace_open(outname, true);
+	if (fd < 0) {
+		perror(outname);
+		exit(1);
+	}
+	fp = fdopen(fd, "w");
 	if (!fp) {
 		perror(outname);
 		exit(1);
@@ -379,7 +386,7 @@ int main(int argc, char **argv)
 	}
 
 	do {
-		fd = trace_open(args.trace_filename);
+		fd = trace_open(args.trace_filename, false);
 		if (fd < 0) {
 			perror(args.trace_filename);
 			if (block_sigint_exit) {
