@@ -75,6 +75,7 @@ struct
 	enum trace_format trace_in_format;
 	enum trace_format trace_out_format;
 	enum cov_format coverage_format;
+	bool server;
 	char *coverage_output;
 	char *gcov_strip;
 	char *gcov_prefix;
@@ -94,6 +95,7 @@ struct
 	.coverage_output = NULL,
 	.gcov_strip = NULL,
 	.gcov_prefix = NULL,
+	.server = true,
 };
 
 #define PACKAGE_VERSION "0.1"
@@ -173,6 +175,7 @@ static void parse_arguments(int argc, char **argv)
 	while (1) {
 		static struct option long_options[] = {
 			{"help",          no_argument, 0, 'h' },
+			{"server",         required_argument, 0, 's' },
 			{"trace",         required_argument, 0, 't' },
 			{"trace-in-format",  required_argument, 0, 'y' },
 			{"trace-out-format",  required_argument, 0, 'q' },
@@ -192,7 +195,7 @@ static void parse_arguments(int argc, char **argv)
 		};
 		int option_index = 0;
 
-		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:",
+		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -234,6 +237,9 @@ static void parse_arguments(int argc, char **argv)
 			break;
 		case 'g':
 			args.guest_machine = optarg;
+			break;
+		case 's':
+			args.server = strtol(optarg, NULL, 0);
 			break;
 		case 'z':
 			args.gcov_strip = optarg;
@@ -408,7 +414,7 @@ int main(int argc, char **argv)
 			   &sym_tree, args.coverage_format,
 			   args.trace_in_format,
 			   args.trace_out_format);
-	} while (fd_is_socket(fd) && !got_sigint);
+	} while (fd_is_socket(fd) && !got_sigint && args.server);
 
 	sym_show_stats(&sym_tree);
 
