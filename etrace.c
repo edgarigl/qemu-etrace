@@ -333,6 +333,7 @@ void etrace_show(int fd, FILE *fp_out,
 {
 	struct etracer t;
 	bool unknown_pkg_warn = false;
+	int fd_out = -1;
 
 	fprintf(stderr, "Processing trace\n");
 
@@ -347,7 +348,17 @@ void etrace_show(int fd, FILE *fp_out,
 
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
 
+	/* Short path for passthrough.  */
+	if (trace_out_fmt == trace_in_fmt) {
+		if (t.tr.fp_out) {
+			fd_out = fileno(t.tr.fp_out);
+			t.tr.fp_out = NULL;
+		}
+	}
+
 	while (etrace_read_pkg(&t, t.pkg)) {
+		int r;
+
 		switch (t.pkg->hdr.type) {
 		case TYPE_EXEC:
 			etrace_process_exec(&t, cov_fmt);
@@ -390,6 +401,24 @@ void etrace_show(int fd, FILE *fp_out,
 				unknown_pkg_warn = true;
 			}
 			break;
+		}
+
+		if (fd_out != -1) {
+			r = safe_write(fd_out, t.pkg,
+					sizeof t.pkg->hdr + t.pkg->hdr.len);
+			if (r <= 0) {
+				/* Don't bail out as coverage may still work.  */
+				static bool once = false;
+				if (!once) {
+					fprintf(stderr, "trace-out: %s pid=%d\n",
+						strerror(errno), getpid());
+					once = true;
+					sleep(1000);
+				}
+				if (cov_fmt != NONE) {
+					exit(EXIT_FAILURE);
+				}
+			}
 		}
 	}
 	free(t.pkg);
