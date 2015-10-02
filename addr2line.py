@@ -8,10 +8,10 @@ import string
 import subprocess
 
 class addr2line(object):
-	def __init__(self, elf, comp_dir = None, addr2line = "eu-addr2line"):
+	def __init__(self, elf, comp_dir = None, addr2line = "addr2line"):
 		cmd = [addr2line, "-f", "-e", elf]
-		if comp_dir == None:
-			cmd += ['-A']
+#		if comp_dir == None:
+#			cmd += ['-A']
 #		cmd = ["cat"]
 		self.cmd = cmd
 		self.debugf = None
@@ -32,5 +32,9 @@ class addr2line(object):
 
 		lines = string.split(out, '\n')
 		sym = lines[0]
-		loc = lines[1].split(':')
+		l = lines[1].split(' ')
+		loc = l[0].split(':')
+#		self.debug(str(addr))
+#		self.debug(lines[0])
+#		self.debug(lines[1])
 		return [sym, loc]
