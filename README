@@ -105,6 +105,13 @@ gcov-bad
 	very well. It was an experiment that turns out to be hard to
 	support.
 
+etrace-view
+-----------
+./etrace-view.py --trace ~/work/xilinx/m-arch/sw/tbm/apu.elog  --elf ~/work/xilinx/m-arch/sw/tbm/build/ronaldo/apu/ctest-bare
+
+
+
+
 TODO
 ----
 1. Add sorting support when displaying traces.
