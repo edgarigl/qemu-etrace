@@ -110,7 +110,9 @@ etrace-view
 ./etrace-view.py --trace ~/work/xilinx/m-arch/sw/tbm/apu.elog  --elf ~/work/xilinx/m-arch/sw/tbm/build/ronaldo/apu/ctest-bare
 
 
-
+LICENSE
+-------
+This project is released under the GPLv2.
 
 TODO
 ----
