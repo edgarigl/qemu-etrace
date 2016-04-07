@@ -19,6 +19,7 @@ OBJS += util.o
 OBJS += safeio.o
 OBJS += run.o
 OBJS += syms.o
+OBJS += excludes.o
 OBJS += disas.o
 OBJS += coverage.o
 OBJS += cov-gcov.o

@@ -27,6 +27,7 @@
 #include "coverage.h"
 #include "cov-gcov.h"
 #include "cov-cachegrind.h"
+#include "excludes.h"
 
 static void coverage_dump_sym(struct sym *s, FILE *fp)
 {
@@ -61,11 +62,16 @@ static void coverage_dump(struct sym *s, size_t nr_syms,
 }
 
 void coverage_emit(void **store, const char *filename, enum cov_format fmt,
-		const char *gcov_strip, const char *gcov_prefix)
+		const char *gcov_strip, const char *gcov_prefix,
+		const char *exclude)
 {
 	FILE *fp = NULL;
 	struct sym *s, *unknown;
 	size_t nr_syms;
+	void *ex;
+
+	printf("%s\n", __func__);
+	ex = excludes_create(exclude);
 
 	s = sym_get_all(store, &nr_syms);
 	if (!s)
@@ -91,7 +97,8 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 		break;
 	default:
 		gcov_emit_gcov(store, s, nr_syms, unknown, fp,
-				gcov_strip, gcov_prefix, fmt);
+				gcov_strip, gcov_prefix, fmt,
+				ex);
 		break;
 	}
 

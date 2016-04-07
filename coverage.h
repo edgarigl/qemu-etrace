@@ -8,6 +8,7 @@ enum cov_format {
 };
 
 void coverage_emit(void **store, const char *filename, enum cov_format fmt,
-		const char *gcov_strip, const char *gcov_prefix);
+		const char *gcov_strip, const char *gcov_prefix,
+		const char *exclude);
 void coverage_init(void **store, const char *filename, enum cov_format fmt,
                 const char *gcov_strip, const char *gcov_prefix);

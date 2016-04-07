@@ -27,6 +27,7 @@
 
 #include "coverage.h"
 #include "cov-gcov.h"
+#include "excludes.h"
 
 #define MAX_RECORD_SIZE (32 * 1024)
 
@@ -878,17 +879,23 @@ struct sym_src_loc *gcov_find_decl_line(struct sym *s, const char *filename)
 	return ret;
 }
 
-void lcov_emit_info(struct gcov_file *f, FILE *fp)
+void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude)
 {
 	unsigned int i;
 	unsigned int instr_lines = 0;
 	unsigned int exec_lines = 0;
+	bool file_has_excludes = false;
 
 	if (!strcmp("??", f->filename))
 		return;
 
 	fprintf(fp, "TN:\n");
 	fprintf(fp, "SF:%s\n", f->filename);
+
+	if (exclude) {
+		file_has_excludes = excludes_match(exclude, f->filename, -1);
+		printf("cov %s %s excludes\n", f->filename, file_has_excludes ? "has" : "has no");
+	}
 
 	if (!filename_is_likely_header(f->filename) || 1) {
 		for (i = 0; i < f->nr_syms; i++) {
@@ -910,6 +917,13 @@ void lcov_emit_info(struct gcov_file *f, FILE *fp)
 	}
 
 	for (i = 0; i < f->nr_lines; i++) {
+		if (file_has_excludes) {
+			if (excludes_match(exclude, f->filename, i + 1)) {
+				printf("Excluded %s : %d\n", f->filename, i);
+				continue;
+			}
+		}
+
 		instr_lines += f->instr_lines[i];
 		if (f->instr_lines[i]) {
 			exec_lines++;
@@ -925,7 +939,8 @@ void lcov_emit_info(struct gcov_file *f, FILE *fp)
 void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 		struct sym *unknown, FILE *fp,
 		const char *gcov_strip, const char *gcov_prefix,
-		enum cov_format fmt)
+		enum cov_format fmt,
+		void *exclude)
 {
 	struct gcov_file *f;
 	int i;
@@ -940,7 +955,7 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 		if (fmt == QCOV)
 			gcov_emit_qcov_file(f, gcov_strip, gcov_prefix);
 		if (fmt == LCOV)
-			lcov_emit_info(f, fp);
+			lcov_emit_info(f, fp, exclude);
 		f = f->next;
 	}
 

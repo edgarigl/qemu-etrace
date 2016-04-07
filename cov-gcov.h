@@ -149,4 +149,4 @@ struct gcov_record_ir
 void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
                 struct sym *unknown, FILE *fp,
 		const char *gcov_strip, const char *gcov_prefix,
-		enum cov_format fmt);
+		enum cov_format fmt, void *exclude);

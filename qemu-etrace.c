@@ -66,6 +66,7 @@ struct
 	char *trace_filename;
 	char *trace_output;
 	char *elf;
+	char *exclude;
 	char *addr2line;
 	char *nm;
 	char *objdump;
@@ -85,6 +86,7 @@ struct
 	.trace_in_format = TRACE_ETRACE,
 	.trace_out_format = TRACE_HUMAN,
 	.elf = NULL,
+	.exclude = NULL,
 	.addr2line = "/usr/bin/addr2line",
 	.nm = "/usr/bin/nm",
 	.objdump = "/usr/bin/objdump",
@@ -108,6 +110,7 @@ static const char etrace_usagestr[] = \
 "--trace-out-format     Trace output format .\n"
 "--trace-output         Decoded trace output filename.\n"
 "--elf                  Elf file of traced app.\n"
+"--exclude              Excludes description file.\n"
 "--addr2line            Path to addr2line binary.\n"
 "--nm                   Path to nm binary.\n"
 "--objdump              Path to objdump. \n"
@@ -139,8 +142,11 @@ void usage(void)
 		printf("%s%s", i == 0 ? "" : ",", cov_fmt_map[i].str);
 		i++;
 	}
-	printf("\n");
-
+	printf("\n\n");
+	printf("The exclude fileformat is a list of filenames:line-numbers.\n"
+		"One per line. For example:\n"
+		"filename1.c:22\n"
+		"filename2.c:38\n\n");
 }
 
 int map_format(struct format_map *map, const char *s)
@@ -181,6 +187,7 @@ static void parse_arguments(int argc, char **argv)
 			{"trace-out-format",  required_argument, 0, 'q' },
 			{"trace-output",  required_argument, 0, 'o' },
 			{"elf",           required_argument, 0, 'e' },
+			{"exclude",       required_argument, 0, 'l' },
 			{"addr2line",     required_argument, 0, 'a' },
 			{"nm",            required_argument, 0, 'n' },
 			{"objdump",       required_argument, 0, 'd' },
@@ -195,7 +202,7 @@ static void parse_arguments(int argc, char **argv)
 		};
 		int option_index = 0;
 
-		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:",
+		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -219,6 +226,9 @@ static void parse_arguments(int argc, char **argv)
 			break;
 		case 'e':
 			args.elf = optarg;
+			break;
+		case 'l':
+			args.exclude = optarg;
 			break;
 		case 'a':
 			args.addr2line = optarg;
@@ -421,7 +431,8 @@ int main(int argc, char **argv)
 	if (args.coverage_format != NONE)
 		coverage_emit(&sym_tree, args.coverage_output,
 				args.coverage_format,
-				args.gcov_strip, args.gcov_prefix);
+				args.gcov_strip, args.gcov_prefix,
+                                args.exclude);
 
 	return EXIT_SUCCESS;
 }
