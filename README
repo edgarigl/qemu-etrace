@@ -56,6 +56,11 @@ $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --cover
 Lcov info files need to be furthered processed by lcov tools, in this case
 genhtml to create beautiful html reports.
 
+genhtml is part of lcov. You can either install it via your distro (e.g
+apt-get install lcov) or you can find the latest version of genhtml in
+the lcov git repo:
+wget https://github.com/linux-test-project/lcov/raw/master/bin/genhtml
+
 Example (cov.info beeing the output from qemu-etrace):
 $ mkdir html-outputdir
 $ genhtml -o html-outputdir cov.info
