@@ -11,6 +11,7 @@ LDLIBS += -lopcodes
 LDLIBS += -lbfd
 LDLIBS += -liberty
 LDLIBS += -lz
+LDLIBS += -ldl
 
 OBJS += qemu-etrace.o
 OBJS += trace-open.o
