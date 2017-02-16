@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#include "config.h"
 #include "trace-open.h"
 #include "coverage.h"
 #include "syms.h"
@@ -99,8 +100,6 @@ struct
 	.gcov_prefix = NULL,
 	.server = true,
 };
-
-#define PACKAGE_VERSION "0.1"
 
 static const char etrace_usagestr[] = \
 "qemu-etrace " PACKAGE_VERSION "\n"

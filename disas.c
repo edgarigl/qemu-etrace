@@ -24,6 +24,7 @@
 
 #include <search.h>
 
+#include "config.h"
 #include "util.h"
 #include "safeio.h"
 #include "disas.h"
