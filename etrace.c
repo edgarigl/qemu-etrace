@@ -132,7 +132,8 @@ static inline int hexchar(unsigned int val)
 
 unsigned int u64tohex(char *out, uint64_t v)
 {
-	char tmp[16];
+	/* Initialize it to avoid false compiler warnings.  */
+	char tmp[16] = {0};
 	unsigned int len = 0;
 	int i;
 
