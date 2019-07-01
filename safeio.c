@@ -22,15 +22,16 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#define _LARGEFILE64_SOURCE
+
+#include "safeio.h"
+
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
-
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+
 
 #define D(x)
 
@@ -88,7 +89,7 @@ safe_write(int fd, const void *wbuf, size_t count)
 }
 
 /* Try to splice if possible.  */
-int safe_copyfd(int s, off64_t off, size_t olen, int d)
+ssize_t safe_copyfd(int s, off_t off, size_t olen, int d)
 {
 	static unsigned char buf[16 * 1024];
 	int len = olen;
@@ -97,7 +98,7 @@ int safe_copyfd(int s, off64_t off, size_t olen, int d)
 	int tlen = 0;
 
 	D(fprintf(stderr, "%s off=%lld len=%d\n", __func__, off, len));
-	lseek64(s, off, SEEK_SET);
+	lseek(s, off, SEEK_SET);
 #if 0
 	long r;	
 	do 
