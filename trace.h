@@ -16,6 +16,13 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA. 
  *
  */
+#ifndef _TRACE_H
+#define _TRACE_H
+
+#include <stdio.h>
+#include <stdint.h>
+
+struct sym;
 
 enum trace_format {
 	TRACE_NONE = 0,
@@ -47,3 +54,5 @@ struct trace_backend {
 	void (*exec)(char *unitname, uint64_t start, uint64_t end,
 			struct sym *sym);
 };
+
+#endif

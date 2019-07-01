@@ -16,6 +16,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA. 
  *
  */
+#ifndef _COVERAGE_H
+#define _COVERAGE_H
 
 enum cov_format {
 	NONE = 0,
@@ -31,3 +33,5 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 		const char *exclude);
 void coverage_init(void **store, const char *filename, enum cov_format fmt,
                 const char *gcov_strip, const char *gcov_prefix);
+
+#endif

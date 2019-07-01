@@ -16,6 +16,11 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA. 
  *
  */
+#ifndef _SYMS_H
+#define _SYMS_H
+
+#include <stdint.h>
+#include <stdlib.h>
 
 /* A 64bit counter per 32bit word in the sym.  */
 struct sym_coverage {
@@ -66,3 +71,5 @@ void sym_read_from_elf(void **rootp, char *nm, char *elf);
 void sym_build_linemap(void **rootp, const char *addr2line, const char *elf);
 void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 			uint32_t time);
+
+#endif
