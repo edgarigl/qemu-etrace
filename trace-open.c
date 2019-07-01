@@ -46,13 +46,18 @@ static int sk_unix_client(const char *descr)
 	struct sockaddr_un addr;
 	int fd, nfd;
 
+	if (sizeof(addr.sun_path) - 1 < strlen(descr) - strlen(UNIX_PREFIX)) {
+		fprintf(stderr, "%s: path too long\n", descr + strlen(UNIX_PREFIX));
+		return -1;
+	}
+
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	fprintf(stderr, "connect to %s\n", descr + strlen(UNIX_PREFIX));
 
 	memset(&addr, 0, sizeof addr);
 	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, descr + strlen(UNIX_PREFIX),
-		sizeof addr.sun_path);
+		sizeof(addr.sun_path) - 1);
 	if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) >= 0)
 		return fd;
 
