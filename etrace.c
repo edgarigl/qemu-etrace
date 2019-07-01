@@ -202,7 +202,7 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 
 	if (t->arch.guest.arch_bits == 32)
 		ent_size = sizeof ex->t32[0];
-	else if (t->arch.guest.arch_bits == 32)
+	else if (t->arch.guest.arch_bits == 64)
 		ent_size = sizeof ex->t64[0];
 	else
 		assert(0);
