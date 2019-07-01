@@ -44,6 +44,7 @@
 #include "util.h"
 #include "run.h"
 #include <bfd.h>
+#include "trace-qemu-simple.h"
 
 struct format_map {
 	const char *str;
@@ -72,6 +73,7 @@ struct format_map trace_fmt_map[] = {
 	{ "ascii-hex-be16", TRACE_ASCII_HEX_BE16 },
 	{ "ascii-hex-be32", TRACE_ASCII_HEX_BE32 },
 	{ "ascii-hex-be64", TRACE_ASCII_HEX_BE64 },
+	{ "qemu-simple", TRACE_QEMU_SIMPLE },
 	{ NULL, TRACE_NONE },
 };
 
@@ -366,6 +368,13 @@ void trace_show(int fd, FILE *fp_out,
 	case TRACE_ASCII_HEX_BE32:
 	case TRACE_ASCII_HEX_BE64:
 		hextrace_show(fd, fp_out,
+			    objdump, machine,
+			    guest_objdump, guest_machine,
+			    sym_tree, cov_fmt,
+			    trace_in_fmt, trace_out_fmt);
+		break;
+	case TRACE_QEMU_SIMPLE:
+		qemu_simple_trace_show(fd, fp_out,
 			    objdump, machine,
 			    guest_objdump, guest_machine,
 			    sym_tree, cov_fmt,

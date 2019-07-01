@@ -17,8 +17,10 @@
 
 CC = $(CROSS)gcc
 LD = $(CC)
+PKGCONFIG = pkg-config
 
 CFLAGS  += -Wall -O3 -g
+CFLAGS  += $(shell $(PKGCONFIG) --cflags glib-2.0)
 #CFLAGS += -m32
 #CFLAGS += -pg
 #LDFLAGS += -pg
@@ -29,6 +31,7 @@ LDLIBS += -lbfd
 LDLIBS += -liberty
 LDLIBS += -lz
 LDLIBS += -ldl
+LDLIBS += $(shell $(PKGCONFIG) --libs glib-2.0)
 
 OBJS += qemu-etrace.o
 OBJS += trace-open.o
@@ -44,6 +47,7 @@ OBJS += cov-gcov.o
 OBJS += cov-cachegrind.o
 OBJS += etrace.o
 OBJS += trace-hex.o
+OBJS += trace-qemu-simple.o
 
 TARGET = qemu-etrace
 
