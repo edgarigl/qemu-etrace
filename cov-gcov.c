@@ -198,7 +198,8 @@ char *gcov_map_srcfilename(const char *src, const char *gcov_strip,
 		n = mempcpy(n, gcov_prefix, prefix_len);
 	}
 	n = mempcpy(n, f, endpos - strip_len);
-	n = mempcpy(n, new_suffix, 6);
+	n = mempcpy(n, new_suffix, strlen(new_suffix));
+	*n = '\0';
 	return tmp;
 fail:
 	free(tmp);
