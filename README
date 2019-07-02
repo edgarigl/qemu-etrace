@@ -77,6 +77,37 @@ The QEMU side supports the same format.
 
 $ qemu ... -etrace unix:/tmp/my-etrace-socket ...
 
+Using with simple-trace format
+------------------------------
+The patch for QEMU to support this is still under review and may not be applied.But here's some info on howto run it anyways.
+
+This version makes use of the `tb_enter_exec` trace to perform coverage
+analysis. So it requires a QEMU version with this trace available. Note
+that this trace is sufficient in itself and does not require QEMU to be
+run in `nochain` mode. This leads to good overall performances when
+doing coverage analysis. One known limitation is the fact that QEMU can
+abort execution in the middle of a TB (e.g. when an simulated
+instruction causes an exception to be raised). It can introduce an small
+error in the report, because it will think that the TB has been executed to
+the end. This case is quite rare though and should mainly happen in big
+firmware (e.g. with Linux).
+
+Here is an example of how to use it:
+
+qemu-system-aarch64 -M xlnx-zcu102 \
+    -cpu cortex-a53 \
+    -kernel "$ELF" \
+    -trace file=trace-out,events=tb_enter_exec
+
+qemu-etrace
+    --trace-in-format qemu-simple \
+    --trace trace-out \
+    --coverage-format lcov \
+    --coverage-output cov.output \
+    --elf "$ELF" \
+    --trace-output none
+
+
 Binutils
 --------
 qemu-etrace uses binutils, both its libraries and its programs (nm,
