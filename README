@@ -65,6 +65,9 @@ Example (cov.info beeing the output from qemu-etrace):
 $ mkdir html-outputdir
 $ genhtml -o html-outputdir cov.info
 
+# Add --ignore-errors source in case not all source is available.
+$ genhtml -o html-outputdir --ignore-errors source cov.info
+
 These etrace (tmp/elog) files can quickly get very large. It is also possible to do
 the trace processing online (without intermediate files). This is done
 through UNIX sockets. To use a UNIX socket, prepend the trace path
@@ -94,10 +97,12 @@ firmware (e.g. with Linux).
 
 Here is an example of how to use it:
 
+echo tb_enter_exec >/tmp/events
+
 qemu-system-aarch64 -M xlnx-zcu102 \
     -cpu cortex-a53 \
     -kernel "$ELF" \
-    -trace file=trace-out,events=tb_enter_exec
+    -trace file=trace-out,events=/tmp/events
 
 qemu-etrace
     --trace-in-format qemu-simple \
