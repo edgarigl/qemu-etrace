@@ -38,7 +38,7 @@ char *filename_sanitize(const char *filename)
 			if (*p2 == '/')
 				p2++;
 
-			strcpy(p2, p1 + 4);
+			memmove(p2, p1 + 4, strlen(p1 + 4) + 1);
 		}
 	} while (p1);
 	return s;
