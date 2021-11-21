@@ -96,7 +96,7 @@ static void ht_process_exec(struct hextracer *t,
 		if (sym) {
 			uint64_t addr = start;
 			while (sym && addr < end) {
-				uint32_t tend = end;
+				uint64_t tend = end;
 
 				if (tend > (sym->addr + sym->size)) {
 					tend = sym->addr + sym->size;
