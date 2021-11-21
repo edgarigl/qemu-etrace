@@ -340,7 +340,7 @@ void sym_build_linemap(void **store, const char *addr2line, const char *elf)
 	kid = run(al_argv[0], al_argv, stdio);
 
 	for (i = 0; i < ss->nr_stored; i++) {
-		char str[17];
+		char str[18];
 		uint64_t addr;
 		struct sym *s = &ss->allsyms[i];
 		for (addr = s->addr; addr < (s->addr + s->size); addr += 4) {
