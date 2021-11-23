@@ -250,14 +250,14 @@ void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 	unsigned int time_per_word;
 	unsigned int words, accounted = 0;
 
+	/* Is this the unknown sym ?? */
+	if (sym->namelen == 0)
+		return;
+
 	assert(start_offset >= 0);
 	assert(start_offset + len <= sym->size);
 
 	sym->total_time += time;
-
-	/* Is this the unknown sym ?? */
-	if (sym->namelen == 0)
-		return;
 
 	if (!sym->cov)
 		sym_alloc_cov(sym);
