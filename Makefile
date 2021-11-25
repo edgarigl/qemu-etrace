@@ -76,8 +76,8 @@ $(TARGET): $(OBJS)
 BU_VER=binutils-2.27
 BU_FILE=$(BU_VER).tar.gz
 BU_URL=http://ftp.gnu.org/gnu/binutils/$(BU_FILE)
-BU_INSTALLDIR=$(CURDIR)/binutils-install
-BU_BUILDDIR=binutils-build
+BU_INSTALLDIR=$(CURDIR)/$(BU_VER)-install
+BU_BUILDDIR=$(BU_VER)-build
 
 CPPFLAGS += -I $(BU_INSTALLDIR)/include
 LDFLAGS += -L $(BU_INSTALLDIR)/lib
