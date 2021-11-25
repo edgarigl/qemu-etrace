@@ -30,7 +30,7 @@ CFLAGS  += $(shell set -e;	\
 	TMP=$$(mktemp);	\
 	echo '\#include "dis-asm.h"' >$$TMP;	\
 	echo 'disassembler_ftype disassembler(enum bfd_architecture, bfd_boolean, unsigned long, bfd *);' >>$$TMP;	\
-	$(CC) -S -o /dev/null -xc $$TMP >/dev/null 2>&1;	\
+	$(CC) $(CPPFLAGS) -I. -S -o /dev/null -xc $$TMP >/dev/null 2>&1; \
 	if [ $$? -eq 0 ]; then	\
 		echo '-DBINUTILS_2_29_OR_NEWER';	\
 	fi;	\
