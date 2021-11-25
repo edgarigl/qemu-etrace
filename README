@@ -116,7 +116,7 @@ qemu-etrace
 Binutils
 --------
 qemu-etrace uses binutils, both its libraries and its programs (nm,
-objdump, addr2line). It was tested with binutils 2.22.
+objdump, addr2line). It was tested with binutils 2.22 and binutils 2.34.
 qemu-etrace has cmdline options to choose which binutils programs to
 use, see --help, --nm, --addr2line, --objdump.
 

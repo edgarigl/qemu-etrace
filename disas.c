@@ -79,7 +79,11 @@ bool disas_libopcode(FILE *fp_out, const char *machine, bool big_endian,
 
 	disassemble_init_for_target(&inf);
 
+#ifdef BINUTILS_2_29_OR_NEWER
+	disas_fn = disassembler (0, big_endian, 0, abfd);
+#else
 	disas_fn = disassembler (abfd);
+#endif
 	pos = 0;
 	do {
 		fprintf(fp_out, "%" PRIx64 "\t", addr + pos);
