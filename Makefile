@@ -73,7 +73,7 @@ CFLAGS += -MMD
 $(TARGET): $(OBJS)
 	$(LD) $(HEAD) $(OBJS) $(LDFLAGS) $(LDLIBS) -o $@
 
-BU_VER=binutils-2.27
+BU_VER=binutils-2.34
 BU_FILE=$(BU_VER).tar.gz
 BU_URL=http://ftp.gnu.org/gnu/binutils/$(BU_FILE)
 BU_INSTALLDIR=$(CURDIR)/$(BU_VER)-install
