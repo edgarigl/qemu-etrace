@@ -38,7 +38,9 @@ USAGE
 QEMU needs to run with etrace tracing.
 Flags -etrace-flags exec enables the execution tracing.
 '-d nochain' disables direct tb jumps so that QEMU can trace all executed code.
-$ qemu ... -kernel vmlinux -etrace /tmp/elog -etrace-flags exec -d nochain
+-accel tcg,thread=single disables MTTCG (etrace is not yet thread safe).
+
+$ qemu ... -kernel vmlinux -etrace /tmp/elog -etrace-flags exec -d nochain -accel tcg,thread=single
 
 Examples:
 To view a trace:
