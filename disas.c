@@ -54,6 +54,20 @@ print_address(bfd_vma addr, struct disassemble_info *info)
 	fprintf(info->stream, "%" PRIx64, (uint64_t) addr);
 }
 
+static int
+fprintf_styled(void *fp, enum disassembler_style style,
+               const char *fmt, ...)
+{
+  FILE *f = fp;
+  va_list ap;
+  int r;
+
+  va_start(ap, fmt);
+  r = vfprintf(f, fmt, ap);
+  va_end(ap);
+  return r;
+}
+
 bool disas_libopcode(FILE *fp_out, const char *machine, bool big_endian,
 		     uint64_t addr, void *buf, size_t len)
 {
@@ -70,7 +84,8 @@ bool disas_libopcode(FILE *fp_out, const char *machine, bool big_endian,
 	abfd = bfd_openr("/dev/null", "binary");
 	abfd->arch_info = arch_inf;
 
-	init_disassemble_info (&inf, fp_out, (fprintf_ftype) fprintf);
+	init_disassemble_info (&inf, fp_out, (fprintf_ftype) fprintf,
+			       fprintf_styled);
 	inf.buffer = buf;
 	inf.buffer_vma = addr;
 	inf.buffer_length = len;
@@ -80,7 +95,9 @@ bool disas_libopcode(FILE *fp_out, const char *machine, bool big_endian,
 	disassemble_init_for_target(&inf);
 
 #ifdef BINUTILS_2_29_OR_NEWER
-	disas_fn = disassembler (0, big_endian, 0, abfd);
+	disas_fn = disassembler (bfd_get_arch (abfd),
+			         bfd_big_endian(abfd),
+				 bfd_get_mach(abfd), abfd);
 #else
 	disas_fn = disassembler (abfd);
 #endif

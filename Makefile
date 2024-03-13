@@ -42,6 +42,7 @@ CFLAGS  += $(shell set -e;	\
 LDLIBS += -lbfd
 LDLIBS += -lopcodes
 LDLIBS += -lbfd
+LDLIBS += -lsframe
 LDLIBS += -liberty
 LDLIBS += -lz
 LDLIBS += -ldl
@@ -73,7 +74,7 @@ CFLAGS += -MMD
 $(TARGET): $(OBJS)
 	$(LD) $(HEAD) $(OBJS) $(LDFLAGS) $(LDLIBS) -o $@
 
-BU_VER=binutils-2.34
+BU_VER=binutils-2.42
 BU_FILE=$(BU_VER).tar.gz
 BU_URL=http://ftp.gnu.org/gnu/binutils/$(BU_FILE)
 BU_INSTALLDIR=$(CURDIR)/$(BU_VER)-install
