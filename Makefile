@@ -28,8 +28,8 @@ CFLAGS  += $(shell $(PKGCONFIG) --cflags glib-2.0)
 # We compile against the new API, and #define BINUTILS_2_29_OR_NEWER in case.
 CFLAGS  += $(shell set -e;	\
 	TMP=$$(mktemp);	\
-	echo '\#include "config.h"' >$$TMP;	\
-	echo '\#include "dis-asm.h"' >>$$TMP;	\
+	echo '#include "config.h"' >$$TMP;	\
+	echo '#include "dis-asm.h"' >>$$TMP;	\
 	echo 'disassembler_ftype disassembler(enum bfd_architecture, bfd_boolean, unsigned long, bfd *);' >>$$TMP;	\
 	$(CC) $(CPPFLAGS) -I. -S -o /dev/null -xc $$TMP >/dev/null 2>&1; \
 	if [ $$? -eq 0 ]; then	\
