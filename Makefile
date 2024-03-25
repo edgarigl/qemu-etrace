@@ -25,18 +25,9 @@ CFLAGS  += $(shell $(PKGCONFIG) --cflags glib-2.0)
 #CFLAGS += -pg
 # Binutils 2.29 and newer have a new API for the disassembler. Unfortunately,
 # the library does not provide an easy way to detect the installed version.
-# We compile against the new API, and #define BINUTILS_2_29_OR_NEWER in case.
-CFLAGS  += $(shell set -e;	\
-	TMP=$$(mktemp);	\
-	echo '#include "config.h"' >$$TMP;	\
-	echo '#include "dis-asm.h"' >>$$TMP;	\
-	echo 'disassembler_ftype disassembler(enum bfd_architecture, bfd_boolean, unsigned long, bfd *);' >>$$TMP;	\
-	$(CC) $(CPPFLAGS) -I. -S -o /dev/null -xc $$TMP >/dev/null 2>&1; \
-	if [ $$? -eq 0 ]; then	\
-		echo '-DBINUTILS_2_29_OR_NEWER';	\
-	fi;	\
-	rm $$TMP;	\
-	)
+# Manually comment out the following if you're using older binutils.
+CPPFLAGS  += -DBINUTILS_2_29_OR_NEWER
+
 #LDFLAGS += -pg
 #LDFLAGS += -static
 LDLIBS += -lbfd
