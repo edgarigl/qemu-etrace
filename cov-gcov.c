@@ -770,7 +770,6 @@ done:
 static void gcov_process_sym(struct sym *s, FILE *fp)
 {
 	uint64_t addr, end = s->addr + s->size;
-	unsigned int i =  0;
 	struct gcov_file *f_src, *f;
 
 	if (!s->src_filename)
@@ -780,15 +779,15 @@ static void gcov_process_sym(struct sym *s, FILE *fp)
 
 	f_src = gcov_find_file_no_fail(s->src_filename, s->maxline + 1);
 
-	i = 0;
 	for (addr = s->addr; addr < end; addr += 4) {
 		uint64_t v = 0;
 		struct sym_src_loc *loc;
+		uint64_t off = (addr - s->addr) / 4;
 
 		if (s->cov_ent)
-			v = s->cov_ent->counter[i];
+			v = s->cov_ent->counter[off];
 
-		loc = &s->linemap->locs[i];
+		loc = &s->linemap->locs[off];
 		if (!loc->filename)
 			continue;
 
@@ -813,8 +812,6 @@ static void gcov_process_sym(struct sym *s, FILE *fp)
 			loc = loc->next;
 			gcov_file_add_sym(f, s);
 		} while (loc);
-
-		i++;
 	}
 }
 
