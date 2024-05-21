@@ -84,6 +84,7 @@ struct
 	char *elf;
 	char *exclude;
 	char *addr2line;
+	char *dwarfdump;
 	char *nm;
 	char *objdump;
 	char *guest_objdump;
@@ -104,6 +105,7 @@ struct
 	.elf = NULL,
 	.exclude = NULL,
 	.addr2line = "/usr/bin/addr2line",
+	.dwarfdump = "/usr/bin/dwarfdump",
 	.nm = "/usr/bin/nm",
 	.objdump = "/usr/bin/objdump",
 	.guest_objdump = "objdump",
@@ -126,6 +128,7 @@ static const char etrace_usagestr[] = \
 "--elf                  Elf file of traced app.\n"
 "--exclude              Excludes description file.\n"
 "--addr2line            Path to addr2line binary.\n"
+"--dwarfdump            Path to dwarfdump binary.\n"
 "--nm                   Path to nm binary.\n"
 "--objdump              Path to objdump. \n"
 "--machine              Host machine name. See objdump --help.\n"
@@ -203,6 +206,7 @@ static void parse_arguments(int argc, char **argv)
 			{"elf",           required_argument, 0, 'e' },
 			{"exclude",       required_argument, 0, 'l' },
 			{"addr2line",     required_argument, 0, 'a' },
+			{"dwarfdump",     required_argument, 0, 'w' },
 			{"nm",            required_argument, 0, 'n' },
 			{"objdump",       required_argument, 0, 'd' },
 			{"machine",       required_argument, 0, 'm' },
@@ -216,7 +220,7 @@ static void parse_arguments(int argc, char **argv)
 		};
 		int option_index = 0;
 
-		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:",
+		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:w:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -246,6 +250,9 @@ static void parse_arguments(int argc, char **argv)
 			break;
 		case 'a':
 			args.addr2line = optarg;
+			break;
+		case 'w':
+			args.dwarfdump = optarg;
 			break;
 		case 'n':
 			args.nm = optarg;
@@ -402,8 +409,7 @@ int main(int argc, char **argv)
 	if (args.elf) {
 		sym_read_from_elf(&sym_tree, args.nm, args.elf);
 		if (args.coverage_format != NONE)
-			sym_build_linemap(&sym_tree, args.addr2line, args.elf);
-
+			sym_build_linemap(&sym_tree, args.dwarfdump, args.elf);
 	}
 
 	coverage_init(&sym_tree, args.coverage_output, args.coverage_format,

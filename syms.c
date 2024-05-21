@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <string.h>
+#include <ctype.h>
 #include <assert.h>
 #include <errno.h>
 #include <unistd.h>
@@ -304,14 +305,15 @@ repass:
 	assert (accounted == time);
 }
 
-void sym_build_linemap(void **store, const char *addr2line, const char *elf)
+void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 {
-	char *al_argv[] = { (char *) addr2line, "-a", "-i", "-p", "-e", (char *) elf, NULL };
-	char tmpout_template[] = "/tmp/etrace-al-out-XXXXXX";
+	char *od_argv[] = { (char *) dwarfdump, "-l", (char *) elf, NULL };
+	char tmpout_template[] = "/tmp/etrace-dd-out-XXXXXX";
+    unsigned int num_lines = 0;
 	int stdio[3] = {0, 1, 2};
-	int fdout_tmp, i;
-	struct sym_store *ss = *store;
+	int fdout_tmp;
 	struct sym *symp = NULL;
+	char *filename = NULL;
 	uint64_t addr = 0;
 	int pipefd[2];
 	FILE *fp;
@@ -337,19 +339,8 @@ void sym_build_linemap(void **store, const char *addr2line, const char *elf)
 
 	stdio[0] = pipefd[0];
 	stdio[1] = fdout_tmp;
-	kid = run(al_argv[0], al_argv, stdio);
+	kid = run(od_argv[0], od_argv, stdio);
 
-	for (i = 0; i < ss->nr_stored; i++) {
-		char str[18];
-		uint64_t addr;
-		struct sym *s = &ss->allsyms[i];
-		for (addr = s->addr; addr < (s->addr + s->size); addr += 4) {
-			int len;
-			len = snprintf(str, sizeof str, "%" PRIx64 "\n",
-					addr);
-			safe_write(pipefd[1], str, len);
-		}
-	}
 	close(pipefd[0]);
 	close(pipefd[1]);
 
@@ -367,8 +358,7 @@ void sym_build_linemap(void **store, const char *addr2line, const char *elf)
 	}
 	while (!feof(fp)) {
 		char line[512];
-		char *s, *next, *filename;
-		unsigned int pos = 0;
+		char *s, *next;
 		unsigned int linenr;
 		bool inlined = false;
 
@@ -376,25 +366,44 @@ void sym_build_linemap(void **store, const char *addr2line, const char *elf)
 		if (s == NULL) {
 			break;
 		}
-		printf("%s", line);
+		//printf("%s", line);
 
-#define INLINED_BY " (inlined by) "
-		if (!strncmp(s, INLINED_BY, strlen(INLINED_BY))) {
-			s += strlen(INLINED_BY);
-			assert(symp);
-			assert(addr >= symp->addr && addr <= symp->addr + symp->size);
-			inlined = true;
-		} else {
-			addr = strtoull(s, &next, 16);
-			s = next + 2;
+		if (strncmp(s, "0x", strlen("0x"))) {
+			continue;
+		}
+		addr = strtoull(s, &next, 16);
+		s = next + 2;
+
+		if (*s != '[')
+			continue;
+		s++;
+
+		while (*s && isspace(*s))
+			s++;
+
+		if (!*s)
+			continue;
+
+		linenr = strtoull(s, &next, 0);
+
+		while (*s && *s != ']')
+			s++;
+
+		if (!*s) {
+			continue;
 		}
 
-		while (s[pos] != ':' && s[pos] != '\n')
-			pos++;
-		s[pos] = 0;
-		filename = strdup(s);
-		s += pos + 1;
-		linenr = strtoull(s, &next, 10);
+		/* Advance "] NS" */
+		s += 2;
+
+#define STR_URI "uri: "
+		s = strstr(s, STR_URI);
+		if (s) {
+			s += strlen(STR_URI) + 1;
+			filename = strndup(s, strlen(s) - 2);
+		}
+
+		assert(linenr);
 
 		symp = sym_lookup_by_addr(store, addr);
 		if (symp) {
@@ -432,17 +441,31 @@ void sym_build_linemap(void **store, const char *addr2line, const char *elf)
 			loc->linenr = linenr;
 			if (inlined)
 				loc->flags |= LOC_F_INLINED;
+            num_lines++;
 #if 0
-//			if (!strcmp("bdi_has_dirty_io", symp->name))
+			//			if (!strcmp("bdi_has_dirty_io", symp->name))
 			printf("%s:%p addr=%lx %s:%d flags=%x\n",
-				symp->name, loc, addr, loc->filename, loc->linenr, loc->flags);
+					symp->name, loc, addr, loc->filename, loc->linenr, loc->flags);
+
+			if (0)
+			{
+				loc = &symp->linemap->locs[offset];
+				do {
+					printf("%x: symp=%p %p %s:%u\n", offset, symp, loc, loc->filename, loc->linenr); 
+					loc = loc->next;
+				} while (loc);
+			}
 #endif
 		}
 	}
 
 	fclose(fp);
+	if (!num_lines) {
+		fprintf(stderr, "WARNING: Unable to create linemap\n");
+	}
 	fprintf(stderr, "done.\n");
 }
+
 
 static void process_nm_output(void **store, char *s, size_t len)
 {

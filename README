@@ -8,8 +8,10 @@ un-intrusive.
 
 BUILD
 -----
-qemu-etrace depends on binutils libraries and on binutils programs at runtime.
-On debian/ubuntu machines, the package to install is binutils and binutils-dev.
+qemu-etrace depends on dwarfdump, binutils libraries and on binutils programs at runtime.
+On debian/ubuntu machines, the packages to install are
+dwarfdump, binutils and binutils-dev.
+
 Preferably the binutils installation should be multi-arch.
 
 If your system is lacking these, you will have to download binutils and
