@@ -44,7 +44,7 @@
 static void coverage_dump_sym(struct sym *s, FILE *fp)
 {
 	fprintf(fp, "fn=%s\n%u %" PRIu64 "\n",
-		s->name ? s->name : "unknown",
+		s->name,
 		0 /*dummy*/, s->total_time);
 }
 
