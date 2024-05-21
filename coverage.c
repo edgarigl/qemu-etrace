@@ -57,7 +57,7 @@ static void coverage_dump_sym(struct sym *s, FILE *fp)
 		accounted += v;
 
 		fprintf(fp, "%" PRId64 " %" PRIx64 " %s %s:%d\n",
-			v, addr, s->name ? s->name : "unknown",
+			v, addr, s->name,
 			s->src_filename ? s->src_filename : "unknown",
 			s->linemap ? s->linemap->locs[i].linenr : 0);
 		i++;
