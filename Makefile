@@ -61,6 +61,7 @@ TARGET = qemu-etrace
 TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
+TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
 
 all: $(TARGET).sh
 
@@ -85,7 +86,10 @@ $(TEST_BUILD_DIR)/test-excludes: tests/unit/test-excludes.c excludes.c excludes.
 		tests/unit/test-excludes.c excludes.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
-check: $(TARGET) $(TEST_BINS)
+$(TEST_BUILD_DIR)/coverage-fixture: tests/fixtures/coverage.c | $(TEST_BUILD_DIR)
+	$(CC) -O0 -g -fno-inline -fno-pie -no-pie $< -o $@
+
+check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-filename
 	$(PYTEST) -q

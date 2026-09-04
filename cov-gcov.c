@@ -942,7 +942,8 @@ void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude)
 
 		instr_lines += f->instr_lines[i];
 		if (f->instr_lines[i]) {
-			exec_lines++;
+			if (f->lines[i])
+				exec_lines++;
 			fprintf(fp, "DA:%u,%u\n", i + 1, f->lines[i]);
 		}
 
