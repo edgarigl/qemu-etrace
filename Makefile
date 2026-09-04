@@ -60,6 +60,7 @@ OBJS += trace-qemu-simple.o
 TARGET = qemu-etrace
 TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
+TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
 
 all: $(TARGET).sh
 
@@ -79,7 +80,13 @@ $(TEST_BUILD_DIR)/test-filename: tests/unit/test-filename.c filename.c filename.
 		tests/unit/test-filename.c filename.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
+$(TEST_BUILD_DIR)/test-excludes: tests/unit/test-excludes.c excludes.c excludes.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-excludes.c excludes.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
 check: $(TARGET) $(TEST_BINS)
+	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-filename
 	$(PYTEST) -q
 

@@ -40,13 +40,13 @@ struct exclude
 void *excludes_create(const char *filename)
 {
 	struct exclude *ex_root = NULL;
-	char *lineptr;
-	size_t n;
+	char *lineptr = NULL;
+	size_t n = 0;
 	FILE *fp;
 
-	printf("%s: %s\n", __func__, filename);
 	if (!filename)
 		return NULL;
+	printf("%s: %s\n", __func__, filename);
 
 	fp = fopen(filename, "r");
 	if (!fp) {
@@ -54,14 +54,12 @@ void *excludes_create(const char *filename)
 		return NULL;
 	}
 
-	do {
+	while (1) {
 		struct exclude *ex;
 		ssize_t r;
 		char *delim;
 		char *t;
-
-		n = 0;
-		lineptr = NULL;
+		size_t filename_len;
 
 		r = getline(&lineptr, &n, fp);
 		if (r <= 0)
@@ -77,18 +75,25 @@ void *excludes_create(const char *filename)
 				"missing ':' delimiter\n%s\n", lineptr);
 			continue;
 		}
+		filename_len = delim - lineptr;
+		if (filename_len >= sizeof(ex->filename)) {
+			printf("WARNING: Exclude filename is too long\n");
+			continue;
+		}
 		ex = malloc(sizeof *ex);
 		ex->next = ex_root;
 		ex_root = ex;
 
-		t = mempcpy(ex->filename, lineptr, delim - lineptr);
+		t = mempcpy(ex->filename, lineptr, filename_len);
 		t[0] = 0;
 
 		delim++;
 		ex->linenr = strtoull(delim, NULL, 10);
 		printf("Add Exclude %s : %d\n", ex->filename, ex->linenr);
-	} while (1);
+	}
 
+	free(lineptr);
+	fclose(fp);
 	return ex_root;
 }
 
@@ -104,4 +109,16 @@ bool excludes_match(void *excludes, const char *filename, int linenr)
 		ex = ex->next;
 	}
 	return false;
+}
+
+void excludes_destroy(void *excludes)
+{
+	struct exclude *ex = excludes;
+
+	while (ex) {
+		struct exclude *next = ex->next;
+
+		free(ex);
+		ex = next;
+	}
 }

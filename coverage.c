@@ -88,8 +88,10 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 	ex = excludes_create(exclude);
 
 	s = sym_get_all(store, &nr_syms);
-	if (!s)
+	if (!s) {
+		excludes_destroy(ex);
 		return;
+	}
 
 	unknown = sym_get_unknown(store);
 
@@ -97,6 +99,7 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 		fp = fopen(filename, "w+");
 		if (!fp) {
 			perror(filename);
+			excludes_destroy(ex);
 			return;
 		}
 	}
@@ -120,6 +123,7 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 		fflush(fp);
 		fclose(fp);
 	}
+	excludes_destroy(ex);
 }
 
 void coverage_init(void **store, const char *filename, enum cov_format fmt,
