@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include <qemu-plugin.h>
 
@@ -52,10 +54,13 @@ struct etrace_exec_packet32 {
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct tb_data *translated_blocks;
 static int trace_fd = -1;
+static gzFile trace_gz;
 static bool trace_failed;
 static uint8_t guest_address_bits;
+static int gzip_level = Z_BEST_SPEED;
+static bool gzip_output;
 
-static bool write_full(const void *buf, size_t len)
+static bool write_raw(const void *buf, size_t len)
 {
 	const uint8_t *p = buf;
 
@@ -75,11 +80,39 @@ static bool write_full(const void *buf, size_t len)
 	return true;
 }
 
+static bool write_output(const void *buf, size_t len)
+{
+	const uint8_t *p = buf;
+
+	if (!trace_gz)
+		return write_raw(buf, len);
+
+	while (len) {
+		unsigned int chunk = len > UINT_MAX ? UINT_MAX : (unsigned int)len;
+		int ret = gzwrite(trace_gz, p, chunk);
+
+		if (ret <= 0)
+			return false;
+		p += ret;
+		len -= (size_t)ret;
+	}
+	return true;
+}
+
+static const char *output_error(void)
+{
+	int error;
+
+	if (trace_gz)
+		return gzerror(trace_gz, &error);
+	return strerror(errno);
+}
+
 static void write_packet(const void *packet, size_t len)
 {
 	pthread_mutex_lock(&lock);
-	if (!trace_failed && !write_full(packet, len)) {
-		fprintf(stderr, "qemu-etrace-plugin: write: %s\n", strerror(errno));
+	if (!trace_failed && !write_output(packet, len)) {
+		fprintf(stderr, "qemu-etrace-plugin: write: %s\n", output_error());
 		trace_failed = true;
 	}
 	pthread_mutex_unlock(&lock);
@@ -126,8 +159,8 @@ static bool write_headers(void)
 		},
 	};
 
-	return write_full(&info_packet, sizeof(info_packet))
-		&& write_full(&arch_packet, sizeof(arch_packet));
+	return write_output(&info_packet, sizeof(info_packet))
+		&& write_output(&arch_packet, sizeof(arch_packet));
 }
 
 static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
@@ -227,7 +260,11 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 	(void) userdata;
 
 	pthread_mutex_lock(&lock);
-	if (trace_fd >= 0) {
+	if (trace_gz) {
+		if (gzclose(trace_gz) != Z_OK)
+			fprintf(stderr, "qemu-etrace-plugin: unable to finish gzip output\n");
+		trace_gz = NULL;
+	} else if (trace_fd >= 0) {
 		close(trace_fd);
 		trace_fd = -1;
 	}
@@ -248,11 +285,32 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 			int argc, char **argv)
 {
 	const char *output = "etrace.bin";
+	char mode[] = "wb1";
+	char *end;
+	long level;
+	int fd;
 	int i;
 
+	gzip_output = false;
+	gzip_level = Z_BEST_SPEED;
+	trace_failed = false;
 	for (i = 0; i < argc; i++) {
 		if (!strncmp(argv[i], "out=", 4) && argv[i][4]) {
 			output = argv[i] + 4;
+		} else if (!strcmp(argv[i], "compress=gzip")) {
+			gzip_output = true;
+		} else if (!strcmp(argv[i], "compress=none")) {
+			gzip_output = false;
+		} else if (!strncmp(argv[i], "level=", 6)) {
+			errno = 0;
+			level = strtol(argv[i] + 6, &end, 10);
+			if (errno || *end || level < 0 || level > 9) {
+				fprintf(stderr,
+					"qemu-etrace-plugin: invalid gzip level: %s\n",
+					argv[i] + 6);
+				return -1;
+			}
+			gzip_level = (int)level;
 		} else {
 			fprintf(stderr, "qemu-etrace-plugin: invalid option: %s\n",
 				argv[i]);
@@ -260,18 +318,42 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 		}
 	}
 
-	trace_fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-	if (trace_fd < 0) {
+	fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0) {
 		fprintf(stderr, "qemu-etrace-plugin: %s: %s\n",
 			output, strerror(errno));
 		return -1;
 	}
+	if (gzip_output) {
+		mode[2] = (char)('0' + gzip_level);
+		trace_gz = gzdopen(fd, mode);
+		if (!trace_gz) {
+			fprintf(stderr, "qemu-etrace-plugin: %s: %s\n",
+				output, strerror(errno));
+			close(fd);
+			return -1;
+		}
+		if (gzbuffer(trace_gz, 128 * 1024) != 0) {
+			fprintf(stderr,
+				"qemu-etrace-plugin: unable to allocate gzip buffer\n");
+			gzclose(trace_gz);
+			trace_gz = NULL;
+			return -1;
+		}
+	} else {
+		trace_fd = fd;
+	}
 	guest_address_bits = target_bits(info->target_name);
 	if (!write_headers()) {
-		fprintf(stderr, "qemu-etrace-plugin: %s: %s\n",
-			output, strerror(errno));
-		close(trace_fd);
-		trace_fd = -1;
+		fprintf(stderr, "qemu-etrace-plugin: %s: %s\n", output,
+			output_error());
+		if (trace_gz) {
+			gzclose(trace_gz);
+			trace_gz = NULL;
+		} else {
+			close(trace_fd);
+			trace_fd = -1;
+		}
 		return -1;
 	}
 

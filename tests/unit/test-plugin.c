@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "etrace-format.h"
 #include "qemu-plugin.h"
@@ -241,12 +242,84 @@ static void test_32bit_execution_trace(void)
 	g_free(path);
 }
 
+static void test_gzip_execution_trace(void)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x3000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x3000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	struct etrace_entry64 entry;
+	struct etrace_hdr hdr;
+	const uint8_t *cursor;
+	char *args[3];
+	char *path = NULL;
+	uint8_t contents[256];
+	uint64_t start_time;
+	gzFile input;
+	int fd;
+	int length;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX.gz", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "compress=gzip";
+	args[2] = "level=1";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 3, args), ==, 0);
+#if QEMU_PLUGIN_VERSION >= 7
+	trans_cb(&tb, trans_data);
+#else
+	trans_cb(1, &tb);
+#endif
+	exec_cb(4, exec_data);
+#if QEMU_PLUGIN_VERSION >= 7
+	exit_cb(exit_data);
+#else
+	exit_cb(1, exit_data);
+#endif
+
+	input = gzopen(path, "rb");
+	g_assert_nonnull(input);
+	length = gzread(input, contents, sizeof(contents));
+	g_assert_cmpint(length, >, 0);
+	g_assert_cmpint(gzclose(input), ==, Z_OK);
+
+	cursor = contents;
+	read_data(&cursor, &hdr, sizeof(hdr));
+	cursor += hdr.len;
+	read_data(&cursor, &hdr, sizeof(hdr));
+	cursor += hdr.len;
+	read_data(&cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_EXEC);
+	g_assert_cmpuint(hdr.unit_id, ==, 4);
+	read_data(&cursor, &start_time, sizeof(start_time));
+	read_data(&cursor, &entry, sizeof(entry));
+	g_assert_cmpuint(entry.start, ==, 0x3000);
+	g_assert_cmpuint(entry.end, ==, 0x3004);
+	g_assert_cmpuint(cursor - contents, ==, length);
+
+	unlink(path);
+	g_free(args[0]);
+	g_free(path);
+}
+
 int main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/plugin/execution-trace", test_execution_trace);
 	g_test_add_func("/plugin/32bit-execution-trace",
 			test_32bit_execution_trace);
+	g_test_add_func("/plugin/gzip-execution-trace",
+			test_gzip_execution_trace);
 
 	return g_test_run();
 }

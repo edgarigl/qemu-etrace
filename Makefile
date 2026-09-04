@@ -102,7 +102,7 @@ $(PLUGIN): plugin/etrace-plugin.c etrace-format.h $(QEMU_PLUGIN_HEADER)
 	$(CC) -Wall -Wextra -O2 -g -fPIC -fvisibility=hidden \
 		-I. -I$(dir $(QEMU_PLUGIN_HEADER)) \
 		$(shell $(PKGCONFIG) --cflags glib-2.0) \
-		-shared plugin/etrace-plugin.c -pthread -o $@
+		-shared plugin/etrace-plugin.c -pthread -lz -o $@
 
 print-plugin-path:
 	@echo $(plugindir)/$(PLUGIN_NAME)
@@ -124,21 +124,21 @@ $(TEST_BUILD_DIR)/test-plugin: tests/unit/test-plugin.c plugin/etrace-plugin.c \
 		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -I. -Itests/plugin \
 		tests/unit/test-plugin.c plugin/etrace-plugin.c -pthread \
-		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
 $(TEST_BUILD_DIR)/test-plugin-v1: tests/unit/test-plugin.c plugin/etrace-plugin.c \
 		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=1 \
 		-I. -Itests/plugin tests/unit/test-plugin.c \
 		plugin/etrace-plugin.c -pthread \
-		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
 $(TEST_BUILD_DIR)/test-plugin-v7: tests/unit/test-plugin.c plugin/etrace-plugin.c \
 		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=7 \
 		-I. -Itests/plugin tests/unit/test-plugin.c \
 		plugin/etrace-plugin.c -pthread \
-		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
 $(TEST_BUILD_DIR)/coverage-fixture: tests/fixtures/coverage.c | $(TEST_BUILD_DIR)
 	$(CC) -O0 -g -fno-inline -fno-pie -no-pie $< -o $@
