@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <stddef.h>
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
@@ -55,8 +56,16 @@ static bool etrace_read_hdr(int fd, struct etrace_hdr *hdr)
 	ssize_t r;
 
 	r = safe_read(fd, hdr, sizeof *hdr);
-	if (r != sizeof *hdr)
+	if (r == 0)
 		return false;
+	if (r < 0) {
+		perror("etrace header");
+		exit(EXIT_FAILURE);
+	}
+	if (r != sizeof *hdr) {
+		fprintf(stderr, "Unexpected end of ETrace header\n");
+		exit(EXIT_FAILURE);
+	}
 	return true;
 }
 
@@ -68,14 +77,116 @@ static bool etrace_read_pkg(struct etracer *t, struct etrace_pkg *pkg)
 		return false;
 
 	if (pkg->hdr.len > MAX_PKG) {
-		printf("Too large Etrace pkg! %d\n", pkg->hdr.len);
-		return false;
+		fprintf(stderr, "ETrace package is too large: %u\n",
+			pkg->hdr.len);
+		exit(EXIT_FAILURE);
 	}
 
 	r = safe_read(t->tr.fd, &pkg->u8[0], pkg->hdr.len);
-	if (r != pkg->hdr.len)
-		return false;
+	if (r < 0) {
+		perror("etrace payload");
+		exit(EXIT_FAILURE);
+	}
+	if (r != pkg->hdr.len) {
+		fprintf(stderr, "Unexpected end of ETrace payload\n");
+		exit(EXIT_FAILURE);
+	}
 
+	return true;
+}
+
+static bool etrace_invalid_pkg(const struct etrace_pkg *pkg,
+			       const char *reason)
+{
+	fprintf(stderr, "Invalid ETrace package type %u, length %u: %s\n",
+		pkg->hdr.type, pkg->hdr.len, reason);
+	return false;
+}
+
+static bool etrace_names_valid(const uint8_t *names, size_t available,
+			       uint16_t dev_name_len,
+			       uint16_t event_name_len)
+{
+	size_t names_len = (size_t) dev_name_len + event_name_len;
+
+	if (dev_name_len == 0 || event_name_len == 0 || names_len > available)
+		return false;
+	return names[dev_name_len - 1] == '\0'
+		&& names[names_len - 1] == '\0';
+}
+
+static bool etrace_validate_pkg(struct etracer *t)
+{
+	struct etrace_pkg *pkg = t->pkg;
+	size_t fixed_len;
+	size_t code_len;
+	size_t ent_size;
+
+	switch (pkg->hdr.type) {
+	case TYPE_INFO:
+		if (pkg->hdr.len < sizeof(pkg->info))
+			return etrace_invalid_pkg(pkg, "short info payload");
+		break;
+	case TYPE_ARCH:
+		if (pkg->hdr.len < sizeof(pkg->arch))
+			return etrace_invalid_pkg(pkg, "short architecture payload");
+		break;
+	case TYPE_EXEC:
+		if (pkg->hdr.len < sizeof(pkg->ex.start_time))
+			return etrace_invalid_pkg(pkg, "short execution payload");
+		if (t->arch.guest.arch_bits == 32)
+			ent_size = sizeof(pkg->ex.t32[0]);
+		else if (t->arch.guest.arch_bits == 64)
+			ent_size = sizeof(pkg->ex.t64[0]);
+		else
+			return etrace_invalid_pkg(pkg, "missing guest architecture");
+		if ((pkg->hdr.len - sizeof(pkg->ex.start_time)) % ent_size)
+			return etrace_invalid_pkg(pkg, "partial execution entry");
+		break;
+	case TYPE_TB:
+		fixed_len = offsetof(struct etrace_tb, data8);
+		if (pkg->hdr.len < fixed_len)
+			return etrace_invalid_pkg(pkg, "short translation block payload");
+		code_len = (size_t) pkg->tb.guest_code_len
+			+ pkg->tb.host_code_len;
+		if (code_len > pkg->hdr.len - fixed_len)
+			return etrace_invalid_pkg(pkg, "translation block code exceeds payload");
+		if ((t->tr.guest.machine || t->tr.host.machine)
+		    && t->arch.guest.arch_bits != 32
+		    && t->arch.guest.arch_bits != 64)
+			return etrace_invalid_pkg(pkg, "missing architecture for disassembly");
+		break;
+	case TYPE_NOTE:
+		if (pkg->hdr.len < sizeof(pkg->note.time))
+			return etrace_invalid_pkg(pkg, "short note payload");
+		break;
+	case TYPE_MEM:
+		if (pkg->hdr.len < sizeof(pkg->mem))
+			return etrace_invalid_pkg(pkg, "short memory payload");
+		break;
+	case TYPE_OLD_EVENT_U64:
+		fixed_len = offsetof(struct etrace_old_event_u64, names);
+		if (pkg->hdr.len < fixed_len)
+			return etrace_invalid_pkg(pkg, "short legacy event payload");
+		if (!etrace_names_valid(pkg->old_event_u64.names,
+				pkg->hdr.len - fixed_len,
+				pkg->old_event_u64.dev_name_len,
+				pkg->old_event_u64.event_name_len))
+			return etrace_invalid_pkg(pkg, "invalid legacy event names");
+		break;
+	case TYPE_EVENT_U64:
+		fixed_len = offsetof(struct etrace_event_u64, names);
+		if (pkg->hdr.len < fixed_len)
+			return etrace_invalid_pkg(pkg, "short event payload");
+		if (!etrace_names_valid(pkg->event_u64.names,
+				pkg->hdr.len - fixed_len,
+				pkg->event_u64.dev_name_len,
+				pkg->event_u64.event_name_len))
+			return etrace_invalid_pkg(pkg, "invalid event names");
+		break;
+	default:
+		break;
+	}
 	return true;
 }
 
@@ -208,7 +319,7 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 		assert(0);
 
 
-	len = t->pkg->hdr.len;
+	len = t->pkg->hdr.len - sizeof(ex->start_time);
 	len /= ent_size;
 
 	for (i = 0; i < len; i++) {
@@ -301,11 +412,13 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 void etrace_process_note(struct etracer *t)
 {
 	struct etrace_note *nt = &t->pkg->note;
+	size_t len;
+
 	if (!t->tr.fp_out)
 		return;
 
-	t->pkg->u8[t->pkg->hdr.len] = 0;
-	fprintf(t->tr.fp_out, "%s", &nt->data8[0]);
+	len = t->pkg->hdr.len - sizeof(nt->time);
+	fwrite(&nt->data8[0], 1, len, t->tr.fp_out);
 }
 
 void etrace_process_mem(struct etracer *t)
@@ -322,7 +435,7 @@ void etrace_process_mem(struct etracer *t)
 
 void etrace_process_old_event_u64(struct etracer *t)
 {
-	struct etrace_event_u64 *event = &t->pkg->event_u64;
+	struct etrace_old_event_u64 *event = &t->pkg->old_event_u64;
 	if (!t->tr.fp_out)
 		return;
 
@@ -349,7 +462,7 @@ void etrace_show(int fd, FILE *fp_out,
 		 enum trace_format trace_in_fmt,
 		 enum trace_format trace_out_fmt)
 {
-	struct etracer t;
+	struct etracer t = { 0 };
 	bool unknown_pkg_warn = false;
 	int fd_out = -1;
 
@@ -376,6 +489,11 @@ void etrace_show(int fd, FILE *fp_out,
 
 	while (etrace_read_pkg(&t, t.pkg)) {
 		int r;
+
+		if (!etrace_validate_pkg(&t)) {
+			free(t.pkg);
+			exit(EXIT_FAILURE);
+		}
 
 		switch (t.pkg->hdr.type) {
 		case TYPE_EXEC:

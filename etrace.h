@@ -134,6 +134,7 @@ struct etrace_pkg {
 		struct etrace_tb tb;
 		struct etrace_note note;
 		struct etrace_mem mem;
+		struct etrace_old_event_u64 old_event_u64;
 		struct etrace_event_u64 event_u64;
 		uint8_t   u8[0];
 		uint16_t u16[0];
