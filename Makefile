@@ -58,20 +58,45 @@ OBJS += trace-hex.o
 OBJS += trace-qemu-simple.o
 
 TARGET = qemu-etrace
+PLUGIN_NAME = libqemu-etrace.so
+QEMU_SRC ?= ../qemu
+QEMU_PLUGIN_HEADER ?= $(firstword \
+	$(wildcard $(QEMU_SRC)/include/plugins/qemu-plugin.h) \
+	$(wildcard $(QEMU_SRC)/include/qemu/qemu-plugin.h))
+QEMU_PLUGIN_API ?= $(or $(shell sed -n \
+	's/^[[:space:]]*\#define[[:space:]]*QEMU_PLUGIN_VERSION[[:space:]]*//p' \
+	$(QEMU_PLUGIN_HEADER) 2>/dev/null),unknown)
+PLUGIN ?= .plugin-build/$(QEMU_PLUGIN_API)/$(PLUGIN_NAME)
 TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
+TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
+TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
+TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v7
 TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
 
 all: $(TARGET).sh
 
-.PHONY: all binutils check clean distclean
+.PHONY: all binutils check clean distclean plugin
 
 -include $(OBJS:.o=.d)
 CFLAGS += -MMD
 
 $(TARGET): $(OBJS)
 	$(LD) $(HEAD) $(OBJS) $(LDFLAGS) $(LDLIBS) -o $@
+
+plugin: $(PLUGIN)
+
+$(PLUGIN): plugin/etrace-plugin.c etrace-format.h $(QEMU_PLUGIN_HEADER)
+	@test -n "$(QEMU_PLUGIN_HEADER)" || { \
+		echo "Set QEMU_SRC or QEMU_PLUGIN_HEADER to a QEMU source tree" >&2; \
+		exit 1; \
+	}
+	mkdir -p $(dir $@)
+	$(CC) -Wall -Wextra -O2 -g -fPIC -fvisibility=hidden \
+		-I. -I$(dir $(QEMU_PLUGIN_HEADER)) \
+		$(shell $(PKGCONFIG) --cflags glib-2.0) \
+		-shared plugin/etrace-plugin.c -pthread -o $@
 
 $(TEST_BUILD_DIR):
 	mkdir -p $@
@@ -86,12 +111,35 @@ $(TEST_BUILD_DIR)/test-excludes: tests/unit/test-excludes.c excludes.c excludes.
 		tests/unit/test-excludes.c excludes.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
+$(TEST_BUILD_DIR)/test-plugin: tests/unit/test-plugin.c plugin/etrace-plugin.c \
+		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+	$(CC) $(filter-out -MMD,$(CFLAGS)) -I. -Itests/plugin \
+		tests/unit/test-plugin.c plugin/etrace-plugin.c -pthread \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
+$(TEST_BUILD_DIR)/test-plugin-v1: tests/unit/test-plugin.c plugin/etrace-plugin.c \
+		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=1 \
+		-I. -Itests/plugin tests/unit/test-plugin.c \
+		plugin/etrace-plugin.c -pthread \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
+$(TEST_BUILD_DIR)/test-plugin-v7: tests/unit/test-plugin.c plugin/etrace-plugin.c \
+		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=7 \
+		-I. -Itests/plugin tests/unit/test-plugin.c \
+		plugin/etrace-plugin.c -pthread \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
 $(TEST_BUILD_DIR)/coverage-fixture: tests/fixtures/coverage.c | $(TEST_BUILD_DIR)
 	$(CC) -O0 -g -fno-inline -fno-pie -no-pie $< -o $@
 
 check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-filename
+	$(TEST_BUILD_DIR)/test-plugin
+	$(TEST_BUILD_DIR)/test-plugin-v1
+	$(TEST_BUILD_DIR)/test-plugin-v7
 	$(PYTEST) -q
 
 BU_VER=binutils-2.42
@@ -138,8 +186,8 @@ $(TARGET).sh: $(TARGET)
 	chmod +x $@
 
 clean:
-	$(RM) $(OBJS) $(OBJS:.o=.d) $(TARGET) $(TARGET).sh
-	$(RM) -r $(TEST_BUILD_DIR) .pytest_cache tests/__pycache__
+	$(RM) $(OBJS) $(OBJS:.o=.d) $(TARGET) $(TARGET).sh libqemu-etrace.so
+	$(RM) -r .plugin-build $(TEST_BUILD_DIR) .pytest_cache tests/__pycache__
 
 distclean: clean
 	$(RM) -r $(BU_BUILDDIR) $(BU_INSTALLDIR) $(BU_VER)

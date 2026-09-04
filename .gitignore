@@ -3,6 +3,7 @@ qemu-etrace.sh
 .gdb_history
 .gdbinit
 *.a
+*.so
 *.aux
 *.cp
 *.dvi
@@ -30,6 +31,7 @@ qemu-etrace.sh
 *.gcda
 *.gcno
 .pytest_cache/
+.plugin-build/
 .test-build/
 .stgit-*
 cscope.*
