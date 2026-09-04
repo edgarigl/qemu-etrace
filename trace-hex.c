@@ -124,7 +124,7 @@ void hextrace_show(int fd, FILE *fp_out,
 	size_t len = 0;
 	ssize_t ret;
 
-	fp_in = fdopen(fd, "r");
+	fp_in = fdopen(dup(fd), "r");
 	if (!fp_in) {
 		fprintf(stderr, "Cant open input file\n");
 		exit(1);
@@ -170,5 +170,6 @@ void hextrace_show(int fd, FILE *fp_out,
 		ht_process_exec(&t, start, start + 4, cov_fmt);
 	}
 	free(line);
+	fclose(fp_in);
 	fprintf(stderr, "done.\n");
 }

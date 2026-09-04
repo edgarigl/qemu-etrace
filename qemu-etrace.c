@@ -399,6 +399,7 @@ int main(int argc, char **argv)
 {
 	FILE *trace_out;
 	void *sym_tree = NULL;
+	bool is_socket;
 	int fd;
 
 	bfd_init();
@@ -441,7 +442,8 @@ int main(int argc, char **argv)
 		 * SIGINT synchronously with a post process of the
 		 * stats prior to exit().
 		 */
-		if (fd >=0 && fd_is_socket(fd)) {
+		is_socket = fd_is_socket(fd);
+		if (is_socket) {
 			block_sigint_exit = true;
 		}
 
@@ -451,7 +453,8 @@ int main(int argc, char **argv)
 			   &sym_tree, args.coverage_format,
 			   args.trace_in_format,
 			   args.trace_out_format);
-	} while (fd_is_socket(fd) && !got_sigint && args.server);
+		close(fd);
+	} while (is_socket && !got_sigint && args.server);
 
 	sym_show_stats(&sym_tree);
 
