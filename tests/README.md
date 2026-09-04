@@ -12,7 +12,8 @@ using the native byte order consumed by the decoders.
 
 The plugin unit tests use local API stubs for QEMU plugin API versions 1, 5,
 and 7, covering QEMU 8.2, QEMU 10.2, and the callback ABI used by current
-upstream QEMU. They do not require a QEMU source tree or emulator binary.
+upstream QEMU. They verify raw and gzip-compressed output without requiring a
+QEMU source tree or emulator binary.
 
 Run only the Python integration tests after building `qemu-etrace` with:
 

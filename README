@@ -89,9 +89,25 @@ $ qemu-system-aarch64 ... \
 The plugin records execution callbacks for chained translation blocks, so
 `-d nochain` is not needed. Output writes are serialized for MTTCG. The plugin
 currently records TB ranges with a zero duration, which supports coverage but
-does not provide time-based profiling. Its `out=` option currently accepts a
-regular file path; UNIX socket output remains available through the Xilinx
-QEMU ETrace implementation.
+does not provide time-based profiling.
+
+Add `compress=gzip` to compress the trace while QEMU runs. Compression level 1
+is the default and levels from 0 through 9 can be selected with `level=`:
+
+$ qemu-system-aarch64 ... \
+    -accel tcg \
+    -plugin /usr/local/lib/qemu-etrace/plugins/5/libqemu-etrace.so,out=/tmp/elog.gz,compress=gzip,level=1 \
+    -kernel vmlinux
+
+`qemu-etrace` transparently reads raw and gzip-compressed ETrace input, so the
+compressed file can be processed directly:
+
+$ qemu-etrace --trace /tmp/elog.gz --elf vmlinux
+
+Raw output remains the default. The gzip stream is finalized when QEMU exits
+normally; an abruptly terminated QEMU process may leave a truncated gzip
+stream. The `out=` option accepts a regular file or a pre-created FIFO. UNIX
+socket output remains available through the Xilinx QEMU ETrace implementation.
 
 The Xilinx QEMU fork can instead use its built-in ETrace options.
 `-etrace-flags exec` enables execution tracing, `-d nochain` disables direct TB
