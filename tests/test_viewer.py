@@ -1,6 +1,7 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 
 import etrace
@@ -52,3 +53,27 @@ def test_python_decoder_reads_execution_record():
     assert execution.all.ex.ex32[0].duration == 4
     assert execution.all.ex.ex32[0].start == 0x1000
     assert execution.all.ex.ex32[0].end == 0x1004
+
+
+def test_viewer_advances_after_last_execution_entry():
+    viewer_module = load_viewer()
+
+    class TraceReader:
+        TYPE_EXEC = 1
+
+        def stepf(self):
+            return None
+
+    entry = SimpleNamespace(start=0x1000, end=0x1004)
+    record = SimpleNamespace(
+        hdr=SimpleNamespace(type=TraceReader.TYPE_EXEC),
+        all=SimpleNamespace(ex=SimpleNamespace(nr=1, ex32=[entry])),
+    )
+    viewer = viewer_module.traceview.__new__(viewer_module.traceview)
+    viewer.e = TraceReader()
+    viewer.record = record
+    viewer.record_idx = 0
+    viewer.record_pos = entry.start
+
+    assert viewer.step_record(1) is None
+    assert viewer.record is None

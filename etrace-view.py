@@ -176,12 +176,12 @@ class traceview(object):
 
 				if self.record_pos >= r.all.ex.ex32[self.record_idx].end:
 					self.record_idx += 1
-					self.record_pos = r.all.ex.ex32[self.record_idx].start
-
-				if self.record_idx == r.all.ex.nr:
-					self.record = None
-					r = self.e.stepf()
-					self.step_start_of_record(r)
+					if self.record_idx == r.all.ex.nr:
+						self.record = None
+						r = self.e.stepf()
+						self.step_start_of_record(r)
+					else:
+						self.record_pos = r.all.ex.ex32[self.record_idx].start
 			else:
 				r = self.e.stepf()
 				self.step_start_of_record(r)
