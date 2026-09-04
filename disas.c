@@ -174,10 +174,11 @@ void disas_objdump(FILE *fp_out, const char *objdump, const char *machine,
 			while (s[pos++] != '\n')
 				;
 		}
-		fflush(stdout);
-		safe_write(1, s + pos, fsize - pos);
+		fflush(fp_out);
+		safe_write(fileno(fp_out), s + pos, fsize - pos);
 	}
 
+	munmap(output, fsize_aligned);
 	close(fd_in);
 	close(fd_out);
 	free(str);
