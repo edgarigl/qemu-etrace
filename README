@@ -42,12 +42,61 @@ command-line integration tests with:
 
 $ make check
 
+QEMU TCG PLUGIN
+---------------
+The `libqemu-etrace.so` plugin lets an unmodified upstream QEMU generate
+ETrace execution logs. The plugin must be compiled against the plugin header
+from the QEMU version that will load it. By default, the build looks for a
+QEMU source tree in `../qemu`:
+
+$ make plugin
+
+Select another QEMU source tree when needed:
+
+$ make plugin QEMU_SRC=/path/to/qemu
+
+The default installation prefix is `/usr/local`. The plugin is host executable
+code, so it is installed under `lib`, not `share`:
+
+$ sudo make install QEMU_SRC=/path/to/qemu
+
+This installs:
+
+    /usr/local/bin/qemu-etrace
+    /usr/local/lib/qemu-etrace/plugins/5/libqemu-etrace.so
+
+The numeric directory is the QEMU plugin API version read from the selected
+QEMU header. This allows plugins for incompatible QEMU versions to be installed
+side by side. Print the installation path for the selected header with:
+
+$ make -s print-plugin-path QEMU_SRC=/path/to/qemu
+
+For a distribution-style `/usr` installation, use:
+
+$ sudo make install prefix=/usr QEMU_SRC=/path/to/qemu
+
+`DESTDIR` and `libdir` can be overridden for packaging and multiarch layouts.
+
 USAGE
 -----
-QEMU needs to run with etrace tracing.
-Flags -etrace-flags exec enables the execution tracing.
-'-d nochain' disables direct tb jumps so that QEMU can trace all executed code.
--accel tcg,thread=single disables MTTCG (etrace is not yet thread safe).
+With upstream QEMU, load the TCG plugin and select an output file:
+
+$ qemu-system-aarch64 ... \
+    -accel tcg \
+    -plugin /usr/local/lib/qemu-etrace/plugins/5/libqemu-etrace.so,out=/tmp/elog \
+    -kernel vmlinux
+
+The plugin records execution callbacks for chained translation blocks, so
+`-d nochain` is not needed. Output writes are serialized for MTTCG. The plugin
+currently records TB ranges with a zero duration, which supports coverage but
+does not provide time-based profiling. Its `out=` option currently accepts a
+regular file path; UNIX socket output remains available through the Xilinx
+QEMU ETrace implementation.
+
+The Xilinx QEMU fork can instead use its built-in ETrace options.
+`-etrace-flags exec` enables execution tracing, `-d nochain` disables direct TB
+jumps so all executed code is traced, and `-accel tcg,thread=single` disables
+MTTCG because the built-in ETrace implementation is not thread safe.
 
 $ qemu ... -kernel vmlinux -etrace /tmp/elog -etrace-flags exec -d nochain -accel tcg,thread=single
 
