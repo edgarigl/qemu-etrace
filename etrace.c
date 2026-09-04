@@ -31,6 +31,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "util.h"
 #include "safeio.h"
@@ -49,19 +50,42 @@ struct etracer {
 	struct etrace_info_data info;
 	struct etrace_arch arch;
 	struct etrace_pkg *pkg;
+	gzFile input;
 };
 
-static bool etrace_read_hdr(int fd, struct etrace_hdr *hdr)
+static ssize_t etrace_read(struct etracer *t, void *buf, size_t len)
+{
+	uint8_t *p = buf;
+	size_t total = 0;
+
+	while (total < len) {
+		unsigned int chunk = len - total > UINT_MAX
+			? UINT_MAX : (unsigned int)(len - total);
+		int ret = gzread(t->input, p + total, chunk);
+
+		if (ret < 0) {
+			int error;
+			const char *message = gzerror(t->input, &error);
+
+			fprintf(stderr, "ETrace input: %s\n", message);
+			return -1;
+		}
+		if (ret == 0)
+			break;
+		total += (size_t)ret;
+	}
+	return total;
+}
+
+static bool etrace_read_hdr(struct etracer *t, struct etrace_hdr *hdr)
 {
 	ssize_t r;
 
-	r = safe_read(fd, hdr, sizeof *hdr);
+	r = etrace_read(t, hdr, sizeof *hdr);
 	if (r == 0)
 		return false;
-	if (r < 0) {
-		perror("etrace header");
+	if (r < 0)
 		exit(EXIT_FAILURE);
-	}
 	if (r != sizeof *hdr) {
 		fprintf(stderr, "Unexpected end of ETrace header\n");
 		exit(EXIT_FAILURE);
@@ -73,7 +97,7 @@ static bool etrace_read_pkg(struct etracer *t, struct etrace_pkg *pkg)
 {
 	ssize_t r;
 
-	if (!etrace_read_hdr(t->tr.fd, &pkg->hdr))
+	if (!etrace_read_hdr(t, &pkg->hdr))
 		return false;
 
 	if (pkg->hdr.len > MAX_PKG) {
@@ -82,11 +106,9 @@ static bool etrace_read_pkg(struct etracer *t, struct etrace_pkg *pkg)
 		exit(EXIT_FAILURE);
 	}
 
-	r = safe_read(t->tr.fd, &pkg->u8[0], pkg->hdr.len);
-	if (r < 0) {
-		perror("etrace payload");
+	r = etrace_read(t, &pkg->u8[0], pkg->hdr.len);
+	if (r < 0)
 		exit(EXIT_FAILURE);
-	}
 	if (r != pkg->hdr.len) {
 		fprintf(stderr, "Unexpected end of ETrace payload\n");
 		exit(EXIT_FAILURE);
@@ -476,6 +498,15 @@ void etrace_show(int fd, FILE *fp_out,
 	t.tr.host.machine = machine;
 	t.tr.guest.objdump = guest_objdump;
 	t.tr.guest.machine = guest_machine;
+	t.input = gzdopen(dup(fd), "rb");
+	if (!t.input) {
+		fprintf(stderr, "Unable to open ETrace input\n");
+		exit(EXIT_FAILURE);
+	}
+	if (gzbuffer(t.input, 128 * 1024) != 0) {
+		fprintf(stderr, "Unable to allocate ETrace input buffer\n");
+		exit(EXIT_FAILURE);
+	}
 
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
 
@@ -558,5 +589,6 @@ void etrace_show(int fd, FILE *fp_out,
 		}
 	}
 	free(t.pkg);
+	gzclose(t.input);
 	fprintf(stderr, "done.\n");
 }
