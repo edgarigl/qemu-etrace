@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright (C) Xilinx Inc.
 # Written by Edgar E. Iglesias
@@ -28,8 +28,8 @@ import curses
 import addr2line
 
 def usage():
-	print "--help          Show help"
-	print "--trace         filename of trace"
+	print("--help          Show help")
+	print("--trace         filename of trace")
 
 class traceview(object):
 
@@ -104,7 +104,7 @@ class traceview(object):
 		if (h > 60):
 			h -= self.log_lines + 1
 		h -= 4
-		start = line_nr - h / 2
+		start = line_nr - h // 2
 		if start < 0:
 			start = 0
 		for i in range(4, h - 1):
@@ -309,7 +309,7 @@ class traceview(object):
 		(h, w) = self.screen.getmaxyx()
 		curses.echo()
 		self.screen.addstr(h - 1,0, "/")
-		str = self.screen.getstr(h - 1, 1)
+		str = self.screen.getstr(h - 1, 1).decode()
 		str = str.rstrip()
 		curses.noecho()
 		return str
@@ -385,13 +385,13 @@ class traceview(object):
 			r = None
 			c = self.screen.getch()
 
-def main(screen):
+def parse_arguments(argv):
 	args_comp_dir = None
 	args_trace = None
 	args_elf = None
 
 	try:
-		opts, args = getopt.getopt(sys.argv[1:],
+		opts, args = getopt.getopt(argv,
 					"h",
 					["help",
 					 "comp-dir=",
@@ -400,8 +400,8 @@ def main(screen):
 					 "elf=",
 					]
 					)
-	except getopt.GetoptError, err:
-		print str(err)
+	except getopt.GetoptError as err:
+		print(str(err))
 		usage()
 		sys.exit(1)
 
@@ -413,7 +413,8 @@ def main(screen):
 		elif o == "--comp-dir":
 			args_comp_dir = a
 		elif o == "--config":
-			execfile(a, cfg)
+			with open(a, "rb") as config_file:
+				exec(compile(config_file.read(), a, "exec"), cfg)
 		elif o == "--elf":
 			args_elf = a
 		elif o in ("-h", "--help"):
@@ -423,20 +424,25 @@ def main(screen):
 			assert False, "Unhandled option " + o
 
 	if args_trace == None:
-		print "Missing trace file"
+		print("Missing trace file")
 		sys.exit(1)
+	return args_comp_dir, args_trace, args_elf, cfg
+
+
+def main(screen, args_comp_dir, args_trace, args_elf, cfg):
 
 
 	screen.clear()
-	f = open(args_trace, 'rb')
-	e = etrace.etrace(f)
+	with open(args_trace, 'rb') as f:
+		e = etrace.etrace(f)
 
-	tv = traceview(screen, e, args_elf, args_comp_dir, cfg)
+		tv = traceview(screen, e, args_elf, args_comp_dir, cfg)
 
-	tv.loop()
+		tv.loop()
 
-try:
-	curses.wrapper(main)
-except KeyboardInterrupt:
-	sys.exit(0)
 
+if __name__ == "__main__":
+	try:
+		curses.wrapper(main, *parse_arguments(sys.argv[1:]))
+	except KeyboardInterrupt:
+		sys.exit(0)

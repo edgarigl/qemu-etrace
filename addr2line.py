@@ -16,9 +16,6 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA. 
 #
 
-import os
-import sys
-import string
 import subprocess
 
 class addr2line(object):
@@ -41,10 +38,11 @@ class addr2line(object):
 					shell=False,
 					stdin=subprocess.PIPE,
 					stdout=subprocess.PIPE,
-					stderr=subprocess.STDOUT, bufsize=0)
+					stderr=subprocess.STDOUT,
+					text=True)
 		(out, err) = self.p.communicate("0x%x\n" % addr)
 
-		lines = string.split(out, '\n')
+		lines = out.splitlines()
 		sym = lines[0]
 		l = lines[1].split(' ')
 		loc = l[0].split(':')

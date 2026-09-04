@@ -144,7 +144,7 @@ class etrace(object):
 			return "info"
 
 		typenames = ["none", "exec", "tb", "note", "mem",
-				"arch", "barrier", "event_u64"]
+				"arch", "barrier", "old_event_u64", "event_u64"]
 		return typenames[type]
 
 	def push_pos(self):
@@ -202,13 +202,13 @@ class etrace(object):
 		end_pos = pos + pkg.hdr.len
 		if pkg.hdr.type == self.TYPE_ARCH:
 			self.f.readinto(pkg.all.arch)
-			print sizeof(pkg.all.arch)
+			print(sizeof(pkg.all.arch))
 			self.arch = pkg.all.arch
 			if self.arch.guest.arch_bits == 32:
 				self.etype = etrace_exec_entry32
 			else:
 				assert False, "Unsupported arch bit %d" \
-						% self.arch.arch_bits
+						% self.arch.guest.arch_bits
 			self.f.seek(end_pos, 0)
 
 		elif pkg.hdr.type == self.TYPE_MEM:
@@ -222,14 +222,15 @@ class etrace(object):
 			pkg.all.event_name = ev_name
 			pkg.all.dev_name = dev_name
 		elif pkg.hdr.type == self.TYPE_EXEC:
-			len = (pkg.hdr.len - sizeof(pkg.all.texec))
-			len /= sizeof(self.etype)
-			a = (self.etype * len)()
+			entry_count = (pkg.hdr.len - sizeof(pkg.all.texec))
+			entry_count //= sizeof(self.etype)
+			a = (self.etype * entry_count)()
 			self.f.readinto(pkg.all.texec)
 			self.f.readinto(a)
-			pkg.all.ex.nr = len
+			pkg.all.ex.nr = entry_count
 			if self.arch.guest.arch_bits == 32:
 				pkg.all.ex.ex32 = cast(a, POINTER(self.etype))
+				pkg._exec_entries = a
 		else:
 			self.f.seek(end_pos, 0)
 
