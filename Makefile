@@ -20,6 +20,11 @@ LD = $(CC)
 PKGCONFIG = pkg-config
 PYTHON ?= python3
 PYTEST ?= $(PYTHON) -m pytest
+INSTALL ?= install
+
+prefix ?= /usr/local
+bindir ?= $(prefix)/bin
+libdir ?= $(prefix)/lib
 
 CFLAGS  += -Wall -O3 -g
 CFLAGS  += $(shell $(PKGCONFIG) --cflags glib-2.0)
@@ -67,6 +72,7 @@ QEMU_PLUGIN_API ?= $(or $(shell sed -n \
 	's/^[[:space:]]*\#define[[:space:]]*QEMU_PLUGIN_VERSION[[:space:]]*//p' \
 	$(QEMU_PLUGIN_HEADER) 2>/dev/null),unknown)
 PLUGIN ?= .plugin-build/$(QEMU_PLUGIN_API)/$(PLUGIN_NAME)
+plugindir ?= $(libdir)/qemu-etrace/plugins/$(QEMU_PLUGIN_API)
 TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
@@ -77,7 +83,7 @@ TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
 
 all: $(TARGET).sh
 
-.PHONY: all binutils check clean distclean plugin
+.PHONY: all binutils check clean distclean install plugin print-plugin-path uninstall
 
 -include $(OBJS:.o=.d)
 CFLAGS += -MMD
@@ -97,6 +103,9 @@ $(PLUGIN): plugin/etrace-plugin.c etrace-format.h $(QEMU_PLUGIN_HEADER)
 		-I. -I$(dir $(QEMU_PLUGIN_HEADER)) \
 		$(shell $(PKGCONFIG) --cflags glib-2.0) \
 		-shared plugin/etrace-plugin.c -pthread -o $@
+
+print-plugin-path:
+	@echo $(plugindir)/$(PLUGIN_NAME)
 
 $(TEST_BUILD_DIR):
 	mkdir -p $@
@@ -141,6 +150,15 @@ check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-plugin-v1
 	$(TEST_BUILD_DIR)/test-plugin-v7
 	$(PYTEST) -q
+
+install: $(TARGET) $(PLUGIN)
+	$(INSTALL) -d $(DESTDIR)$(bindir) $(DESTDIR)$(plugindir)
+	$(INSTALL) -m 0755 $(TARGET) $(DESTDIR)$(bindir)/$(notdir $(TARGET))
+	$(INSTALL) -m 0755 $(PLUGIN) $(DESTDIR)$(plugindir)/$(PLUGIN_NAME)
+
+uninstall:
+	$(RM) $(DESTDIR)$(bindir)/$(notdir $(TARGET))
+	$(RM) $(DESTDIR)$(plugindir)/$(PLUGIN_NAME)
 
 BU_VER=binutils-2.42
 BU_FILE=$(BU_VER).tar.gz
