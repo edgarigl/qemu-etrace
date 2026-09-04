@@ -18,6 +18,8 @@
 CC = $(CROSS)gcc
 LD = $(CC)
 PKGCONFIG = pkg-config
+PYTHON ?= python3
+PYTEST ?= $(PYTHON) -m pytest
 
 CFLAGS  += -Wall -O3 -g
 CFLAGS  += $(shell $(PKGCONFIG) --cflags glib-2.0)
@@ -56,14 +58,30 @@ OBJS += trace-hex.o
 OBJS += trace-qemu-simple.o
 
 TARGET = qemu-etrace
+TEST_BUILD_DIR = .test-build
+TEST_BINS = $(TEST_BUILD_DIR)/test-filename
 
 all: $(TARGET).sh
+
+.PHONY: all binutils check clean distclean
 
 -include $(OBJS:.o=.d)
 CFLAGS += -MMD
 
 $(TARGET): $(OBJS)
 	$(LD) $(HEAD) $(OBJS) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(TEST_BUILD_DIR):
+	mkdir -p $@
+
+$(TEST_BUILD_DIR)/test-filename: tests/unit/test-filename.c filename.c filename.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-filename.c filename.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
+check: $(TARGET) $(TEST_BINS)
+	$(TEST_BUILD_DIR)/test-filename
+	$(PYTEST) -q
 
 BU_VER=binutils-2.42
 BU_FILE=$(BU_VER).tar.gz
@@ -113,6 +131,7 @@ $(TARGET).sh: $(TARGET)
 
 clean:
 	$(RM) $(OBJS) $(OBJS:.o=.d) $(TARGET) $(TARGET).sh
+	$(RM) -r $(TEST_BUILD_DIR) .pytest_cache tests/__pycache__
 
 distclean: clean
 	$(RM) -r $(BU_BUILDDIR) $(BU_INSTALLDIR) $(BU_VER)

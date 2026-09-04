@@ -1,0 +1,15 @@
+def test_help_lists_trace_and_coverage_formats(run_etrace):
+    result = run_etrace("--help")
+
+    assert result.returncode == 0
+    assert "Supported trace formats:" in result.stdout
+    assert "qemu-simple" in result.stdout
+    assert "Supported coverage formats:" in result.stdout
+    assert "lcov" in result.stdout
+
+
+def test_trace_argument_is_required(run_etrace):
+    result = run_etrace()
+
+    assert result.returncode != 0
+    assert "No tracefile selected" in result.stderr

@@ -35,6 +35,13 @@ installed the system packages to somewhere in your PATH.
 
 $ cp qemu-etrace.sh ~/bin/
 
+TESTS
+-----
+The test suite requires Python 3 with pytest. Run the C unit tests and
+command-line integration tests with:
+
+$ make check
+
 USAGE
 -----
 QEMU needs to run with etrace tracing.

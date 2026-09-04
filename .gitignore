@@ -29,6 +29,8 @@ qemu-etrace.sh
 *.orig
 *.gcda
 *.gcno
+.pytest_cache/
+.test-build/
 .stgit-*
 cscope.*
 gmon.out
