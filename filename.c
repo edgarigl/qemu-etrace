@@ -30,13 +30,16 @@ char *filename_sanitize(const char *filename)
 
 	do {
 		p1 = strstr(s, "/../");
-		p2 = p1 - 1;
 		if (p1) {
-			while (p2 > s && *p2 != '/') {
+			p2 = p1;
+			if (p1 > s) {
 				p2--;
+				while (p2 > s && *p2 != '/') {
+					p2--;
+				}
+				if (*p2 == '/')
+					p2++;
 			}
-			if (*p2 == '/')
-				p2++;
 
 			memmove(p2, p1 + 4, strlen(p1 + 4) + 1);
 		}
