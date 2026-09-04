@@ -131,6 +131,10 @@ static ssize_t read_trace_buf(qemu_simple_tracer *t, void *data, size_t len)
 	ssize_t ret;
 	uint8_t *pdata = (uint8_t *) data;
 
+	if (len == 0) {
+		return 0;
+	}
+
 	while (trace_buf_data_available(t) < len) {
 		ssize_t fill_ret = fill_trace_buf(t, len);
 		if (fill_ret < 0) {
@@ -162,10 +166,17 @@ static ssize_t read_trace_buf(qemu_simple_tracer *t, void *data, size_t len)
 	return ret;
 }
 
-static void handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r)
+static bool handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r,
+				 size_t nr_args)
 {
 	uint64_t pc_start, pc_end, duration;
 	struct sym *sym = NULL;
+
+	if (nr_args < 3) {
+		PRINT_ERR("tb_enter_exec requires 3 arguments, got %zu\n",
+			  nr_args);
+		return false;
+	}
 
 	duration = 0;
 	pc_start = t->args_buf[1];
@@ -199,16 +210,18 @@ static void handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r)
 			}
 		}
 	}
+	return true;
 }
 
-static void handle_trace(qemu_simple_tracer *t, const char *name,
-						 const TraceRecord *r)
+static bool handle_trace(qemu_simple_tracer *t, const char *name,
+				 const TraceRecord *r, size_t nr_args)
 {
 	if (!strcmp(name, "tb_enter_exec")) {
-		handle_tb_enter_exec(t, r);
+		return handle_tb_enter_exec(t, r, nr_args);
 	} else {
 		PRINT_DBG("Ignoring trace %s\n", name);
 	}
+	return true;
 }
 
 static void resize_args_buf(qemu_simple_tracer *t, size_t new_len)
@@ -223,7 +236,7 @@ static void resize_args_buf(qemu_simple_tracer *t, size_t new_len)
 
 static bool read_header(qemu_simple_tracer *t)
 {
-	TraceLogHeader hdr;
+	TraceLogHeader hdr = { 0 };
 
 	ssize_t ret = read_trace_buf(t, &hdr, sizeof(hdr));
 
@@ -259,8 +272,8 @@ enum read_record_sta {
 
 static enum read_record_sta read_record_mapping(qemu_simple_tracer *t)
 {
-	uint64_t id;
-	uint32_t len;
+	uint64_t id = 0;
+	uint32_t len = 0;
 	char *name = NULL;
 	ssize_t ret = read_trace_buf(t, &id, sizeof(id));
 
@@ -302,8 +315,10 @@ static enum read_record_sta read_record_mapping(qemu_simple_tracer *t)
 
 static enum read_record_sta read_record_event(qemu_simple_tracer *t)
 {
-	TraceRecord rec;
+	TraceRecord rec = { 0 };
 	const char *trace_name;
+	size_t args_len;
+	size_t nr_args;
 
 	ssize_t ret = read_trace_buf(t, &rec, sizeof(rec));
 
@@ -316,14 +331,20 @@ static enum read_record_sta read_record_event(qemu_simple_tracer *t)
 		PRINT_ERR("Bad record size: %"PRIu32"\n", rec.length);
 		return REC_ERR;
 	}
+	args_len = rec.length - sizeof(TraceRecord);
+	if (args_len % sizeof(t->args_buf[0])) {
+		PRINT_ERR("Bad argument data size: %zu\n", args_len);
+		return REC_ERR;
+	}
+	nr_args = args_len / sizeof(t->args_buf[0]);
 
 	resize_args_buf(t, rec.length);
 
-	PRINT_DBG("Reading args: %lu\n", rec.length - sizeof(TraceRecord));
+	PRINT_DBG("Reading args: %zu\n", args_len);
 
-	ret = read_trace_buf(t, t->args_buf, rec.length - sizeof(TraceRecord));
+	ret = read_trace_buf(t, t->args_buf, args_len);
 
-	if (ret < rec.length - sizeof(TraceRecord)) {
+	if (ret < args_len) {
 		PRINT_ERR("Unexpected end of file while reading trace\n");
 		return REC_EOF;
 	}
@@ -331,6 +352,10 @@ static enum read_record_sta read_record_event(qemu_simple_tracer *t)
 	PRINT_DBG("record: event:%"PRIu64"\n", rec.event);
 
 	if (rec.event == DROPPED_EVENT_ID) {
+		if (nr_args < 1) {
+			PRINT_ERR("dropped event requires 1 argument, got 0\n");
+			return REC_ERR;
+		}
 		PRINT_ERR("Warning: %"PRIu64" event dropped by QEMU\n",
 			  t->args_buf[0]);
 		t->dropped_ev += t->args_buf[0];
@@ -343,7 +368,9 @@ static enum read_record_sta read_record_event(qemu_simple_tracer *t)
 
 	trace_name = g_hash_table_lookup(t->trace_events, GINT_TO_POINTER(rec.event));
 
-	handle_trace(t, trace_name, &rec);
+	if (!handle_trace(t, trace_name, &rec, nr_args)) {
+		return REC_ERR;
+	}
 
 	return REC_OK;
 }
@@ -351,7 +378,7 @@ static enum read_record_sta read_record_event(qemu_simple_tracer *t)
 
 static enum read_record_sta read_record(qemu_simple_tracer *t)
 {
-	uint64_t type;
+	uint64_t type = 0;
 
 	ssize_t ret = read_trace_buf(t, &type, sizeof(type));
 
