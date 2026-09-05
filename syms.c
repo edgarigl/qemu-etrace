@@ -504,30 +504,135 @@ static void sym_update_source_hits(struct sym_store *ss, const char *name,
 	}
 }
 
+static bool parse_dwarf_address(const char *line, const char *attribute,
+				uint64_t *addr)
+{
+	const char *value;
+	char *end;
+
+	if (!strstr(line, attribute))
+		return false;
+	value = strstr(line, "0x");
+	if (!value)
+		return false;
+	errno = 0;
+	*addr = strtoull(value, &end, 16);
+	return !errno && end != value;
+}
+
+static void write_covered_address(struct sym_store *ss, int fd, uint64_t addr)
+{
+	char text[32];
+	int len;
+
+	if (!sym_coverage_at(ss, addr))
+		return;
+	len = snprintf(text, sizeof(text), "0x%" PRIx64 "\n", addr);
+	if (safe_write(fd, text, len) != len) {
+		perror("addr2line input");
+		exit(EXIT_FAILURE);
+	}
+}
+
+static void write_inline_entries(struct sym_store *ss, int fd,
+				 const char *dwarfdump, const char *elf)
+{
+	char *argv[] = { (char *)dwarfdump, "-i", (char *)elf, NULL };
+	char tmpout_template[] = "/tmp/etrace-dd-info-XXXXXX";
+	int stdio[3] = { 0, 1, 2 };
+	uint64_t low_pc = 0;
+	bool have_low_pc = false;
+	bool have_entry_pc = false;
+	bool in_inline = false;
+	int fdout;
+	int status;
+	FILE *fp;
+	pid_t kid;
+
+	fdout = mkstemp(tmpout_template);
+	if (fdout < 0) {
+		perror("mkstemp");
+		exit(EXIT_FAILURE);
+	}
+	unlink(tmpout_template);
+	stdio[1] = fdout;
+	kid = run(argv[0], argv, stdio);
+	if (waitpid(kid, &status, 0) != kid || !WIFEXITED(status)
+	    || WEXITSTATUS(status) != 0) {
+		fprintf(stderr, "dwarfdump failed\n");
+		exit(EXIT_FAILURE);
+	}
+
+	lseek(fdout, 0, SEEK_SET);
+	fp = fdopen(fdout, "r");
+	if (!fp) {
+		fprintf(stderr, "Unable to read dwarfdump output\n");
+		exit(EXIT_FAILURE);
+	}
+
+	while (1) {
+		char *line = NULL;
+		size_t size = 0;
+		ssize_t len = getline(&line, &size, fp);
+
+		if (len < 0) {
+			free(line);
+			break;
+		}
+		if (strstr(line, "DW_TAG_")) {
+			if (in_inline && have_low_pc && !have_entry_pc)
+				write_covered_address(ss, fd, low_pc);
+			in_inline = strstr(line, "DW_TAG_inlined_subroutine") != NULL;
+			have_low_pc = false;
+			have_entry_pc = false;
+		} else if (in_inline
+			   && parse_dwarf_address(line, "DW_AT_entry_pc", &low_pc)) {
+			write_covered_address(ss, fd, low_pc);
+			have_entry_pc = true;
+		} else if (in_inline && !have_entry_pc
+			   && parse_dwarf_address(line, "DW_AT_low_pc", &low_pc)) {
+			have_low_pc = true;
+		}
+		free(line);
+	}
+	if (in_inline && have_low_pc && !have_entry_pc)
+		write_covered_address(ss, fd, low_pc);
+	fclose(fp);
+}
+
 void sym_build_source_coverage(void **store, const char *addr2line,
-			       const char *elf)
+			       const char *dwarfdump, const char *elf)
 {
 	char *argv[] = { (char *)addr2line, "-a", "-f", "-i", "-C", "-p",
 			 "-e", (char *)elf, NULL };
+	char tmpin_template[] = "/tmp/etrace-a2l-in-XXXXXX";
 	char tmpout_template[] = "/tmp/etrace-a2l-out-XXXXXX";
 	struct sym_store *ss = *store;
 	int stdio[3] = { 0, 1, 2 };
 	uint64_t current_hits = 0;
+	int fdin_tmp;
 	int fdout_tmp;
-	int pipefd[2];
 	FILE *fp;
 	pid_t kid;
 	int status;
-	int r;
 	unsigned int i;
 
 	fprintf(stderr, "Building source function coverage\n");
-	r = pipe(pipefd);
-	if (r < 0) {
-		perror("pipe");
+	fdin_tmp = mkstemp(tmpin_template);
+	if (fdin_tmp < 0) {
+		perror("mkstemp");
 		exit(EXIT_FAILURE);
 	}
-	fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+	unlink(tmpin_template);
+
+	for (i = 0; i < ss->nr_stored; i++) {
+		struct sym *sym = &ss->allsyms[i];
+
+		if (sym->cov_ent)
+			sym->source_hits = sym->cov_ent->counter[0];
+	}
+	write_inline_entries(ss, fdin_tmp, dwarfdump, elf);
+	lseek(fdin_tmp, 0, SEEK_SET);
 
 	fdout_tmp = mkstemp(tmpout_template);
 	if (fdout_tmp < 0) {
@@ -536,39 +641,15 @@ void sym_build_source_coverage(void **store, const char *addr2line,
 	}
 	unlink(tmpout_template);
 
-	stdio[0] = pipefd[0];
+	stdio[0] = fdin_tmp;
 	stdio[1] = fdout_tmp;
 	kid = run(argv[0], argv, stdio);
-
-	for (i = 0; i < ss->nr_stored; i++) {
-		struct sym *sym = &ss->allsyms[i];
-		uint64_t addr;
-		unsigned int pos = 0;
-
-		if (!sym->cov_ent)
-			continue;
-		sym->source_hits = sym->cov_ent->counter[0];
-		for (addr = sym->addr; addr < sym->addr + sym->size; addr += 4) {
-			char text[32];
-			int len;
-
-			if (!sym->cov_ent->counter[pos++])
-				continue;
-			len = snprintf(text, sizeof(text), "0x%" PRIx64 "\n", addr);
-			if (safe_write(pipefd[1], text, len) != len) {
-				perror("addr2line input");
-				exit(EXIT_FAILURE);
-			}
-		}
-	}
-	close(pipefd[0]);
-	close(pipefd[1]);
-
 	if (waitpid(kid, &status, 0) != kid || !WIFEXITED(status)
 	    || WEXITSTATUS(status) != 0) {
 		fprintf(stderr, "addr2line failed\n");
 		exit(EXIT_FAILURE);
 	}
+	close(fdin_tmp);
 
 	lseek(fdout_tmp, 0, SEEK_SET);
 	fp = fdopen(fdout_tmp, "r");
@@ -597,7 +678,7 @@ void sym_build_source_coverage(void **store, const char *addr2line,
 			uint64_t addr = strtoull(line, &end, 16);
 
 			current_hits = sym_coverage_at(ss, addr);
-			if (strncmp(end, ": ", 2)) {
+			if (end[0] != ':' || end[1] != ' ') {
 				free(line);
 				continue;
 			}

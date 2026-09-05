@@ -80,6 +80,7 @@ TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v7
 TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
+TEST_FIXTURES += $(TEST_BUILD_DIR)/duplicate-inline-fixture
 TEST_FIXTURES += $(TEST_BUILD_DIR)/inline-function-fixture
 
 all: $(TARGET).sh
@@ -146,6 +147,24 @@ $(TEST_BUILD_DIR)/coverage-fixture: tests/fixtures/coverage.c | $(TEST_BUILD_DIR
 
 $(TEST_BUILD_DIR)/inline-function-fixture: tests/fixtures/inline-function.c | $(TEST_BUILD_DIR)
 	$(CC) -O2 -g -fno-pie -no-pie $< -o $@
+
+$(TEST_BUILD_DIR)/duplicate-inline-fixture: \
+		$(TEST_BUILD_DIR)/duplicate-inline-a.o \
+		$(TEST_BUILD_DIR)/duplicate-inline-b.o \
+		tests/fixtures/duplicate-inline-main.c \
+		| $(TEST_BUILD_DIR)
+	$(CC) -O2 -g -fno-pie -no-pie \
+		$(TEST_BUILD_DIR)/duplicate-inline-a.o \
+		$(TEST_BUILD_DIR)/duplicate-inline-b.o \
+		tests/fixtures/duplicate-inline-main.c -o $@
+
+$(TEST_BUILD_DIR)/duplicate-inline-a.o: tests/fixtures/duplicate-inline.c | $(TEST_BUILD_DIR)
+	$(CC) -O2 -g -fno-pie -DCALLER=call_inline_helper_a \
+		-DKEEP=keep_inline_helper_a -c $< -o $@
+
+$(TEST_BUILD_DIR)/duplicate-inline-b.o: tests/fixtures/duplicate-inline.c | $(TEST_BUILD_DIR)
+	$(CC) -O2 -g -fno-pie -DCALLER=call_inline_helper_b \
+		-DKEEP=keep_inline_helper_b -c $< -o $@
 
 check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-excludes

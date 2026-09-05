@@ -71,7 +71,7 @@ struct sym *sym_get_unknown(void **store);
 void sym_read_from_elf(void **rootp, char *nm, char *elf);
 void sym_build_linemap(void **rootp, const char *dwarfdump, const char *elf);
 void sym_build_source_coverage(void **rootp, const char *addr2line,
-			       const char *elf);
+			       const char *dwarfdump, const char *elf);
 void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 			uint32_t time);
 

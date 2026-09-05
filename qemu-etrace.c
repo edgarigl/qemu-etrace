@@ -482,7 +482,8 @@ int main(int argc, char **argv)
 	sym_show_stats(&sym_tree);
 
 	if (args.function_hit_policy == FUNCTION_HIT_SOURCE)
-		sym_build_source_coverage(&sym_tree, args.addr2line, args.elf);
+		sym_build_source_coverage(&sym_tree, args.addr2line,
+					  args.dwarfdump, args.elf);
 
 	if (args.coverage_format != NONE)
 		coverage_emit(&sym_tree, args.coverage_output,

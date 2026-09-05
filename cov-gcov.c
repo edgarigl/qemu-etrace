@@ -895,6 +895,26 @@ struct sym_src_loc *gcov_find_decl_line(struct sym *s, const char *filename)
 	return ret;
 }
 
+static uint64_t lcov_function_hits(const struct sym *sym,
+				   enum function_hit_policy function_policy)
+{
+	if (function_policy == FUNCTION_HIT_SOURCE)
+		return sym->source_hits;
+	return sym->cov_ent ? sym->cov_ent->counter[0] : 0;
+}
+
+static bool lcov_same_function(struct gcov_file *f, unsigned int first,
+			       unsigned int second,
+			       const struct sym_src_loc *first_loc)
+{
+	struct sym_src_loc *second_loc;
+
+	if (strcmp(f->syms[first]->name, f->syms[second]->name))
+		return false;
+	second_loc = gcov_find_decl_line(f->syms[second], f->filename);
+	return second_loc && second_loc->linenr == first_loc->linenr;
+}
+
 void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude,
 		    enum function_hit_policy function_policy)
 {
@@ -917,22 +937,41 @@ void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude,
 	if (!filename_is_likely_header(f->filename) || 1) {
 		for (i = 0; i < f->nr_syms; i++) {
 			struct sym_src_loc *loc;
+			uint64_t hits;
+			unsigned int j;
 
 			loc = gcov_find_decl_line(f->syms[i], f->filename);
 			if (!loc) {
 				continue;
 			}
+			for (j = 0; j < i; j++) {
+				struct sym_src_loc *prior_loc;
+
+				prior_loc = gcov_find_decl_line(f->syms[j],
+							f->filename);
+				if (prior_loc
+				    && lcov_same_function(f, j, i, prior_loc))
+					break;
+			}
+			if (j != i)
+				continue;
+
+			hits = lcov_function_hits(f->syms[i], function_policy);
+			for (j = i + 1; j < f->nr_syms; j++) {
+				uint64_t alias_hits;
+
+				if (!lcov_same_function(f, i, j, loc))
+					continue;
+				alias_hits = lcov_function_hits(f->syms[j],
+							 function_policy);
+				if (alias_hits > hits)
+					hits = alias_hits;
+			}
 
 			fprintf(fp, "FN:%u,%s\n",
 				loc->linenr, f->syms[i]->name);
-			if (function_policy == FUNCTION_HIT_SOURCE)
-				fprintf(fp, "FNDA:%" PRIu64 ",%s\n",
-					f->syms[i]->source_hits, f->syms[i]->name);
-			else
-				fprintf(fp, "FNDA:%" PRIu64 ",%s\n",
-					f->syms[i]->cov_ent
-						? f->syms[i]->cov_ent->counter[0] : 0,
-					f->syms[i]->name);
+			fprintf(fp, "FNDA:%" PRIu64 ",%s\n",
+				hits, f->syms[i]->name);
 		}
 	}
 
