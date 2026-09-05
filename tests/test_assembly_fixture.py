@@ -93,6 +93,32 @@ def nm_symbols(binary):
     }
 
 
+def readelf_symbols(binary):
+    result = subprocess.run(
+        ["readelf", "--symbols", "--wide", binary],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    symbols = {}
+    for line in result.stdout.splitlines():
+        fields = line.split(maxsplit=7)
+        if (
+            len(fields) != 8
+            or not fields[0].endswith(":")
+            or not fields[0][:-1].isdigit()
+        ):
+            continue
+        _, value, size, symbol_type, binding, _, _, name = fields
+        symbols[name] = {
+            "address": int(value, 16),
+            "size": int(size),
+            "type": symbol_type,
+            "binding": binding,
+        }
+    return symbols
+
+
 def line_rows(binary):
     result = subprocess.run(
         ["dwarfdump", "-l", binary],
@@ -127,6 +153,20 @@ def test_assembly_fixture_symbol_shapes(assembly_fixture):
     assert symbols["zero_sized_alias_one"][0] == symbols["zero_sized_alias_two"][0]
     assert symbols["same_cu_restart"][1] > 0
     assert "discarded_function" not in symbols
+
+
+def test_assembly_fixture_equal_address_alias_shape(assembly_fixture):
+    symbols = readelf_symbols(assembly_fixture)
+    function = symbols["aliased_function"]
+    label = symbols["_aliased_entry"]
+
+    assert function["address"] == label["address"]
+    assert function["size"] > 0
+    assert function["type"] == "FUNC"
+    assert function["binding"] == "LOCAL"
+    assert label["size"] == 0
+    assert label["type"] == "NOTYPE"
+    assert label["binding"] == "GLOBAL"
 
 
 def test_assembly_fixture_line_sequence_shapes(assembly_fixture):
@@ -191,12 +231,21 @@ def source_record(records, suffix):
 
 
 def run_lcov(
-    run_etrace, tmp_path, assembly_fixture, start, end, *, inventory=None
+    run_etrace,
+    tmp_path,
+    assembly_fixture,
+    start,
+    end,
+    *,
+    inventory=None,
+    policy="entry",
+    executions=1,
 ):
     trace = tmp_path / "assembly.etrace"
     output = tmp_path / "assembly.info"
     trace.write_bytes(
-        etrace_arch(guest_bits=64) + etrace_exec64(start=start, end=end)
+        etrace_arch(guest_bits=64)
+        + etrace_exec64(start=start, end=end) * executions
     )
     arguments = [
         "--trace",
@@ -211,6 +260,8 @@ def run_lcov(
         "lcov",
         "--coverage-output",
         output,
+        "--function-hit-policy",
+        policy,
     ]
     if inventory is not None:
         arguments.extend(("--coverage-inventory", inventory))
@@ -420,3 +471,56 @@ def test_new_sequence_retains_dwarfdump_file_context(
 
     assert source_b["lines"][80] == 1
     assert source_b["functions"]["same_cu_restart"] == 80
+
+
+def test_equal_address_label_preserves_function_entry_hits(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    start, _, _ = symbols["aliased_function"]
+
+    entry_records = run_lcov(
+        run_etrace,
+        tmp_path,
+        assembly_fixture,
+        start,
+        start + 1,
+        policy="entry",
+        executions=3,
+    )
+    source_records = run_lcov(
+        run_etrace,
+        tmp_path,
+        assembly_fixture,
+        start,
+        start + 1,
+        policy="source",
+        executions=3,
+    )
+    entry_source = source_record(entry_records, "assembly-boundary-b.S")
+    source_source = source_record(source_records, "assembly-boundary-b.S")
+
+    assert entry_source["functions"]["aliased_function"] == 85
+    assert source_source["functions"]["aliased_function"] == 85
+    assert entry_source["function_hits"]["aliased_function"] == 3
+    assert source_source["function_hits"]["aliased_function"] == 3
+
+
+@pytest.mark.parametrize("policy", ["entry", "source"])
+def test_function_policy_ignores_aliased_function_body_entry(
+    run_etrace, tmp_path, assembly_fixture, policy
+):
+    symbols = nm_symbols(assembly_fixture)
+    start, size, _ = symbols["aliased_function"]
+
+    records = run_lcov(
+        run_etrace,
+        tmp_path,
+        assembly_fixture,
+        start + 1,
+        start + size,
+        policy=policy,
+    )
+    source_b = source_record(records, "assembly-boundary-b.S")
+
+    assert source_b["function_hits"]["aliased_function"] == 0

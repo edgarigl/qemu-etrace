@@ -86,4 +86,14 @@ same_cu_restart:
 	ret
 	.size	same_cu_restart, .-same_cu_restart
 
+	.globl	_aliased_entry
+	.local	aliased_function
+	.type	aliased_function, @function
+_aliased_entry:
+aliased_function:
+	.loc	1 85 0
+	nop
+	ret
+	.size	aliased_function, .-aliased_function
+
 	.section .note.GNU-stack,"",@progbits

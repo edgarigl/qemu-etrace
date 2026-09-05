@@ -1044,8 +1044,7 @@ void sym_build_source_coverage(void **store, const char *addr2line,
 	for (i = 0; i < ss->nr_stored; i++) {
 		struct sym *sym = &ss->allsyms[i];
 
-		if (sym->cov_ent)
-			sym->source_hits = sym->cov_ent->counter[0];
+		sym->source_hits = sym_image_coverage_at(store, sym->addr);
 	}
 	write_inline_entries(ss, fdin_tmp, dwarfdump, elf);
 	lseek(fdin_tmp, 0, SEEK_SET);
