@@ -1,0 +1,53 @@
+{
+  "assembly_functions": 78,
+  "assembly_hit_functions": 16,
+  "assembly_hit_lines": 275,
+  "assembly_lines": 815,
+  "assembly_source_files": 13,
+  "checks": {
+    "assembly_totals": true,
+    "common_interrupt_present": true,
+    "entry_779_not_hit": true,
+    "entry_function_total": true,
+    "generated_idt_function_total": true,
+    "handle_exception_location": true,
+    "handle_ist_exception_present": true,
+    "head_has_executed_lines": true,
+    "inventory___x86_indirect_thunk_r12": true,
+    "inventory___x86_indirect_thunk_r13": true,
+    "inventory___x86_indirect_thunk_r14": true,
+    "inventory___x86_indirect_thunk_r9": true,
+    "inventory___x86_indirect_thunk_rbp": true,
+    "inventory___x86_indirect_thunk_rbx": true,
+    "inventory___x86_indirect_thunk_rcx": true,
+    "inventory___x86_indirect_thunk_rdx": true,
+    "inventory_entry_0xf1": true,
+    "inventory_entry_0xfa": true,
+    "inventory_entry_0xfb": true,
+    "inventory_entry_0xfc": true,
+    "inventory_entry_0xfd": true,
+    "inventory_total": true,
+    "no_memset_l3t_unlock": true,
+    "no_mmconfig_ret_from_intr": true,
+    "svm_byte_fix": true,
+    "trap_nop_not_misattributed": true,
+    "unique_function_names_per_source": true
+  },
+  "elf_sha256": "e1e8dcb0f74ca20b380294c28abeda01da82e1e0d9713ea6488132b3c9149a64",
+  "inventory_sha256": "1a9685e71af8dc646d2d4e1523a6d08c20060515cc65d8c6175a4f29633a7f60",
+  "inventory_statuses": {
+    "deduplicated-alias": 31,
+    "emitted": 2726,
+    "omitted-no-source": 212,
+    "omitted-non-executable": 3,
+    "omitted-non-function": 2,
+    "omitted-zero-sized-label": 67
+  },
+  "lcov_sha256": "41990ef004b7c16c87799fa24869a079133aed087862edc41f63a2ea68d6b0ca",
+  "qemu_etrace_revision": "7c0d0f5",
+  "schema": "qemu-etrace-xen-assembly-validation-v1",
+  "tools": {
+    "dwarfdump": "2021-05-28 08:25:09-07:00   Package Version \"20210528\"",
+    "nm": "GNU nm (GNU Binutils for Ubuntu) 2.42"
+  }
+}
