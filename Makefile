@@ -100,6 +100,12 @@ QEMU_PLUGIN_HEADER ?= $(firstword \
 QEMU_PLUGIN_API ?= $(or $(shell sed -n \
 	's/^[[:space:]]*\#define[[:space:]]*QEMU_PLUGIN_VERSION[[:space:]]*//p' \
 	$(QEMU_PLUGIN_HEADER) 2>/dev/null),unknown)
+QEMU_PLUGIN_HAS_DISCON := $(shell if test -n "$(QEMU_PLUGIN_HEADER)" && \
+	grep -q 'qemu_plugin_register_vcpu_discon_cb' \
+	"$(QEMU_PLUGIN_HEADER)"; then echo 1; fi)
+ifeq ($(QEMU_PLUGIN_HAS_DISCON),1)
+PLUGIN_CPPFLAGS += -DHAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+endif
 PLUGIN ?= .plugin-build/$(QEMU_PLUGIN_API)/$(PLUGIN_NAME)
 plugindir ?= $(libdir)/qemu-etrace/plugins/$(QEMU_PLUGIN_API)
 TEST_BUILD_DIR = .test-build
@@ -158,6 +164,7 @@ $(PLUGIN): plugin/etrace-plugin.c etrace-format.h $(QEMU_PLUGIN_HEADER)
 	}
 	mkdir -p $(dir $@)
 	$(CC) -Wall -Wextra -O2 -g -fPIC -fvisibility=hidden \
+		$(PLUGIN_CPPFLAGS) \
 		-I. -I$(dir $(QEMU_PLUGIN_HEADER)) \
 		$(shell $(PKGCONFIG) --cflags glib-2.0) \
 		-shared plugin/etrace-plugin.c -pthread -lz -o $@
