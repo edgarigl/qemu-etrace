@@ -47,6 +47,7 @@ LDLIBS += -ldl
 LDLIBS += $(shell $(PKGCONFIG) --libs glib-2.0)
 
 OBJS += qemu-etrace.o
+OBJS += address-map.o
 OBJS += trace-open.o
 OBJS += filename.o
 OBJS += util.o
@@ -75,6 +76,7 @@ PLUGIN ?= .plugin-build/$(QEMU_PLUGIN_API)/$(PLUGIN_NAME)
 plugindir ?= $(libdir)/qemu-etrace/plugins/$(QEMU_PLUGIN_API)
 TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
+TEST_BINS += $(TEST_BUILD_DIR)/test-address-map
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
@@ -115,6 +117,12 @@ $(TEST_BUILD_DIR):
 $(TEST_BUILD_DIR)/test-filename: tests/unit/test-filename.c filename.c filename.h | $(TEST_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
 		tests/unit/test-filename.c filename.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
+$(TEST_BUILD_DIR)/test-address-map: tests/unit/test-address-map.c \
+		address-map.c address-map.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-address-map.c address-map.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
 $(TEST_BUILD_DIR)/test-excludes: tests/unit/test-excludes.c excludes.c excludes.h | $(TEST_BUILD_DIR)
@@ -167,6 +175,7 @@ $(TEST_BUILD_DIR)/duplicate-inline-b.o: tests/fixtures/duplicate-inline.c | $(TE
 		-DKEEP=keep_inline_helper_b -c $< -o $@
 
 check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
+	$(TEST_BUILD_DIR)/test-address-map
 	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-filename
 	$(TEST_BUILD_DIR)/test-plugin
