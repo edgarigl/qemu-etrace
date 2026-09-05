@@ -39,6 +39,7 @@ fixture links two copies of the same static inline definition and verifies that
 only one LCOV function record is emitted.
 
 `tests/test_gcc_matrix.py` repeats the entry and shared-tail checks with every
-installed native GCC version. The fixture uses a non-trivial conditional body
-so GCC versions that omit inline DIEs for trivial expressions still retain the
-required inline attribution.
+installed native GCC version using the dedicated inline fixture. Duplicate
+LCOV suppression is tested independently by executing one of two retained
+symbols, so that test does not depend on the compiler emitting inline DWARF for
+the duplicate-symbol fixture.
