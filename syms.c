@@ -24,7 +24,6 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <string.h>
-#include <ctype.h>
 #include <assert.h>
 #include <errno.h>
 #include <unistd.h>
@@ -38,6 +37,7 @@
 #include <search.h>
 
 #include "filename.h"
+#include "dwarf-lines.h"
 #include "util.h"
 #include "safeio.h"
 #include "syms.h"
@@ -359,52 +359,26 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 	}
 	while (!feof(fp)) {
 		char line[512];
-		char *s, *next;
-		unsigned int linenr;
+		struct dwarf_line_row row;
+		char *s;
 		bool inlined = false;
 
 		s = fgets(line, sizeof line, fp);
 		if (s == NULL) {
 			break;
 		}
-		//printf("%s", line);
-
-		if (strncmp(s, "0x", strlen("0x"))) {
+		if (!dwarf_line_parse(s, &row))
+			continue;
+		addr = row.address;
+		if (row.filename) {
+			free(filename);
+			filename = row.filename;
+			row.filename = NULL;
+		}
+		if (!filename) {
+			dwarf_line_row_clear(&row);
 			continue;
 		}
-		addr = strtoull(s, &next, 16);
-		s = next + 2;
-
-		if (*s != '[')
-			continue;
-		s++;
-
-		while (*s && isspace(*s))
-			s++;
-
-		if (!*s)
-			continue;
-
-		linenr = strtoull(s, &next, 0);
-
-		while (*s && *s != ']')
-			s++;
-
-		if (!*s) {
-			continue;
-		}
-
-		/* Advance "] NS" */
-		s += 2;
-
-#define STR_URI "uri: "
-		s = strstr(s, STR_URI);
-		if (s) {
-			s += strlen(STR_URI) + 1;
-			filename = strndup(s, strlen(s) - 2);
-		}
-
-		assert(linenr);
 
 		symp = sym_lookup_by_addr(store, addr);
 		if (symp) {
@@ -418,8 +392,8 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			if (!symp->linemap)
 				sym_alloc_linemap(symp);
 
-			if (linenr >= symp->maxline) {
-				symp->maxline = linenr;
+			if (row.line >= symp->maxline) {
+				symp->maxline = row.line;
 			}
 
 			offset = addr - symp->addr;
@@ -438,7 +412,7 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 				loc->filename = symp->src_filename;
 			else
 				loc->filename = filename_sanitize(filename);
-			loc->linenr = linenr;
+			loc->linenr = row.line;
 			if (inlined)
 				loc->flags |= LOC_F_INLINED;
             num_lines++;
@@ -457,8 +431,10 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			}
 #endif
 		}
+		dwarf_line_row_clear(&row);
 	}
 
+	free(filename);
 	fclose(fp);
 	if (!num_lines) {
 		fprintf(stderr, "WARNING: Unable to create linemap\n");

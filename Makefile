@@ -79,6 +79,7 @@ OBJS += filename.o
 OBJS += util.o
 OBJS += safeio.o
 OBJS += run.o
+OBJS += dwarf-lines.o
 OBJS += syms.o
 OBJS += excludes.o
 OBJS += disas.o
@@ -112,6 +113,7 @@ TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
 TEST_BINS += $(TEST_BUILD_DIR)/test-address-map
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
+TEST_BINS += $(TEST_BUILD_DIR)/test-dwarf-lines
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v5-discon
@@ -192,6 +194,12 @@ $(TEST_BUILD_DIR)/test-excludes: tests/unit/test-excludes.c excludes.c excludes.
 		tests/unit/test-excludes.c excludes.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
+$(TEST_BUILD_DIR)/test-dwarf-lines: tests/unit/test-dwarf-lines.c \
+		dwarf-lines.c dwarf-lines.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-dwarf-lines.c dwarf-lines.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
 $(TEST_BUILD_DIR)/test-plugin: tests/unit/test-plugin.c plugin/etrace-plugin.c \
 		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -I. -Itests/plugin \
@@ -253,6 +261,7 @@ $(TEST_BUILD_DIR)/duplicate-inline-b.o: tests/fixtures/duplicate-inline.c | $(TE
 check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-address-map
 	$(TEST_BUILD_DIR)/test-excludes
+	$(TEST_BUILD_DIR)/test-dwarf-lines
 	$(TEST_BUILD_DIR)/test-filename
 	$(TEST_BUILD_DIR)/test-plugin
 	$(TEST_BUILD_DIR)/test-plugin-v1
