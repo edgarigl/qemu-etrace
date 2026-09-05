@@ -878,21 +878,26 @@ done:
 
 struct sym_src_loc *gcov_find_decl_line(struct sym *s, const char *filename)
 {
-	struct sym_src_loc *loc;
-	struct sym_src_loc *ret = NULL;
+	uint64_t offset;
 
-	loc = &s->linemap->locs[0];
-	if (!loc->filename)
-		return ret;
+	for (offset = 0; offset < s->size; offset++) {
+		struct sym_src_loc *loc = &s->linemap->locs[offset];
+		struct sym_src_loc *ret = NULL;
 
-	do {
-		if (!strcmp(filename, loc->filename)
-			&& !(loc->flags & LOC_F_INLINED)
-			&& (!ret || ret->linenr > loc->linenr))
-			ret = loc;
-		loc = loc->next;
-	} while (loc);
-	return ret;
+		if (!loc->filename)
+			continue;
+		do {
+			if (!strcmp(filename, loc->filename)
+			    && loc->linenr
+			    && !(loc->flags & LOC_F_INLINED)
+			    && (!ret || ret->linenr > loc->linenr))
+				ret = loc;
+			loc = loc->next;
+		} while (loc);
+		if (ret)
+			return ret;
+	}
+	return NULL;
 }
 
 static uint64_t lcov_function_hits(const struct sym *sym,

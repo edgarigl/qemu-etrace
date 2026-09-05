@@ -147,11 +147,14 @@ def parse_lcov(path):
     current = None
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("SF:"):
-            current = {"functions": [], "lines": {}}
+            current = {"functions": {}, "function_hits": {}, "lines": {}}
             records[line[3:]] = current
         elif line.startswith("FN:"):
-            _, name = line[3:].split(",", 1)
-            current["functions"].append(name)
+            line_number, name = line[3:].split(",", 1)
+            current["functions"][name] = int(line_number)
+        elif line.startswith("FNDA:"):
+            count, name = line[5:].split(",", 1)
+            current["function_hits"][name] = int(count)
         elif line.startswith("DA:"):
             number, count = line[3:].split(",", 1)
             current["lines"][int(number)] = int(count)
@@ -200,3 +203,15 @@ def test_end_sequence_does_not_map_next_function(
     assert source_a["lines"][12] == 0
     assert "boundary_target" not in source_a["functions"]
     assert source_b["lines"][20] > 0
+
+
+def test_function_declaration_uses_first_body_row(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    start, size, _ = symbols["boundary_target"]
+    records = run_lcov(run_etrace, tmp_path, assembly_fixture, start, start + size)
+    source_b = source_record(records, "assembly-boundary-b.S")
+
+    assert source_b["functions"]["boundary_target"] == 20
+    assert source_b["function_hits"]["boundary_target"] == 1
