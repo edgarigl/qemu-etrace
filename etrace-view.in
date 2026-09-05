@@ -1,0 +1,6 @@
+#!/bin/sh
+
+QEMU_ETRACE_DATADIR=${QEMU_ETRACE_DATADIR:-@QEMU_ETRACE_DATADIR@}
+export QEMU_ETRACE_DATADIR
+
+exec "${PYTHON:-python3}" "${QEMU_ETRACE_DATADIR}/etrace-view.py" "$@"

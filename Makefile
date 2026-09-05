@@ -32,6 +32,8 @@ endif
 prefix ?= /usr/local
 bindir ?= $(prefix)/bin
 libdir ?= $(prefix)/lib
+datadir ?= $(prefix)/share
+qemuetracedir ?= $(datadir)/qemu-etrace
 
 BU_VER = binutils-2.42
 BU_FILE = $(BU_VER).tar.gz
@@ -88,6 +90,8 @@ OBJS += trace-hex.o
 OBJS += trace-qemu-simple.o
 
 TARGET = qemu-etrace
+VIEWER = etrace-view
+VIEWER_DATA = etrace-view.py etrace.py addr2line.py
 PLUGIN_NAME = libqemu-etrace.so
 QEMU_SRC ?= ../qemu
 QEMU_PLUGIN_HEADER ?= $(firstword \
@@ -240,12 +244,19 @@ check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(PYTEST) -q
 
 install: $(TARGET) $(PLUGIN)
-	$(INSTALL) -d $(DESTDIR)$(bindir) $(DESTDIR)$(plugindir)
+	$(INSTALL) -d $(DESTDIR)$(bindir) $(DESTDIR)$(plugindir) \
+		$(DESTDIR)$(qemuetracedir)
 	$(INSTALL) -m 0755 $(TARGET) $(DESTDIR)$(bindir)/$(notdir $(TARGET))
+	sed 's|@QEMU_ETRACE_DATADIR@|$(qemuetracedir)|g' etrace-view.in \
+		>$(DESTDIR)$(bindir)/$(notdir $(VIEWER))
+	chmod 0755 $(DESTDIR)$(bindir)/$(notdir $(VIEWER))
+	$(INSTALL) -m 0644 $(VIEWER_DATA) $(DESTDIR)$(qemuetracedir)
 	$(INSTALL) -m 0755 $(PLUGIN) $(DESTDIR)$(plugindir)/$(PLUGIN_NAME)
 
 uninstall:
 	$(RM) $(DESTDIR)$(bindir)/$(notdir $(TARGET))
+	$(RM) $(DESTDIR)$(bindir)/$(notdir $(VIEWER))
+	$(RM) $(addprefix $(DESTDIR)$(qemuetracedir)/,$(VIEWER_DATA))
 	$(RM) $(DESTDIR)$(plugindir)/$(PLUGIN_NAME)
 
 $(BU_FILE):
