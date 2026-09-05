@@ -30,6 +30,7 @@ enum {
 	TYPE_BARRIER = 6,
 	TYPE_OLD_EVENT_U64 = 7,
 	TYPE_EVENT_U64 = 8,
+	TYPE_DISCONTINUITY = 9,
 	TYPE_INFO = 0x4554,
 } __attribute__ ((packed));
 
@@ -129,6 +130,20 @@ struct etrace_event_u64 {
 	uint8_t names[0];
 } __attribute__ ((packed));
 
+enum etrace_discontinuity_kind {
+	ETRACE_DISCONTINUITY_UNKNOWN,
+	ETRACE_DISCONTINUITY_INTERRUPT,
+	ETRACE_DISCONTINUITY_EXCEPTION,
+	ETRACE_DISCONTINUITY_HOST_CALL,
+};
+
+struct etrace_discontinuity {
+	uint64_t from_pc;
+	uint64_t to_pc;
+	uint32_t kind;
+	uint32_t flags;
+} __attribute__ ((packed));
+
 struct etrace_pkg {
 	struct etrace_hdr hdr;
 	union {
@@ -140,6 +155,7 @@ struct etrace_pkg {
 		struct etrace_mem mem;
 		struct etrace_old_event_u64 old_event_u64;
 		struct etrace_event_u64 event_u64;
+		struct etrace_discontinuity discontinuity;
 		uint8_t u8[0];
 		uint16_t u16[0];
 		uint32_t u32[0];

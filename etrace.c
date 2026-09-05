@@ -207,6 +207,14 @@ static bool etrace_validate_pkg(struct etracer *t)
 				pkg->event_u64.event_name_len))
 			return etrace_invalid_pkg(pkg, "invalid event names");
 		break;
+	case TYPE_DISCONTINUITY:
+		if (pkg->hdr.len < sizeof(pkg->discontinuity))
+			return etrace_invalid_pkg(pkg,
+						  "short discontinuity payload");
+		if (pkg->discontinuity.kind > ETRACE_DISCONTINUITY_HOST_CALL)
+			return etrace_invalid_pkg(pkg,
+						  "unknown discontinuity kind");
+		break;
 	default:
 		break;
 	}
@@ -512,6 +520,36 @@ void etrace_process_event_u64(struct etracer *t)
 		event->names, event->names + event->dev_name_len, event->val);
 }
 
+static const char *discontinuity_kind_name(uint32_t kind)
+{
+	switch (kind) {
+	case ETRACE_DISCONTINUITY_UNKNOWN:
+		return "unknown";
+	case ETRACE_DISCONTINUITY_INTERRUPT:
+		return "interrupt";
+	case ETRACE_DISCONTINUITY_EXCEPTION:
+		return "exception";
+	case ETRACE_DISCONTINUITY_HOST_CALL:
+		return "host-call";
+	default:
+		return "invalid";
+	}
+}
+
+void etrace_process_discontinuity(struct etracer *t)
+{
+	struct etrace_discontinuity *discontinuity = &t->pkg->discontinuity;
+
+	if (!t->tr.fp_out)
+		return;
+
+	fprintf(t->tr.fp_out, "D%u %s %" PRIx64 " %" PRIx64 " flags=%x\n",
+		t->pkg->hdr.unit_id,
+		discontinuity_kind_name(discontinuity->kind),
+		discontinuity->from_pc, discontinuity->to_pc,
+		discontinuity->flags);
+}
+
 void etrace_show(int fd, FILE *fp_out,
 		 const char *objdump, const char *machine,
 		 const char *guest_objdump, const char *guest_machine,
@@ -591,6 +629,9 @@ void etrace_show(int fd, FILE *fp_out,
 			break;
 		case TYPE_EVENT_U64:
 			etrace_process_event_u64(&t);
+			break;
+		case TYPE_DISCONTINUITY:
+			etrace_process_discontinuity(&t);
 			break;
 		default:
 			/* Show a warning once. We trust the version handling

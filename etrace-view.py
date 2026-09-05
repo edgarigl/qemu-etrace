@@ -249,6 +249,12 @@ class traceview(object):
 				(r.all.dev_name,
 				r.all.event_name,
 				r.all.event_u64.val, r.all.event_u64.prev_val))
+		elif r.hdr.type == self.e.TYPE_DISCONTINUITY:
+			discontinuity = r.all.discontinuity
+			self.log.append("discontinuity %s %x -> %x" %
+				(self.e.discontinuity_kind_to_name(
+					discontinuity.kind),
+				 discontinuity.from_pc, discontinuity.to_pc))
 
 
 		return r

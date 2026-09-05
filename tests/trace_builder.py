@@ -6,6 +6,7 @@ ETRACE_TYPE_ARCH = 5
 ETRACE_TYPE_EXEC = 1
 ETRACE_TYPE_TB = 2
 ETRACE_TYPE_OLD_EVENT_U64 = 7
+ETRACE_TYPE_DISCONTINUITY = 9
 QEMU_SIMPLE_HEADER_EVENT_ID = (1 << 64) - 1
 QEMU_SIMPLE_DROPPED_EVENT_ID = (1 << 64) - 2
 QEMU_SIMPLE_HEADER_MAGIC = 0xF2B177CB0AA429B4
@@ -37,6 +38,16 @@ def etrace_old_event(*, time, value, unit_id, device, event):
     return etrace_packet(
         ETRACE_TYPE_OLD_EVENT_U64,
         payload + device_name + event_name,
+    )
+
+
+def etrace_discontinuity(*, from_pc, to_pc, kind, flags=0, unit_id=0,
+                         extension=b""):
+    payload = struct.pack("=QQII", from_pc, to_pc, kind, flags)
+    return etrace_packet(
+        ETRACE_TYPE_DISCONTINUITY,
+        payload + extension,
+        unit_id=unit_id,
     )
 
 

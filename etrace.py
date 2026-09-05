@@ -89,6 +89,15 @@ class etrace_event_u64(Structure):
 		("event_name_len", c_uint16),
 	]
 
+class etrace_discontinuity(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("from_pc", c_uint64),
+		("to_pc", c_uint64),
+		("kind", c_uint32),
+		("flags", c_uint32),
+	]
+
 class etrace_all_subtypes(Union):
 	_pack_ = 1
 	_fields_ = [
@@ -99,6 +108,7 @@ class etrace_all_subtypes(Union):
 		("arch", etrace_arch_gh),
 		("mem", etrace_mem),
 		("event_u64", etrace_event_u64),
+		("discontinuity", etrace_discontinuity),
 		("texec", etrace_exec)
 	]
 class etrace_pkg(Structure):
@@ -118,7 +128,13 @@ class etrace(object):
 	TYPE_BARRIER = 6
 	TYPE_EVENT_U64_OLD = 7
 	TYPE_EVENT_U64 = 8
+	TYPE_DISCONTINUITY = 9
 	TYPE_INFO = 0x4554
+
+	DISCONTINUITY_UNKNOWN = 0
+	DISCONTINUITY_INTERRUPT = 1
+	DISCONTINUITY_EXCEPTION = 2
+	DISCONTINUITY_HOST_CALL = 3
 
 	MEM_READ  = (0 << 0)
 	MEM_WRITE = (1 << 0)
@@ -144,8 +160,12 @@ class etrace(object):
 			return "info"
 
 		typenames = ["none", "exec", "tb", "note", "mem",
-				"arch", "barrier", "old_event_u64", "event_u64"]
+				"arch", "barrier", "old_event_u64", "event_u64",
+				"discontinuity"]
 		return typenames[type]
+
+	def discontinuity_kind_to_name(self, kind):
+		return ["unknown", "interrupt", "exception", "host-call"][kind]
 
 	def push_pos(self):
 		pos = self.f.tell()
@@ -221,6 +241,9 @@ class etrace(object):
 			dummy = self.f.read(1)
 			pkg.all.event_name = ev_name
 			pkg.all.dev_name = dev_name
+		elif pkg.hdr.type == self.TYPE_DISCONTINUITY:
+			self.f.readinto(pkg.all.discontinuity)
+			self.f.seek(end_pos, 0)
 		elif pkg.hdr.type == self.TYPE_EXEC:
 			entry_count = (pkg.hdr.len - sizeof(pkg.all.texec))
 			entry_count //= sizeof(self.etype)
