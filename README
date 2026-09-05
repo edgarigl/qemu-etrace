@@ -92,23 +92,18 @@ $ qemu-system-aarch64 ... \
 
 The plugin records execution callbacks for chained translation blocks, so
 `-d nochain` is not needed. Output writes are serialized for MTTCG. The plugin
-currently records TB ranges with a zero duration, which supports coverage but
-does not provide time-based profiling.
+records accurate execution ranges with zero duration, which supports coverage
+but does not provide time-based profiling. API version 1 uses one host callback
+per instruction. Newer APIs delay each TB record until execution is resolved:
+system emulation with discontinuity callbacks needs one inline
+terminal-instruction marker per TB, while older QEMU and user-mode emulation
+use an inline last-PC update per instruction.
 
-Execution tracing defaults to `exec=tb`, which emits one range when a
-translation block starts. This is fast, but a synchronous exception can leave
-the block before its translated end. Use `exec=insn` to emit one exact range
-for every instruction callback when exception-sensitive coverage is more
-important than tracing overhead:
-
-$ qemu-system-aarch64 ... \
-    -accel tcg \
-    -plugin /usr/local/lib/qemu-etrace/plugins/5/libqemu-etrace.so,out=/tmp/elog,exec=insn \
-    -kernel vmlinux
-
-Instruction callbacks establish dispatch, not architectural retirement. An
-instruction that raises an exception might not complete and, on some exception
-paths, might not be visible through the normal instruction callback.
+The ETrace format assumes that execution ranges are accurate; no opt-in flag is
+required. Instruction observation establishes dispatch, not architectural
+retirement. An instruction that raises an exception might not complete and, on
+some exception paths, is represented by a discontinuity rather than an
+ordinary execution range.
 
 When the selected QEMU header provides discontinuity callbacks, the plugin also
 records interrupts, exceptions, and host calls with their source and destination

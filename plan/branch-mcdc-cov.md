@@ -6,7 +6,8 @@ Start by fixing execution-range accuracy in the QEMU plugin. Do not make branch 
 
 The implementation order should be:
 
-1. add a simple instruction-granularity mode as a correctness reference and immediate workaround;
+1. restore accurate execution ranges by default, using instruction callbacks
+   as the API-version-1 implementation and correctness reference;
 2. record exceptions, interrupts, and host calls explicitly;
 3. add efficient terminal-instruction tracking to produce precise TB ranges with one inline store per TB;
 4. retain per-instruction last-PC tracking as a compatibility fallback when discontinuities are unavailable;
@@ -17,9 +18,10 @@ The implementation order should be:
 
 This order fixes an existing coverage error before building a new metric on top of it.
 
-## Current plugin behavior and defects
+## Baseline plugin behavior and defects
 
-[`plugin/etrace-plugin.c`](../plugin/etrace-plugin.c) registers one callback at TB entry. That callback immediately writes a `TYPE_EXEC` record covering:
+The plugin implementation that motivated this work registered one callback at
+TB entry. That callback immediately wrote a `TYPE_EXEC` record covering:
 
 ```text
 [TB first PC, last translated instruction PC + instruction size)
@@ -27,9 +29,12 @@ This order fixes an existing coverage error before building a new metric on top 
 
 The record describes the translated TB, not the instructions actually dispatched. [`etrace_process_exec()`](../etrace.c) subsequently increments coverage for every byte in that range. A synchronous exception before the TB's end therefore produces false-positive coverage for the undispatched tail. This is already described as a limitation in [`docs/coverage-scenarios/partial-tb-execution.md`](../docs/coverage-scenarios/partial-tb-execution.md), but it is a correctness defect for exception-sensitive coverage rather than merely a reporting inconvenience.
 
-The present trace also has no explicit transfer or discontinuity record. A later TB at an unexpected address is visible, but the trace cannot say whether control arrived there through a branch, trap, interrupt, host call, or exception in the middle of the prior TB.
+That implementation also had no explicit transfer or discontinuity record. A
+later TB at an unexpected address was visible, but the trace could not say
+whether control arrived there through a branch, trap, interrupt, host call, or
+exception in the middle of the prior TB.
 
-| Situation | What the plugin records today | Consequence |
+| Situation | What the TB-entry plugin recorded | Consequence |
 |---|---|---|
 | TB completes normally | Full translated range | Correct for dispatched-instruction coverage |
 | Instruction in the middle traps or faults | Full translated range | Instructions after the fault are falsely marked hit |
@@ -83,23 +88,25 @@ The public plugin API still has no callback covering every normal and abnormal
 TB exit. A future QEMU API carrying an exit reason, last guest PC, and next
 guest PC would remove the remaining inference and should be pursued separately.
 
-## Phase 1: Add an instruction-mode correctness reference
+## Phase 1: Restore accurate execution ranges
 
-Add a plugin option:
+Execution-range accuracy is part of the ETrace format contract. The Xilinx
+QEMU built-in tracer records an execution start and resolves the end when the
+TB leaves generated code; consumers have therefore always been entitled to
+assume that an unmarked `TYPE_EXEC` range is accurate. Do not add a positive
+"precise" flag or make accuracy an opt-in mode. Any future intentionally
+optimistic producer must identify its ranges with an explicit inaccuracy flag.
 
-```text
-exec=tb        current fast, optimistic behavior
-exec=insn      one TYPE_EXEC range per dispatched instruction
-exec=precise   efficient last-dispatched TB ranges, when supported
-```
+For plugin API version 1, register a host execution callback for each
+translated instruction and emit `[pc, pc + size)`. If instruction `N` traps,
+callbacks for instructions `N+1...` do not run, so the false-positive tail
+disappears.
 
-Keep `exec=tb` as the initial default. In `exec=insn`, register a host execution callback for each translated instruction and emit `[pc, pc + size)`. If instruction `N` traps, callbacks for instructions `N+1...` do not run, so the false-positive tail disappears.
-
-This mode is deliberately expensive: it adds a host callback and trace record for every instruction. Its value is that it:
+This path is deliberately expensive: it adds a host callback and trace record for every instruction. Its value is that it:
 
 - works with the oldest supported plugin API;
-- gives users an immediate exception-sensitive mode;
-- provides an oracle for testing the later `exec=precise` implementation;
+- restores the trace's accuracy contract on the oldest supported API;
+- provides an oracle for testing the later optimized implementation;
 - requires no branch decoder or trace-format change.
 
 An instruction callback still proves dispatch rather than retirement. A faulting instruction can be absent from normal instruction callbacks on some exception paths, which the discontinuity record added later will make visible.
@@ -162,7 +169,7 @@ Discontinuities solve two distinct problems:
 - MicroBlaze unaligned exceptions are tested for duplicate or pre-vector
   callbacks before the plugin relies on their ordering.
 
-## Phase 3: Emit efficient precise TB ranges
+## Phase 3: Optimize accurate TB ranges
 
 For QEMU plugin API version 2 or newer, allocate a per-vCPU scoreboard with at least:
 
@@ -213,16 +220,9 @@ Register a vCPU-exit callback to flush the last pending range. The atexit callba
 
 This design delays a vCPU's record by one TB. Cross-vCPU packet order can therefore differ slightly from entry order, but the existing records have zero duration and coverage processing is already keyed by `unit_id`. Add a per-vCPU sequence number before any consumer starts treating packet order as an execution timeline.
 
-Add an information flag such as:
-
-```c
-ETRACE_INFO_F_PRECISE_EXEC_RANGES
-```
-
-It means that `TYPE_EXEC` ranges were resolved through terminal-instruction
-markers, discontinuities, or conservative internal-restart boundaries. Old
-readers can still consume the shorter ranges; new readers can report the
-precision provenance.
+Do not add an information flag for accurate ranges: accuracy is the default
+format contract and is assumed for legacy traces. If an optimistic TB-entry
+producer is added again, it must opt out explicitly with an inaccuracy flag.
 
 For QEMU without discontinuity callbacks, and for user-mode emulation where
 the system discontinuity hooks are unavailable, retain the original
@@ -246,17 +246,18 @@ Do not first emit the nominal full range and later send a packet subtracting its
 - vCPU state never crosses between CPUs under MTTCG.
 - The final TB on each vCPU is flushed exactly once.
 - Address overflow produces a bounded range and a diagnostic.
-- `exec=precise` is rejected with a clear message when built against API version 1.
-- The fallback and optimized modes produce identical ordinary covered prefixes;
+- API version 1 uses instruction host callbacks and remains accurate.
+- The fallback and optimized implementations produce identical ordinary covered prefixes;
   exception-source attempts are compared separately.
 - MMIO replay, atomic re-execution, precise SMC, and watchpoint exits never
   cause the undispatched tail to be emitted.
 
-## Phase 4: Make precision the normal plugin path
+## Phase 4: Validate and tune the accurate plugin path
 
-Benchmark all three modes on representative firmware and SMP guests:
+Benchmark the automatic implementations on representative firmware and SMP
+guests:
 
-- wall-clock slowdown relative to no plugin and current `exec=tb`;
+- wall-clock slowdown relative to no plugin and the former optimistic plugin;
 - translated code growth from one inline store per TB, plus the
   per-instruction fallback;
 - raw and gzip trace sizes;
@@ -264,7 +265,9 @@ Benchmark all three modes on representative firmware and SMP guests:
 - memory retained per unique translation;
 - behavior during translation-cache flush and self-modifying code.
 
-If the scoreboard path has acceptable overhead, make `exec=precise` the default for API version 2 or newer and retain `exec=tb` as an explicitly optimistic compatibility mode. Otherwise keep it opt-in, but print and record that `exec=tb` can over-report after synchronous exceptions.
+Keep accurate tracing enabled regardless of the result. Use benchmarks to tune
+buffering and instrumentation selection, not to choose whether ranges are
+accurate.
 
 Do not claim the limitation is solved until a real QEMU integration test deliberately triggers a synchronous exception in the middle of a multi-instruction TB. Unit callbacks alone verify plugin bookkeeping, not QEMU's actual callback ordering.
 
@@ -359,8 +362,9 @@ Each commit should include focused tests, a short imperative subject/body, and E
 
 1. `tests: Model instruction callbacks`
    Extend the plugin stubs to retain callbacks per translated instruction and execute selected prefixes in tests.
-2. `plugin: Add instruction trace mode`
-   Add `exec=insn`, exact instruction ranges, option validation, and raw/gzip tests.
+2. `plugin: Restore accurate execution ranges`
+   Emit exact instruction ranges by default, with partial-execution,
+   variable-width, and raw/gzip tests.
 3. `docs: Define dispatched coverage`
    Document TB, instruction, dispatch, retirement, and synchronous-exception semantics.
 4. `etrace: Add discontinuity records`
@@ -376,30 +380,29 @@ Each commit should include focused tests, a short imperative subject/body, and E
 8. `tests: Model terminal latches`
    Add scoreboard and inline-store stubs and verify one terminal marker per TB.
 9. `plugin: Track precise TB ranges`
-   Add `exec=precise`, delayed per-vCPU emission, the optimized terminal-latch
-   path, and the per-instruction fallback.
-10. `etrace: Mark precise execution ranges`
-    Add the info flag, validation, decoded provenance, and fixtures.
-11. `tests: Exercise internal TB restarts`
+   Replace API-version-2 instruction callbacks with delayed per-vCPU emission,
+   the optimized terminal-latch path, and the per-instruction inline fallback.
+10. `tests: Exercise internal TB restarts`
     Cover MMIO replay, atomic re-execution, precise SMC, and watchpoint paths.
-12. `tests: Exercise QEMU early exits`
+11. `tests: Exercise QEMU early exits`
     Add a real-QEMU fixture that traps in the middle and at the end of a TB.
-13. `plugin: Default to precise ranges`
-    Make the default change only after compatibility and performance results justify it.
-14. `disas: Add control-flow decoding`
+12. `plugin: Tune accurate tracing`
+    Apply performance improvements without weakening the range-accuracy
+    contract.
+13. `disas: Add control-flow decoding`
     Add the normalized one-instruction decoder and architecture golden tests.
-15. `coverage: Track branch outcomes`
+14. `coverage: Track branch outcomes`
     Add per-vCPU normal edges, outcome counters, and discontinuity resets.
-16. `coverage: Add branch inventories`
+15. `coverage: Add branch inventories`
     Add manifest/ELF/observed denominator modes and unknown-site diagnostics.
-17. `lcov: Emit branch coverage`
+16. `lcov: Emit branch coverage`
     Add stable `BRDA` records and differential tests against expected object edges.
-18. `coverage: Import compiler MC/DC`
+17. `coverage: Import compiler MC/DC`
     Add one compiler-native format first, with explicit provenance and LCOV MC/DC output.
 
-The first useful release point is after commit 2: users gain a correct but slow
-exception-sensitive mode. The first efficient accuracy release is after commit
-12. Object branch coverage begins only once that foundation is tested.
+The first useful release point is after commit 2: accurate tracing is restored
+with a slow implementation. The first efficient accuracy release is after
+commit 11. Object branch coverage begins only once that foundation is tested.
 
 ## Out of scope for the first milestones
 

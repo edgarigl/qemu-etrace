@@ -53,16 +53,20 @@ qemu-etrace ... --function-hit-policy source --coverage-output source.info
 The distinction should remain visible in safety analysis. A source-body hit
 does not prove that the retained out-of-line symbol was entered.
 
-## Plugin execution modes
+## Plugin execution ranges
 
-The upstream QEMU plugin supports two execution modes:
+The ETrace format assumes that every execution range is accurate. The upstream
+QEMU plugin automatically selects the least expensive mechanism supported by
+the QEMU API:
 
-- `exec=tb` is the default. A callback at translation-block entry emits the
-  complete translated range. This minimizes callback and trace volume, but it
-  can over-report the tail of a TB after a synchronous exception.
-- `exec=insn` registers a callback for every translated instruction and emits
-  its exact half-open `[pc, pc + size)` range. Instructions after a synchronous
-  exception do not produce callbacks, so they are not marked as covered.
+- API version 1 emits one exact half-open `[pc, pc + size)` range for every
+  instruction callback;
+- newer APIs delay a TB record and maintain per-vCPU inline progress;
+- when system-emulation discontinuities are available, one inline marker on the
+  terminal instruction distinguishes normal completion while `from_pc` bounds
+  an early exception or host call;
+- older QEMU and user-mode execution update the inline last PC on every
+  instruction as a compatibility fallback.
 
 Instruction callbacks prove that QEMU dispatched an instruction, not that the
 architecture retired it. A faulting instruction may have produced its callback
@@ -70,10 +74,11 @@ without completing. QEMU also documents exception paths on which the faulting
 instruction is not observable through the general instruction callback. The
 metric is therefore dispatched-instruction coverage, not retirement coverage.
 
-Both modes use ordinary `TYPE_EXEC` records, so trace readers and coverage
-reports require no format change. `exec=insn` increases callback count and trace
-volume substantially and is intended as the correctness reference for future
-optimized precise tracing.
+Execution uses ordinary `TYPE_EXEC` records. Discontinuity-capable builds also
+emit `TYPE_DISCONTINUITY` records containing the source PC, destination PC, and
+event kind. API version 1 has substantially higher callback and trace volume;
+its instruction-granularity results serve as the correctness reference for the
+optimized implementation.
 
 ## Known sources of disagreement
 
@@ -81,10 +86,9 @@ optimized precise tracing.
   the corresponding retained symbol.
 - Early boot code can execute at temporary physical addresses while ELF and
   DWARF data describe final virtual addresses.
-- In `exec=tb`, a synchronous exception can terminate a QEMU translation block
-  before its final instruction while the trace records the complete range.
-- In `exec=insn`, a faulting instruction can be dispatched without retiring or
-  can be absent from the normal instruction callback on some exception paths.
+- A faulting instruction can be dispatched without retiring or can be absent
+  from the normal instruction callback on some exception paths. Discontinuity
+  records keep that attempted instruction distinct from the completed prefix.
 - Several source locations can share one address, particularly around inline
   call sites, macros, and adjacent line-table sequences.
 
