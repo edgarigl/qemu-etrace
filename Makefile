@@ -112,6 +112,7 @@ plugindir ?= $(libdir)/qemu-etrace/plugins/$(QEMU_PLUGIN_API)
 TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
 TEST_BINS += $(TEST_BUILD_DIR)/test-address-map
+TEST_BINS += $(TEST_BUILD_DIR)/test-disas
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
 TEST_BINS += $(TEST_BUILD_DIR)/test-dwarf-lines
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
@@ -189,6 +190,12 @@ $(TEST_BUILD_DIR)/test-address-map: tests/unit/test-address-map.c \
 		tests/unit/test-address-map.c address-map.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
+$(TEST_BUILD_DIR)/test-disas: tests/unit/test-disas.c disas.c disas.h \
+		run.c run.h safeio.c safeio.h util.c util.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-disas.c disas.c run.c safeio.c util.c \
+		$(LDFLAGS) $(LDLIBS) -o $@
+
 $(TEST_BUILD_DIR)/test-excludes: tests/unit/test-excludes.c excludes.c excludes.h | $(TEST_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
 		tests/unit/test-excludes.c excludes.c \
@@ -260,6 +267,7 @@ $(TEST_BUILD_DIR)/duplicate-inline-b.o: tests/fixtures/duplicate-inline.c | $(TE
 
 check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-address-map
+	$(TEST_BUILD_DIR)/test-disas
 	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-dwarf-lines
 	$(TEST_BUILD_DIR)/test-filename
