@@ -777,7 +777,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 	int stdio[3] = {0, 1, 2};
 	int fdout_tmp;
 	struct sym_store *ss = *store;
-	char *default_filename = NULL;
 	char *filename = NULL;
 	int pipefd[2];
 	FILE *fp;
@@ -833,8 +832,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			free_source_locs(pending.locs);
 			pending.locs = NULL;
 			pending.valid = false;
-			free(default_filename);
-			default_filename = NULL;
 			free(filename);
 			filename = NULL;
 			continue;
@@ -844,8 +841,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 		if (row.filename) {
 			free(filename);
 			filename = filename_sanitize(row.filename);
-			if (!default_filename)
-				default_filename = strdup(filename);
 			free(row.filename);
 			row.filename = NULL;
 		}
@@ -857,9 +852,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 				free_source_locs(pending.locs);
 			pending.locs = NULL;
 			pending.valid = false;
-			free(filename);
-			filename = default_filename
-				? strdup(default_filename) : NULL;
 			dwarf_line_row_clear(&row);
 			continue;
 		}
@@ -894,7 +886,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 	}
 
 	free_source_locs(pending.locs);
-	free(default_filename);
 	free(filename);
 	fclose(fp);
 	materialize_line_ranges(ss);
@@ -902,20 +893,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 		fprintf(stderr, "WARNING: Unable to create linemap\n");
 	}
 	fprintf(stderr, "done.\n");
-}
-
-static uint64_t sym_coverage_at(struct sym_store *ss, uint64_t addr)
-{
-	void *store = ss;
-	struct sym *sym = sym_lookup_by_addr(&store, addr);
-	uint64_t offset;
-
-	if (!sym || !sym->cov_ent)
-		return 0;
-	offset = addr - sym->addr;
-	if (offset >= sym->size)
-		return 0;
-	return sym->cov_ent->counter[offset];
 }
 
 static void sym_update_source_hits(struct sym_store *ss, const char *name,
@@ -960,10 +937,11 @@ static bool parse_dwarf_address(const char *line, const char *attribute,
 
 static void write_covered_address(struct sym_store *ss, int fd, uint64_t addr)
 {
+	void *store = ss;
 	char text[32];
 	int len;
 
-	if (!sym_coverage_at(ss, addr))
+	if (!sym_image_coverage_at(&store, addr))
 		return;
 	len = snprintf(text, sizeof(text), "0x%" PRIx64 "\n", addr);
 	if (safe_write(fd, text, len) != len) {
@@ -1112,10 +1090,11 @@ void sym_build_source_coverage(void **store, const char *addr2line,
 			break;
 		}
 		if (!strncmp(line, "0x", 2)) {
+			void *store = ss;
 			char *end;
 			uint64_t addr = strtoull(line, &end, 16);
 
-			current_hits = sym_coverage_at(ss, addr);
+			current_hits = sym_image_coverage_at(&store, addr);
 			if (end[0] != ':' || end[1] != ' ') {
 				free(line);
 				continue;

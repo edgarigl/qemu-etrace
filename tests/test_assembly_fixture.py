@@ -357,7 +357,7 @@ def test_function_inventory_explains_assembly_symbols(
     assert "discarded_function" not in records
 
 
-def test_new_sequence_uses_compilation_unit_default_file(
+def test_new_sequence_retains_dwarfdump_file_context(
     run_etrace, tmp_path, assembly_fixture
 ):
     symbols = nm_symbols(assembly_fixture)
