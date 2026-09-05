@@ -68,6 +68,20 @@ struct etrace_discontinuity_packet {
 	struct etrace_discontinuity data;
 } __attribute__ ((packed));
 
+struct etrace_status_packet {
+	struct etrace_hdr hdr;
+	struct etrace_status data;
+} __attribute__ ((packed));
+
+struct producer_status {
+	uint64_t unresolved_tb_exits;
+	uint64_t unresolved_discontinuities;
+	uint64_t unresolved_vcpu_exits;
+	uint64_t output_errors;
+	uint64_t discontinuity_pc_mismatches;
+	uint64_t pending_vcpus;
+};
+
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct tb_data *translated_blocks;
 static int trace_fd = -1;
@@ -76,6 +90,7 @@ static bool trace_failed;
 static uint8_t guest_address_bits;
 static int gzip_level = Z_BEST_SPEED;
 static bool gzip_output;
+static struct producer_status producer_status;
 #if QEMU_PLUGIN_VERSION >= 2
 static struct qemu_plugin_scoreboard *exec_state;
 static qemu_plugin_u64 exec_progress;
@@ -135,6 +150,7 @@ static void write_packet(const void *packet, size_t len)
 	if (!trace_failed && !write_output(packet, len)) {
 		fprintf(stderr, "qemu-etrace-plugin: write: %s\n", output_error());
 		trace_failed = true;
+		producer_status.output_errors++;
 	}
 	pthread_mutex_unlock(&lock);
 }
@@ -157,7 +173,7 @@ static bool write_headers(void)
 			.len = sizeof(info_packet.data),
 		},
 		.data = {
-			.attr = 0,
+			.attr = ETRACE_INFO_F_FINAL_STATUS,
 			.version = { .major = 0, .minor = 0 },
 		},
 	};
@@ -231,17 +247,29 @@ static void vcpu_exec(unsigned int cpu_index, void *userdata)
 #endif
 
 #if QEMU_PLUGIN_VERSION >= 2
-static void write_exec_prefix(unsigned int cpu_index,
+static void increment_status_counter(uint64_t *counter)
+{
+	pthread_mutex_lock(&lock);
+	(*counter)++;
+	pthread_mutex_unlock(&lock);
+}
+
+static void decrement_pending_vcpus(void)
+{
+	pthread_mutex_lock(&lock);
+	if (producer_status.pending_vcpus)
+		producer_status.pending_vcpus--;
+	pthread_mutex_unlock(&lock);
+}
+
+static bool write_exec_prefix(unsigned int cpu_index,
 			      const struct tb_data *tb, uint64_t end)
 {
 	if (end > tb->start && end <= tb->end) {
 		write_exec_range(cpu_index, tb->start, end);
-	} else if (end != tb->start) {
-		fprintf(stderr,
-			"qemu-etrace-plugin: unresolved TB exit at 0x%" PRIx64
-			" from [0x%" PRIx64 ",0x%" PRIx64 ")\n",
-			end, tb->start, tb->end);
+		return true;
 	}
+	return end == 0 || end == tb->start;
 }
 
 static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
@@ -252,15 +280,33 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
 
 	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
-	if (state->pending)
-		write_exec_prefix(cpu_index, state->pending, progress);
+	if (state->pending
+	    && !write_exec_prefix(cpu_index, state->pending, progress))
+		increment_status_counter(&producer_status.unresolved_tb_exits);
+	if (!state->pending)
+		increment_status_counter(&producer_status.pending_vcpus);
 
 	state->pending = current;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
 }
 
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
-static void flush_discontinuity_range(unsigned int cpu_index)
+static bool tb_has_boundary(const struct tb_data *tb, uint64_t pc)
+{
+	size_t i;
+
+	if (pc == tb->end)
+		return true;
+	for (i = 0; i < tb->n_insns; i++) {
+		if (tb->insns[i].start == pc)
+			return true;
+	}
+	return false;
+}
+
+static void flush_discontinuity_range(unsigned int cpu_index,
+				      enum qemu_plugin_discon_type type,
+				      uint64_t from_pc)
 {
 	struct vcpu_exec_state *state;
 	uint64_t progress;
@@ -269,11 +315,19 @@ static void flush_discontinuity_range(unsigned int cpu_index)
 	if (!state->pending)
 		return;
 
+	if (type != QEMU_PLUGIN_DISCON_INTERRUPT
+	    && !tb_has_boundary(state->pending, from_pc)) {
+		increment_status_counter(
+			&producer_status.discontinuity_pc_mismatches);
+	}
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
-	write_exec_prefix(cpu_index, state->pending, progress);
+	if (!write_exec_prefix(cpu_index, state->pending, progress))
+		increment_status_counter(
+			&producer_status.unresolved_discontinuities);
 
 	state->pending = NULL;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
+	decrement_pending_vcpus();
 }
 #endif
 
@@ -297,10 +351,12 @@ static void vcpu_exit(qemu_plugin_id_t id, unsigned int cpu_index)
 		return;
 
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
-	write_exec_prefix(cpu_index, state->pending, progress);
+	if (!write_exec_prefix(cpu_index, state->pending, progress))
+		increment_status_counter(&producer_status.unresolved_vcpu_exits);
 
 	state->pending = NULL;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
+	decrement_pending_vcpus();
 }
 #endif
 
@@ -317,7 +373,7 @@ static void vcpu_discontinuity(qemu_plugin_id_t id, unsigned int cpu_index,
 #endif
 {
 #if QEMU_PLUGIN_VERSION >= 2
-	flush_discontinuity_range(cpu_index);
+	flush_discontinuity_range(cpu_index, type, from_pc);
 #endif
 	struct etrace_discontinuity_packet packet = {
 		.hdr = {
@@ -463,12 +519,34 @@ static void plugin_exit(void *userdata)
 static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 #endif
 {
+	struct etrace_status_packet status_packet = {
+		.hdr = {
+			.type = TYPE_STATUS,
+			.len = sizeof(status_packet.data),
+		},
+	};
 	struct tb_data *tb;
 
 #if QEMU_PLUGIN_VERSION < 7
 	(void) id;
 #endif
 	(void) userdata;
+
+	pthread_mutex_lock(&lock);
+	producer_status.unresolved_vcpu_exits += producer_status.pending_vcpus;
+	status_packet.data.unresolved_tb_exits =
+		producer_status.unresolved_tb_exits;
+	status_packet.data.unresolved_discontinuities =
+		producer_status.unresolved_discontinuities;
+	status_packet.data.unresolved_vcpu_exits =
+		producer_status.unresolved_vcpu_exits;
+	status_packet.data.output_errors = producer_status.output_errors;
+	status_packet.data.discontinuity_pc_mismatches =
+		producer_status.discontinuity_pc_mismatches;
+	status_packet.data.flags = ETRACE_STATUS_F_COMPLETE;
+	pthread_mutex_unlock(&lock);
+
+	write_packet(&status_packet, sizeof(status_packet));
 
 	pthread_mutex_lock(&lock);
 	if (trace_gz) {
@@ -512,6 +590,7 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	gzip_output = false;
 	gzip_level = Z_BEST_SPEED;
 	trace_failed = false;
+	memset(&producer_status, 0, sizeof(producer_status));
 	for (i = 0; i < argc; i++) {
 		if (!strncmp(argv[i], "out=", 4) && argv[i][4]) {
 			output = argv[i] + 4;

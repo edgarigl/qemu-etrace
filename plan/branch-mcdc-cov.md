@@ -10,6 +10,8 @@ The execution-accuracy foundation is implemented:
 - Execution-prefix accuracy does not depend on discontinuity callbacks being
   complete for virtualization and internal transitions.
 - Exceptions, interrupts, and host calls have explicit discontinuity records.
+- Plugin traces require a final producer-status record, and the converter
+  rejects unresolved execution data and incomplete streams.
 - The build probes the selected QEMU header for discontinuity support instead
   of inferring support from the plugin API version.
 - Execution coverage and DWARF attribution operate at byte granularity and

@@ -109,6 +109,12 @@ records interrupts, exceptions, and host calls with their source and destination
 PCs. The build detects this declaration directly because QEMU 10.1 and 10.2 use
 the same plugin API version even though only 10.2 provides the callback.
 
+Plugin-produced traces advertise and end with a producer-status record. The
+status reports unresolved TB, discontinuity, and vCPU-exit ranges together
+with output errors. Conversion fails when the required final record is missing
+or contains a correctness error, preventing incomplete coverage from being
+accepted as a successful result.
+
 Add `compress=gzip` to compress the trace while QEMU runs. Compression level 1
 is the default and levels from 0 through 9 can be selected with `level=`:
 

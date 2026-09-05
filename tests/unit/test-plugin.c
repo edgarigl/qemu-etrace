@@ -471,6 +471,32 @@ static void assert_exec64(const uint8_t **cursor, unsigned int cpu_index,
 	g_assert_cmpuint(entry.end, ==, end);
 }
 
+static struct etrace_status read_status(const uint8_t **cursor)
+{
+	struct etrace_status status;
+	struct etrace_hdr hdr;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_STATUS);
+	g_assert_cmpuint(hdr.len, ==, sizeof(status));
+	read_data(cursor, &status, sizeof(status));
+	g_assert_cmpuint(status.flags, ==, ETRACE_STATUS_F_COMPLETE);
+	return status;
+}
+
+static void assert_status(const uint8_t **cursor,
+			  uint64_t discontinuity_pc_mismatches)
+{
+	struct etrace_status status = read_status(cursor);
+
+	g_assert_cmpuint(status.unresolved_tb_exits, ==, 0);
+	g_assert_cmpuint(status.unresolved_discontinuities, ==, 0);
+	g_assert_cmpuint(status.unresolved_vcpu_exits, ==, 0);
+	g_assert_cmpuint(status.output_errors, ==, 0);
+	g_assert_cmpuint(status.discontinuity_pc_mismatches, ==,
+			discontinuity_pc_mismatches);
+}
+
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 static void assert_discontinuity(const uint8_t **cursor,
 				 unsigned int cpu_index, uint32_t kind,
@@ -531,7 +557,8 @@ static void test_discontinuity_trace(void)
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
-	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS);
 	assert_exec64(&cursor, 3, 0x1000, 0x1004);
 	assert_discontinuity(&cursor, 3, ETRACE_DISCONTINUITY_EXCEPTION,
 			     0x1004, 0x2000);
@@ -539,6 +566,7 @@ static void test_discontinuity_trace(void)
 			     0x2004, 0x3000);
 	assert_discontinuity(&cursor, 3, ETRACE_DISCONTINUITY_HOST_CALL,
 			     0x3004, 0x3008);
+	assert_status(&cursor, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -593,11 +621,13 @@ static void test_instruction_execution_trace(void)
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
-	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS);
 	assert_exec64(&cursor, 5, 0x1000, 0x1002);
 	assert_exec64(&cursor, 5, 0x1000, 0x1002);
 	assert_exec64(&cursor, 5, 0x1002, 0x1006);
 	assert_exec64(&cursor, 5, 0x1006, 0x1009);
+	assert_status(&cursor, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -757,12 +787,16 @@ static void test_accurate_execution_trace(void)
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
-	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS);
 	assert_exec64(&cursor, 2, 0x1000, 0x100c);
 	assert_exec64(&cursor, 2, 0x2000, 0x2004);
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 	assert_discontinuity(&cursor, 2, ETRACE_DISCONTINUITY_EXCEPTION,
 			     0x41a7f1, 0x3000);
+	assert_status(&cursor, 1);
+#else
+	assert_status(&cursor, 0);
 #endif
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
@@ -825,12 +859,14 @@ static void test_unreported_system_transition(void)
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
-	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS);
 	for (i = 0; i < 2; i++) {
 		assert_exec64(&cursor, 3, 0x41a807, 0x41a810);
 		assert_exec64(&cursor, 3, UINT64_C(0xffff82d0402a4aab),
 			      UINT64_C(0xffff82d0402a4ab2));
 	}
+	assert_status(&cursor, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -888,9 +924,11 @@ static void test_accurate_internal_restart(void)
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
-	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS);
 	assert_exec64(&cursor, 1, 0x1000, 0x1004);
 	assert_exec64(&cursor, 1, 0x1004, 0x100c);
+	assert_status(&cursor, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -955,6 +993,7 @@ static void test_execution_trace(void)
 	g_assert_cmpuint(hdr.len, ==, sizeof(info_data));
 	read_data(&cursor, &info_data, sizeof(info_data));
 	g_assert_cmpuint(info_data.version.major, ==, 0);
+	g_assert_cmpuint(info_data.attr, ==, ETRACE_INFO_F_FINAL_STATUS);
 
 	read_data(&cursor, &hdr, sizeof(hdr));
 	g_assert_cmpuint(hdr.type, ==, TYPE_ARCH);
@@ -971,6 +1010,7 @@ static void test_execution_trace(void)
 	g_assert_cmpuint(entry.duration, ==, 0);
 	g_assert_cmpuint(entry.start, ==, 0x1000);
 	g_assert_cmpuint(entry.end, ==, 0x1004);
+	assert_status(&cursor, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -978,6 +1018,58 @@ static void test_execution_trace(void)
 	g_free(arg);
 	g_free(path);
 }
+
+#if QEMU_PLUGIN_VERSION >= 2
+static void test_unflushed_vcpu_status(void)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x1000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x1000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	struct etrace_status status;
+	char *arg;
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	arg = g_strdup_printf("out=%s", path);
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 1, tb.n_insns);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS);
+	status = read_status(&cursor);
+	g_assert_cmpuint(status.unresolved_tb_exits, ==, 0);
+	g_assert_cmpuint(status.unresolved_discontinuities, ==, 0);
+	g_assert_cmpuint(status.unresolved_vcpu_exits, ==, 1);
+	g_assert_cmpuint(status.output_errors, ==, 0);
+	g_assert_cmpuint(status.discontinuity_pc_mismatches, ==, 0);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(arg);
+	g_free(path);
+}
+#endif
 
 static void test_32bit_execution_trace(void)
 {
@@ -1022,6 +1114,7 @@ static void test_32bit_execution_trace(void)
 	cursor = (const uint8_t *)contents;
 	read_data(&cursor, &hdr, sizeof(hdr));
 	read_data(&cursor, &info_data, sizeof(info_data));
+	g_assert_cmpuint(info_data.attr, ==, ETRACE_INFO_F_FINAL_STATUS);
 	read_data(&cursor, &hdr, sizeof(hdr));
 	read_data(&cursor, &arch, sizeof(arch));
 	g_assert_cmpuint(arch.guest.arch_bits, ==, 32);
@@ -1031,6 +1124,7 @@ static void test_32bit_execution_trace(void)
 	read_data(&cursor, &entry, sizeof(entry));
 	g_assert_cmpuint(entry.start, ==, 0x2000);
 	g_assert_cmpuint(entry.end, ==, 0x2002);
+	assert_status(&cursor, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -1097,6 +1191,7 @@ static void test_gzip_execution_trace(void)
 	read_data(&cursor, &entry, sizeof(entry));
 	g_assert_cmpuint(entry.start, ==, 0x3000);
 	g_assert_cmpuint(entry.end, ==, 0x3004);
+	assert_status(&cursor, 0);
 	g_assert_cmpuint(cursor - contents, ==, length);
 
 	unlink(path);
@@ -1128,6 +1223,8 @@ int main(int argc, char **argv)
 #if QEMU_PLUGIN_VERSION >= 2
 	g_test_add_func("/plugin/accurate-execution-trace",
 			test_accurate_execution_trace);
+	g_test_add_func("/plugin/unflushed-vcpu-status",
+			test_unflushed_vcpu_status);
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 	g_test_add_func("/plugin/unreported-system-transition",
 			test_unreported_system_transition);

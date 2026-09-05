@@ -85,6 +85,14 @@ event kind. API version 1 has substantially higher callback and trace volume;
 its instruction-granularity results serve as the correctness reference for the
 optimized implementation.
 
+Plugin traces advertise `ETRACE_INFO_F_FINAL_STATUS` and end with a
+`TYPE_STATUS` record. The converter rejects a missing or incomplete final
+status and any nonzero unresolved-execution or output-error counter.
+Discontinuity-PC mismatches are retained as diagnostics because virtualization
+transitions can legitimately report a source outside the currently pending
+translation block; per-instruction progress remains authoritative for the
+ordinary execution prefix.
+
 ## Known sources of disagreement
 
 - Inline functions and compiler-generated clones can execute without entering
