@@ -80,6 +80,7 @@ TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v7
 TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
+TEST_FIXTURES += $(TEST_BUILD_DIR)/inline-function-fixture
 
 all: $(TARGET).sh
 
@@ -143,6 +144,9 @@ $(TEST_BUILD_DIR)/test-plugin-v7: tests/unit/test-plugin.c plugin/etrace-plugin.
 $(TEST_BUILD_DIR)/coverage-fixture: tests/fixtures/coverage.c | $(TEST_BUILD_DIR)
 	$(CC) -O0 -g -fno-inline -fno-pie -no-pie $< -o $@
 
+$(TEST_BUILD_DIR)/inline-function-fixture: tests/fixtures/inline-function.c | $(TEST_BUILD_DIR)
+	$(CC) -O2 -g -fno-pie -no-pie $< -o $@
+
 check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-filename
@@ -197,7 +201,7 @@ $(TARGET).sh: $(TARGET)
 	echo "ETRACE=$(abspath $(TARGET))" >>$@
 	if [ -d $(BU_INSTALLDIR) ]; then \
 		echo "BU_INSTALLDIR=$(BU_INSTALLDIR)" >>$@; \
-		echo "exec \"\$${ETRACE}\" --nm \"\$${BU_INSTALLDIR}/bin/nm\" --objdump \"\$${BU_INSTALLDIR}/bin/objdump\" \"\$$@\"" >>$@; \
+		echo "exec \"\$${ETRACE}\" --nm \"\$${BU_INSTALLDIR}/bin/nm\" --objdump \"\$${BU_INSTALLDIR}/bin/objdump\" --addr2line \"\$${BU_INSTALLDIR}/bin/addr2line\" \"\$$@\"" >>$@; \
 	else \
 		echo "exec \"\$${ETRACE}\" \"\$$@\"" >>$@; \
 	fi

@@ -93,6 +93,7 @@ struct
 	enum trace_format trace_in_format;
 	enum trace_format trace_out_format;
 	enum cov_format coverage_format;
+	enum function_hit_policy function_hit_policy;
 	bool server;
 	char *coverage_output;
 	char *gcov_strip;
@@ -112,6 +113,7 @@ struct
 	.machine = NULL,
 	.guest_machine = NULL,
 	.coverage_format = NONE,
+	.function_hit_policy = FUNCTION_HIT_ENTRY,
 	.coverage_output = NULL,
 	.gcov_strip = NULL,
 	.gcov_prefix = NULL,
@@ -138,6 +140,7 @@ static const char etrace_usagestr[] = \
 "--gcov-prefix          Prefix with the specified prefix.\n"
 "--coverage-format      Kind of coverage.\n"
 "--coverage-output      Coverage filename (if applicable).\n"
+"--function-hit-policy Function hits: entry or source.\n"
 "\n";
 
 void usage(void)
@@ -191,6 +194,16 @@ static inline enum trace_format map_traceformat(const char *s)
 	return map_format(trace_fmt_map, s);
 }
 
+static enum function_hit_policy map_function_hit_policy(const char *s)
+{
+	if (!strcmp(s, "entry"))
+		return FUNCTION_HIT_ENTRY;
+	if (!strcmp(s, "source"))
+		return FUNCTION_HIT_SOURCE;
+	fprintf(stderr, "Invalid function hit policy %s\n", s);
+	exit(EXIT_FAILURE);
+}
+
 static void parse_arguments(int argc, char **argv)
 {
         int c;
@@ -214,13 +227,14 @@ static void parse_arguments(int argc, char **argv)
 			{"guest-machine", required_argument, 0, 'g' },
 			{"coverage-format", required_argument, 0, 'f' },
 			{"coverage-output", required_argument, 0, 'c' },
+			{"function-hit-policy", required_argument, 0, 'F' },
 			{"gcov-strip", required_argument, 0, 'z' },
 			{"gcov-prefix", required_argument, 0, 'p' },
 			{0,         0,                 0,  0 }
 		};
 		int option_index = 0;
 
-		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:w:",
+		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:w:F:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -277,6 +291,9 @@ static void parse_arguments(int argc, char **argv)
 			break;
 		case 'p':
 			args.gcov_prefix = optarg;
+			break;
+		case 'F':
+			args.function_hit_policy = map_function_hit_policy(optarg);
 			break;
 		case 'y':
 			args.trace_in_format = map_traceformat(optarg);
@@ -337,6 +354,12 @@ void validate_arguments(void)
 			" but no output file!\n"
 			"Try using the --coverage-output option.\n\n");
 		usage();
+		exit(EXIT_FAILURE);
+	}
+	if (args.function_hit_policy == FUNCTION_HIT_SOURCE
+	    && (!args.elf || args.coverage_format != LCOV)) {
+		fprintf(stderr, "Source function hits require --elf and "
+			"--coverage-format lcov\n");
 		exit(EXIT_FAILURE);
 	}
 }
@@ -458,11 +481,14 @@ int main(int argc, char **argv)
 
 	sym_show_stats(&sym_tree);
 
+	if (args.function_hit_policy == FUNCTION_HIT_SOURCE)
+		sym_build_source_coverage(&sym_tree, args.addr2line, args.elf);
+
 	if (args.coverage_format != NONE)
 		coverage_emit(&sym_tree, args.coverage_output,
 				args.coverage_format,
 				args.gcov_strip, args.gcov_prefix,
-                                args.exclude);
+				args.exclude, args.function_hit_policy);
 
 	return EXIT_SUCCESS;
 }

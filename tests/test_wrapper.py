@@ -39,6 +39,8 @@ def test_wrapper_preserves_tool_and_user_arguments(tmp_path):
         f"<{install}/bin/nm>",
         "<--objdump>",
         f"<{install}/bin/objdump>",
+        "<--addr2line>",
+        f"<{install}/bin/addr2line>",
         "<argument with spaces>",
         "<*.trace>",
     ]

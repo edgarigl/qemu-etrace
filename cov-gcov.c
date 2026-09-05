@@ -895,7 +895,8 @@ struct sym_src_loc *gcov_find_decl_line(struct sym *s, const char *filename)
 	return ret;
 }
 
-void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude)
+void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude,
+		    enum function_hit_policy function_policy)
 {
 	unsigned int i;
 	unsigned int instr_lines = 0;
@@ -924,11 +925,14 @@ void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude)
 
 			fprintf(fp, "FN:%u,%s\n",
 				loc->linenr, f->syms[i]->name);
-			if (f->syms[i]->cov_ent) {
+			if (function_policy == FUNCTION_HIT_SOURCE)
 				fprintf(fp, "FNDA:%" PRIu64 ",%s\n",
-					f->syms[i]->cov_ent->counter[0],
+					f->syms[i]->source_hits, f->syms[i]->name);
+			else
+				fprintf(fp, "FNDA:%" PRIu64 ",%s\n",
+					f->syms[i]->cov_ent
+						? f->syms[i]->cov_ent->counter[0] : 0,
 					f->syms[i]->name);
-			}
 		}
 	}
 
@@ -957,7 +961,7 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 		struct sym *unknown, FILE *fp,
 		const char *gcov_strip, const char *gcov_prefix,
 		enum cov_format fmt,
-		void *exclude)
+		void *exclude, enum function_hit_policy function_policy)
 {
 	struct gcov_file *f;
 	int i;
@@ -972,7 +976,7 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 		if (fmt == QCOV)
 			gcov_emit_qcov_file(f, gcov_strip, gcov_prefix);
 		if (fmt == LCOV)
-			lcov_emit_info(f, fp, exclude);
+			lcov_emit_info(f, fp, exclude, function_policy);
 		f = f->next;
 	}
 

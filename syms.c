@@ -466,6 +466,172 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 	fprintf(stderr, "done.\n");
 }
 
+static uint64_t sym_coverage_at(struct sym_store *ss, uint64_t addr)
+{
+	void *store = ss;
+	struct sym *sym = sym_lookup_by_addr(&store, addr);
+	uint64_t offset;
+
+	if (!sym || !sym->cov_ent)
+		return 0;
+	offset = (addr - sym->addr) / 4;
+	if (offset > sym->size / 4)
+		return 0;
+	return sym->cov_ent->counter[offset];
+}
+
+static void sym_update_source_hits(struct sym_store *ss, const char *name,
+				   const char *filename, uint64_t hits)
+{
+	size_t name_len = strlen(name);
+	unsigned int i;
+
+	if (!hits || !strcmp(name, "??") || !strcmp(filename, "??"))
+		return;
+	if (name_len > sizeof(ss->allsyms[0].name) - 2)
+		name_len = sizeof(ss->allsyms[0].name) - 2;
+
+	for (i = 0; i < ss->nr_stored; i++) {
+		struct sym *sym = &ss->allsyms[i];
+
+		if (sym->namelen != name_len
+		    || strncmp(sym->name, name, name_len)
+		    || !sym->src_filename
+		    || strcmp(sym->src_filename, filename))
+			continue;
+		if (hits > sym->source_hits)
+			sym->source_hits = hits;
+	}
+}
+
+void sym_build_source_coverage(void **store, const char *addr2line,
+			       const char *elf)
+{
+	char *argv[] = { (char *)addr2line, "-a", "-f", "-i", "-C", "-p",
+			 "-e", (char *)elf, NULL };
+	char tmpout_template[] = "/tmp/etrace-a2l-out-XXXXXX";
+	struct sym_store *ss = *store;
+	int stdio[3] = { 0, 1, 2 };
+	uint64_t current_hits = 0;
+	int fdout_tmp;
+	int pipefd[2];
+	FILE *fp;
+	pid_t kid;
+	int status;
+	int r;
+	unsigned int i;
+
+	fprintf(stderr, "Building source function coverage\n");
+	r = pipe(pipefd);
+	if (r < 0) {
+		perror("pipe");
+		exit(EXIT_FAILURE);
+	}
+	fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+
+	fdout_tmp = mkstemp(tmpout_template);
+	if (fdout_tmp < 0) {
+		perror("mkstemp");
+		exit(EXIT_FAILURE);
+	}
+	unlink(tmpout_template);
+
+	stdio[0] = pipefd[0];
+	stdio[1] = fdout_tmp;
+	kid = run(argv[0], argv, stdio);
+
+	for (i = 0; i < ss->nr_stored; i++) {
+		struct sym *sym = &ss->allsyms[i];
+		uint64_t addr;
+		unsigned int pos = 0;
+
+		if (!sym->cov_ent)
+			continue;
+		sym->source_hits = sym->cov_ent->counter[0];
+		for (addr = sym->addr; addr < sym->addr + sym->size; addr += 4) {
+			char text[32];
+			int len;
+
+			if (!sym->cov_ent->counter[pos++])
+				continue;
+			len = snprintf(text, sizeof(text), "0x%" PRIx64 "\n", addr);
+			if (safe_write(pipefd[1], text, len) != len) {
+				perror("addr2line input");
+				exit(EXIT_FAILURE);
+			}
+		}
+	}
+	close(pipefd[0]);
+	close(pipefd[1]);
+
+	if (waitpid(kid, &status, 0) != kid || !WIFEXITED(status)
+	    || WEXITSTATUS(status) != 0) {
+		fprintf(stderr, "addr2line failed\n");
+		exit(EXIT_FAILURE);
+	}
+
+	lseek(fdout_tmp, 0, SEEK_SET);
+	fp = fdopen(fdout_tmp, "r");
+	if (!fp) {
+		fprintf(stderr, "Unable to read addr2line output\n");
+		exit(EXIT_FAILURE);
+	}
+
+	while (1) {
+		char *line = NULL;
+		char *function;
+		char *location;
+		char *separator;
+		char *colon;
+		char *sanitized;
+		size_t size = 0;
+		ssize_t len;
+
+		len = getline(&line, &size, fp);
+		if (len < 0) {
+			free(line);
+			break;
+		}
+		if (!strncmp(line, "0x", 2)) {
+			char *end;
+			uint64_t addr = strtoull(line, &end, 16);
+
+			current_hits = sym_coverage_at(ss, addr);
+			if (strncmp(end, ": ", 2)) {
+				free(line);
+				continue;
+			}
+			function = end + 2;
+		} else if (!strncmp(line, " (inlined by) ", 14)) {
+			function = line + 14;
+		} else {
+			free(line);
+			continue;
+		}
+
+		separator = strstr(function, " at ");
+		if (!separator) {
+			free(line);
+			continue;
+		}
+		*separator = '\0';
+		location = separator + 4;
+		colon = strrchr(location, ':');
+		if (!colon) {
+			free(line);
+			continue;
+		}
+		*colon = '\0';
+		sanitized = filename_sanitize(location);
+		sym_update_source_hits(ss, function, sanitized, current_hits);
+		free(sanitized);
+		free(line);
+	}
+
+	fclose(fp);
+	fprintf(stderr, "done.\n");
+}
+
 
 static void process_nm_output(void **store, char *s, size_t len)
 {
@@ -584,4 +750,3 @@ void sym_read_from_elf(void **rootp, char *nm, char *elf)
 	process_nm_output(rootp, output, fsize);
 	close(fd_tmp);
 }
-

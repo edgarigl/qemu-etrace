@@ -28,9 +28,14 @@ enum cov_format {
 	LCOV,
 };
 
+enum function_hit_policy {
+	FUNCTION_HIT_ENTRY = 0,
+	FUNCTION_HIT_SOURCE,
+};
+
 void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 		const char *gcov_strip, const char *gcov_prefix,
-		const char *exclude);
+		const char *exclude, enum function_hit_policy function_policy);
 void coverage_init(void **store, const char *filename, enum cov_format fmt,
                 const char *gcov_strip, const char *gcov_prefix);
 
