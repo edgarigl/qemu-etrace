@@ -2,17 +2,24 @@
 
 ## Symptom
 
-Coverage attribution on x86 can mark the wrong instruction or omit short
-instructions.
+Four-byte coverage buckets can mark the wrong x86 instruction or omit short
+instructions. Rounding a TB start down can mark a preceding source line, while
+rounding its length down can omit instructions at the end.
 
-## Explanation
+## Handling
 
-The current coverage arrays divide symbol offsets into four-byte buckets. This
-matches AArch64 instruction width but not x86, where instruction boundaries and
-lengths vary.
+qemu-etrace stores coverage counters and DWARF locations at byte granularity.
+Every byte in the ETrace half-open execution range `[start,end)` is marked, and
+source lines are looked up at their exact DWARF addresses. No instruction
+disassembly or architecture-specific width is required.
 
-## Expected handling
+The binary ETrace format already records exact start and end addresses, so this
+handling does not require a format version change and applies when reprocessing
+existing traces.
 
-Use instruction boundaries supplied by the QEMU plugin or a disassembler rather
-than advancing through a symbol in fixed four-byte increments. Do not describe
-x86 results as instruction-precise until this is implemented.
+## Regression coverage
+
+`tests/test_variable_length_coverage.py` builds an unaligned x86 function with
+one-, two-, and four-byte instructions. It verifies short TBs, exact boundary
+attribution, the final instruction in an unaligned TB, entry and source function
+policies, and byte-addressed textual ETrace coverage.

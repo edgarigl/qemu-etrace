@@ -9,9 +9,16 @@ before applying this model. See [Runtime address maps](address-maps.md).
 
 ## Line coverage
 
-An instrumented source line is hit when an executed address bucket maps to the
+An instrumented source line is hit when an executed byte address maps to the
 line through DWARF line information. A single address can map to several source
 locations when code is inlined.
+
+Coverage counters and DWARF locations are indexed by byte offset from the
+containing ELF symbol. An execution range marks every byte in its half-open
+`[start,end)` interval. This handles both fixed-width and variable-length
+instruction sets without rounding either boundary. The byte-addressed arrays
+use approximately four times as much memory as four-byte arrays for covered
+symbols.
 
 Line coverage does not imply GCC branch or MC/DC coverage. GCC measures arcs
 selected from its compiler control-flow graph; qemu-etrace does not reconstruct
@@ -20,8 +27,8 @@ those counters.
 ## Function coverage
 
 `--function-hit-policy=entry` is the default. It counts a function when the
-first address bucket of its retained ELF symbol executes. This answers whether
-the out-of-line machine-code function was entered.
+first byte of its retained ELF symbol executes. This answers whether the
+out-of-line machine-code function was entered.
 
 `--function-hit-policy=source` reads inline-instance entry PCs from DWARF and
 uses `addr2line -i` to attribute executed entries to every function in their
@@ -54,9 +61,6 @@ does not prove that the retained out-of-line symbol was entered.
   DWARF data describe final virtual addresses.
 - A synchronous exception can terminate a QEMU translation block before its
   final instruction, while TB-level tracing records the complete range.
-- Coverage storage currently uses four-byte address buckets. This is exact for
-  fixed-width four-byte instruction sets but approximate for variable-length
-  instruction sets such as x86.
 - Several source locations can share one address, particularly around inline
   call sites, macros, and adjacent line-table sequences.
 

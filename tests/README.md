@@ -29,9 +29,9 @@ The staged-install test also runs the installed `etrace-view` launcher against
 its installed Python modules.
 
 The x86 variable-length fixture uses explicit instruction encodings and DWARF
-line records. Byte-precise coverage expectations are strict expected failures
-until the four-byte coverage representation is replaced; an unexpected pass
-therefore requires removing the marker as part of the corresponding fix.
+line records. Its tests verify byte-precise line and function coverage for
+short and unaligned translation blocks, as well as the textual ETrace coverage
+output.
 
 Run only the Python integration tests after building `qemu-etrace` with:
 
