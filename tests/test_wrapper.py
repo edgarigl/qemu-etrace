@@ -21,6 +21,8 @@ def test_wrapper_preserves_tool_and_user_arguments(tmp_path):
             str(wrapper),
             f"TARGET={target}",
             f"BU_INSTALLDIR={install}",
+            "USE_LOCAL_BINUTILS=0",
+            "OBJS=",
         ],
         cwd=ROOT,
         text=True,

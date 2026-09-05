@@ -21,10 +21,23 @@ PKGCONFIG = pkg-config
 PYTHON ?= python3
 PYTEST ?= $(PYTHON) -m pytest
 INSTALL ?= install
+USE_LOCAL_BINUTILS ?= 0
+
+ifneq ($(USE_LOCAL_BINUTILS),0)
+ifneq ($(USE_LOCAL_BINUTILS),1)
+$(error USE_LOCAL_BINUTILS must be 0 or 1)
+endif
+endif
 
 prefix ?= /usr/local
 bindir ?= $(prefix)/bin
 libdir ?= $(prefix)/lib
+
+BU_VER = binutils-2.42
+BU_FILE = $(BU_VER).tar.gz
+BU_URL = https://ftp.gnu.org/gnu/binutils/$(BU_FILE)
+BU_INSTALLDIR = $(CURDIR)/$(BU_VER)-install
+BU_BUILDDIR = $(BU_VER)-build
 
 CFLAGS  += -Wall -O3 -g
 CFLAGS  += $(shell $(PKGCONFIG) --cflags glib-2.0)
@@ -35,16 +48,27 @@ CFLAGS  += $(shell $(PKGCONFIG) --cflags glib-2.0)
 # Manually comment out the following if you're using older binutils.
 CPPFLAGS  += -DBINUTILS_2_29_OR_NEWER
 
-#LDFLAGS += -pg
-#LDFLAGS += -static
+# LDFLAGS += -pg
+# LDFLAGS += -static
+BINUTILS_MODE = system
+ifeq ($(USE_LOCAL_BINUTILS),1)
+BINUTILS_MODE = local
+CPPFLAGS += -I$(BU_INSTALLDIR)/include
+LDFLAGS += -L$(BU_INSTALLDIR)/lib
 LDLIBS += -lbfd
 LDLIBS += -lopcodes
 LDLIBS += -lbfd
 LDLIBS += -lsframe
 LDLIBS += -liberty
+else
+LDLIBS += -lbfd
+LDLIBS += -lopcodes
+LDLIBS += -lsframe
+endif
 LDLIBS += -lz
 LDLIBS += -ldl
 LDLIBS += $(shell $(PKGCONFIG) --libs glib-2.0)
+BINUTILS_MODE_STAMP = .binutils-mode-$(BINUTILS_MODE)
 
 OBJS += qemu-etrace.o
 OBJS += address-map.o
@@ -81,19 +105,45 @@ TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v7
+TEST_BINS += $(TEST_BUILD_DIR)/test-run
 TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
 TEST_FIXTURES += $(TEST_BUILD_DIR)/duplicate-inline-fixture
 TEST_FIXTURES += $(TEST_BUILD_DIR)/inline-function-fixture
 
-all: $(TARGET).sh
+ALL_TARGETS = $(TARGET)
+ifeq ($(USE_LOCAL_BINUTILS),1)
+ALL_TARGETS += $(TARGET).sh
+endif
 
-.PHONY: all binutils check clean distclean install plugin print-plugin-path uninstall
+all: $(ALL_TARGETS)
+
+.PHONY: all binutils check check-local-binutils clean distclean install \
+	plugin print-plugin-path uninstall
 
 -include $(OBJS:.o=.d)
 CFLAGS += -MMD
 
 $(TARGET): $(OBJS)
 	$(LD) $(HEAD) $(OBJS) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(BINUTILS_MODE_STAMP):
+	$(RM) .binutils-mode-system .binutils-mode-local
+	touch $@
+
+$(OBJS): $(BINUTILS_MODE_STAMP)
+
+ifeq ($(USE_LOCAL_BINUTILS),1)
+$(OBJS): | check-local-binutils
+
+check-local-binutils:
+	@test -f $(BU_INSTALLDIR)/lib/libbfd.a || { \
+		echo "Local Binutils is missing; run 'make binutils' first" >&2; \
+		exit 1; \
+	}
+else
+check-local-binutils:
+	@:
+endif
 
 plugin: $(PLUGIN)
 
@@ -150,6 +200,11 @@ $(TEST_BUILD_DIR)/test-plugin-v7: tests/unit/test-plugin.c plugin/etrace-plugin.
 		plugin/etrace-plugin.c -pthread \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
+$(TEST_BUILD_DIR)/test-run: tests/unit/test-run.c run.c run.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-run.c run.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
 $(TEST_BUILD_DIR)/coverage-fixture: tests/fixtures/coverage.c | $(TEST_BUILD_DIR)
 	$(CC) -O0 -g -fno-inline -fno-pie -no-pie $< -o $@
 
@@ -181,6 +236,7 @@ check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-plugin
 	$(TEST_BUILD_DIR)/test-plugin-v1
 	$(TEST_BUILD_DIR)/test-plugin-v7
+	$(TEST_BUILD_DIR)/test-run
 	$(PYTEST) -q
 
 install: $(TARGET) $(PLUGIN)
@@ -191,15 +247,6 @@ install: $(TARGET) $(PLUGIN)
 uninstall:
 	$(RM) $(DESTDIR)$(bindir)/$(notdir $(TARGET))
 	$(RM) $(DESTDIR)$(plugindir)/$(PLUGIN_NAME)
-
-BU_VER=binutils-2.42
-BU_FILE=$(BU_VER).tar.gz
-BU_URL=http://ftp.gnu.org/gnu/binutils/$(BU_FILE)
-BU_INSTALLDIR=$(CURDIR)/$(BU_VER)-install
-BU_BUILDDIR=$(BU_VER)-build
-
-CPPFLAGS += -I $(BU_INSTALLDIR)/include
-LDFLAGS += -L $(BU_INSTALLDIR)/lib
 
 $(BU_FILE):
 	if [ ! -f $(BU_FILE) ]; then	\
@@ -236,7 +283,8 @@ $(TARGET).sh: $(TARGET)
 	chmod +x $@
 
 clean:
-	$(RM) $(OBJS) $(OBJS:.o=.d) $(TARGET) $(TARGET).sh libqemu-etrace.so
+	$(RM) $(OBJS) $(OBJS:.o=.d) $(TARGET) $(TARGET).sh \
+		libqemu-etrace.so .binutils-mode-system .binutils-mode-local
 	$(RM) -r .plugin-build $(TEST_BUILD_DIR) .pytest_cache tests/__pycache__
 
 distclean: clean

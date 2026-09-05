@@ -40,7 +40,6 @@
 
 pid_t run(char *app, char **args, int stdio[3]) {
 	pid_t kid;
-	extern char **environ;
 	int i;
 
 	assert(app);
@@ -56,7 +55,7 @@ pid_t run(char *app, char **args, int stdio[3]) {
 			}
 		}
 
-		execve(app, args, environ);
+		execvp(app, args);
 		perror(app);
 		_exit(1);
 	}

@@ -1,5 +1,6 @@
 qemu-etrace
 qemu-etrace.sh
+.binutils-mode-*
 .gdb_history
 .gdbinit
 *.a
