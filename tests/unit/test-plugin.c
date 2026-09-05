@@ -1020,7 +1020,7 @@ static void test_execution_trace(void)
 }
 
 #if QEMU_PLUGIN_VERSION >= 2
-static void test_unflushed_vcpu_status(void)
+static void test_plugin_exit_flushes_vcpus(void)
 {
 	struct qemu_plugin_insn insn = { .vaddr = 0x1000, .size = 4 };
 	struct qemu_plugin_tb tb = {
@@ -1050,16 +1050,20 @@ static void test_unflushed_vcpu_status(void)
 	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
 	translate_tb(&tb);
 	execute_tb_prefix(&tb, 1, tb.n_insns);
+	execute_tb_prefix(&tb, 3, tb.n_insns);
+	exit_vcpu(1);
 	finish_plugin();
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
 	g_assert_cmpuint(read_trace_headers(&cursor), ==,
 			 ETRACE_INFO_F_FINAL_STATUS);
+	assert_exec64(&cursor, 1, 0x1000, 0x1004);
+	assert_exec64(&cursor, 3, 0x1000, 0x1004);
 	status = read_status(&cursor);
 	g_assert_cmpuint(status.unresolved_tb_exits, ==, 0);
 	g_assert_cmpuint(status.unresolved_discontinuities, ==, 0);
-	g_assert_cmpuint(status.unresolved_vcpu_exits, ==, 1);
+	g_assert_cmpuint(status.unresolved_vcpu_exits, ==, 0);
 	g_assert_cmpuint(status.output_errors, ==, 0);
 	g_assert_cmpuint(status.discontinuity_pc_mismatches, ==, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
@@ -1223,8 +1227,8 @@ int main(int argc, char **argv)
 #if QEMU_PLUGIN_VERSION >= 2
 	g_test_add_func("/plugin/accurate-execution-trace",
 			test_accurate_execution_trace);
-	g_test_add_func("/plugin/unflushed-vcpu-status",
-			test_unflushed_vcpu_status);
+	g_test_add_func("/plugin/exit-flushes-vcpus",
+			test_plugin_exit_flushes_vcpus);
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 	g_test_add_func("/plugin/unreported-system-transition",
 			test_unreported_system_transition);

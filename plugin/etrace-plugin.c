@@ -38,6 +38,7 @@ struct tb_data {
 struct vcpu_exec_state {
 	struct tb_data *pending;
 	uint64_t progress;
+	bool seen;
 };
 #endif
 
@@ -79,7 +80,6 @@ struct producer_status {
 	uint64_t unresolved_vcpu_exits;
 	uint64_t output_errors;
 	uint64_t discontinuity_pc_mismatches;
-	uint64_t pending_vcpus;
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -94,6 +94,8 @@ static struct producer_status producer_status;
 #if QEMU_PLUGIN_VERSION >= 2
 static struct qemu_plugin_scoreboard *exec_state;
 static qemu_plugin_u64 exec_progress;
+static bool have_vcpu;
+static unsigned int max_vcpu_index;
 #endif
 
 static bool write_raw(const void *buf, size_t len)
@@ -254,11 +256,17 @@ static void increment_status_counter(uint64_t *counter)
 	pthread_mutex_unlock(&lock);
 }
 
-static void decrement_pending_vcpus(void)
+static void record_vcpu(struct vcpu_exec_state *state,
+			unsigned int cpu_index)
 {
+	if (state->seen)
+		return;
+	state->seen = true;
+
 	pthread_mutex_lock(&lock);
-	if (producer_status.pending_vcpus)
-		producer_status.pending_vcpus--;
+	if (!have_vcpu || cpu_index > max_vcpu_index)
+		max_vcpu_index = cpu_index;
+	have_vcpu = true;
 	pthread_mutex_unlock(&lock);
 }
 
@@ -279,13 +287,11 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
 	uint64_t progress;
 
 	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
+	record_vcpu(state, cpu_index);
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
 	if (state->pending
 	    && !write_exec_prefix(cpu_index, state->pending, progress))
 		increment_status_counter(&producer_status.unresolved_tb_exits);
-	if (!state->pending)
-		increment_status_counter(&producer_status.pending_vcpus);
-
 	state->pending = current;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
 }
@@ -327,24 +333,13 @@ static void flush_discontinuity_range(unsigned int cpu_index,
 
 	state->pending = NULL;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
-	decrement_pending_vcpus();
 }
 #endif
 
-#if QEMU_PLUGIN_VERSION >= 7
-static void vcpu_exit(unsigned int cpu_index, void *userdata)
-#else
-static void vcpu_exit(qemu_plugin_id_t id, unsigned int cpu_index)
-#endif
+static void flush_vcpu(unsigned int cpu_index)
 {
 	struct vcpu_exec_state *state;
 	uint64_t progress;
-
-#if QEMU_PLUGIN_VERSION >= 7
-	(void) userdata;
-#else
-	(void) id;
-#endif
 
 	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
 	if (!state->pending)
@@ -356,7 +351,21 @@ static void vcpu_exit(qemu_plugin_id_t id, unsigned int cpu_index)
 
 	state->pending = NULL;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
-	decrement_pending_vcpus();
+}
+
+#if QEMU_PLUGIN_VERSION >= 7
+static void vcpu_exit(unsigned int cpu_index, void *userdata)
+#else
+static void vcpu_exit(qemu_plugin_id_t id, unsigned int cpu_index)
+#endif
+{
+#if QEMU_PLUGIN_VERSION >= 7
+	(void) userdata;
+#else
+	(void) id;
+#endif
+
+	flush_vcpu(cpu_index);
 }
 #endif
 
@@ -526,14 +535,28 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 		},
 	};
 	struct tb_data *tb;
+#if QEMU_PLUGIN_VERSION >= 2
+	unsigned int cpu_index;
+#endif
 
 #if QEMU_PLUGIN_VERSION < 7
 	(void) id;
 #endif
 	(void) userdata;
 
+#if QEMU_PLUGIN_VERSION >= 2
+	if (have_vcpu) {
+		for (cpu_index = 0; cpu_index <= max_vcpu_index; cpu_index++) {
+			struct vcpu_exec_state *state;
+
+			state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
+			if (state->seen)
+				flush_vcpu(cpu_index);
+		}
+	}
+#endif
+
 	pthread_mutex_lock(&lock);
-	producer_status.unresolved_vcpu_exits += producer_status.pending_vcpus;
 	status_packet.data.unresolved_tb_exits =
 		producer_status.unresolved_tb_exits;
 	status_packet.data.unresolved_discontinuities =
@@ -655,6 +678,8 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	}
 
 #if QEMU_PLUGIN_VERSION >= 2
+	have_vcpu = false;
+	max_vcpu_index = 0;
 	exec_state = qemu_plugin_scoreboard_new(sizeof(struct vcpu_exec_state));
 	if (!exec_state) {
 		fprintf(stderr,

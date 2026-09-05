@@ -12,6 +12,8 @@ The execution-accuracy foundation is implemented:
 - Exceptions, interrupts, and host calls have explicit discontinuity records.
 - Plugin traces require a final producer-status record, and the converter
   rejects unresolved execution data and incomplete streams.
+- Plugin atexit flushes pending ranges for every observed vCPU independently
+  of QEMU CPU-unrealize ordering.
 - The build probes the selected QEMU header for discontinuity support instead
   of inferring support from the plugin API version.
 - Execution coverage and DWARF attribution operate at byte granularity and

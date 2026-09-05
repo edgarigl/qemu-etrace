@@ -91,7 +91,8 @@ status and any nonzero unresolved-execution or output-error counter.
 Discontinuity-PC mismatches are retained as diagnostics because virtualization
 transitions can legitimately report a source outside the currently pending
 translation block; per-instruction progress remains authoritative for the
-ordinary execution prefix.
+ordinary execution prefix. Plugin shutdown flushes every observed vCPU even
+when QEMU has not invoked its vCPU-exit callback.
 
 ## Known sources of disagreement
 

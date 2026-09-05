@@ -113,7 +113,9 @@ Plugin-produced traces advertise and end with a producer-status record. The
 status reports unresolved TB, discontinuity, and vCPU-exit ranges together
 with output errors. Conversion fails when the required final record is missing
 or contains a correctness error, preventing incomplete coverage from being
-accepted as a successful result.
+accepted as a successful result. Plugin shutdown flushes pending ranges for
+every vCPU observed by the plugin, including CPUs that remain realized when
+QEMU invokes plugin atexit callbacks.
 
 Add `compress=gzip` to compress the trace while QEMU runs. Compression level 1
 is the default and levels from 0 through 9 can be selected with `level=`:
