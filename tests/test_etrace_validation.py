@@ -1,12 +1,97 @@
+import pytest
+
 from tests.trace_builder import (
+    ETRACE_INFO_F_FINAL_STATUS,
     ETRACE_TYPE_DISCONTINUITY,
+    ETRACE_TYPE_STATUS,
     ETRACE_TYPE_TB,
     etrace_discontinuity,
     etrace_info,
     etrace_old_event,
     etrace_packet,
+    etrace_status,
     etrace_tb,
 )
+
+
+def test_etrace_accepts_successful_final_status(run_etrace, tmp_path):
+    trace = tmp_path / "complete.etrace"
+    output = tmp_path / "complete.txt"
+    trace.write_bytes(
+        etrace_info(attributes=ETRACE_INFO_F_FINAL_STATUS)
+        + etrace_status(discontinuity_pc_mismatches=2, extension=b"future")
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", output)
+
+    assert result.returncode == 0
+    assert "complete=1" in output.read_text(encoding="ascii")
+    assert "discontinuity-pc-mismatches=2" in output.read_text(encoding="ascii")
+
+
+def test_etrace_rejects_missing_final_status(run_etrace, tmp_path):
+    trace = tmp_path / "missing-status.etrace"
+    trace.write_bytes(etrace_info(attributes=ETRACE_INFO_F_FINAL_STATUS))
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "missing its final producer status" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("counter", "diagnostic"),
+    [
+        ("unresolved_tb_exits", "unresolved-tb=3"),
+        ("unresolved_discontinuities", "unresolved-discontinuity=3"),
+        ("unresolved_vcpu_exits", "unresolved-vcpu=3"),
+        ("output_errors", "write-errors=3"),
+    ],
+)
+def test_etrace_rejects_producer_failure(
+    run_etrace, tmp_path, counter, diagnostic
+):
+    trace = tmp_path / f"producer-failure-{counter}.etrace"
+    trace.write_bytes(
+        etrace_info(attributes=ETRACE_INFO_F_FINAL_STATUS)
+        + etrace_status(**{counter: 3})
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "producer reported invalid execution data" in result.stderr
+    assert diagnostic in result.stderr
+
+
+def test_etrace_rejects_incomplete_status(run_etrace, tmp_path):
+    trace = tmp_path / "incomplete-status.etrace"
+    trace.write_bytes(etrace_status(flags=0))
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "producer reported invalid execution data" in result.stderr
+
+
+def test_etrace_rejects_record_after_final_status(run_etrace, tmp_path):
+    trace = tmp_path / "record-after-status.etrace"
+    trace.write_bytes(etrace_status() + etrace_info())
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "record after final status" in result.stderr
+
+
+def test_etrace_rejects_short_status(run_etrace, tmp_path):
+    trace = tmp_path / "short-status.etrace"
+    trace.write_bytes(etrace_packet(ETRACE_TYPE_STATUS, bytes(47)))
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "short status payload" in result.stderr
 
 
 def test_etrace_decodes_discontinuity(run_etrace, tmp_path):

@@ -255,6 +255,12 @@ class traceview(object):
 				(self.e.discontinuity_kind_to_name(
 					discontinuity.kind),
 				 discontinuity.from_pc, discontinuity.to_pc))
+		elif r.hdr.type == self.e.TYPE_STATUS:
+			status = r.all.status
+			self.log.append("status complete=%u unresolved=%u/%u/%u" %
+				(bool(status.flags & 1), status.unresolved_tb_exits,
+				 status.unresolved_discontinuities,
+				 status.unresolved_vcpu_exits))
 
 
 		return r

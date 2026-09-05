@@ -50,8 +50,12 @@ struct etracer {
 	struct tracer tr;
 	struct etrace_info_data info;
 	struct etrace_arch arch;
+	struct etrace_status status;
 	struct etrace_pkg *pkg;
 	gzFile input;
+	bool final_status_required;
+	bool final_status_seen;
+	bool producer_failed;
 };
 
 static ssize_t etrace_read(struct etracer *t, void *buf, size_t len)
@@ -215,6 +219,10 @@ static bool etrace_validate_pkg(struct etracer *t)
 			return etrace_invalid_pkg(pkg,
 						  "unknown discontinuity kind");
 		break;
+	case TYPE_STATUS:
+		if (pkg->hdr.len < sizeof(pkg->status))
+			return etrace_invalid_pkg(pkg, "short status payload");
+		break;
 	default:
 		break;
 	}
@@ -233,10 +241,40 @@ static void bad_version(struct etracer *t)
 void etrace_process_info(struct etracer *t)
 {
 	t->info = t->pkg->info;
+	if (t->info.attr & ETRACE_INFO_F_FINAL_STATUS)
+		t->final_status_required = true;
 
 	/* Validate version.  */
 	if (t->info.version.major > ETRACE_MIN_VERSION_MAJOR)
 		bad_version(t);
+}
+
+static void etrace_process_status(struct etracer *t)
+{
+	struct etrace_status *status = &t->pkg->status;
+
+	t->status = *status;
+	t->final_status_seen = true;
+	t->producer_failed = !(status->flags & ETRACE_STATUS_F_COMPLETE)
+		|| status->unresolved_tb_exits
+		|| status->unresolved_discontinuities
+		|| status->unresolved_vcpu_exits
+		|| status->output_errors;
+
+	if (t->tr.fp_out) {
+		fprintf(t->tr.fp_out,
+			"S complete=%u unresolved-tb=%" PRIu64
+			" unresolved-discontinuity=%" PRIu64
+			" unresolved-vcpu=%" PRIu64
+			" write-errors=%" PRIu64
+			" discontinuity-pc-mismatches=%" PRIu64 "\n",
+			!!(status->flags & ETRACE_STATUS_F_COMPLETE),
+			status->unresolved_tb_exits,
+			status->unresolved_discontinuities,
+			status->unresolved_vcpu_exits,
+			status->output_errors,
+			status->discontinuity_pc_mismatches);
+	}
 }
 
 void etrace_process_arch(struct etracer *t)
@@ -599,6 +637,11 @@ void etrace_show(int fd, FILE *fp_out,
 	while (etrace_read_pkg(&t, t.pkg)) {
 		int r;
 
+		if (t.final_status_seen) {
+			etrace_invalid_pkg(t.pkg, "record after final status");
+			free(t.pkg);
+			exit(EXIT_FAILURE);
+		}
 		if (!etrace_validate_pkg(&t)) {
 			free(t.pkg);
 			exit(EXIT_FAILURE);
@@ -636,6 +679,9 @@ void etrace_show(int fd, FILE *fp_out,
 		case TYPE_DISCONTINUITY:
 			etrace_process_discontinuity(&t);
 			break;
+		case TYPE_STATUS:
+			etrace_process_status(&t);
+			break;
 		default:
 			/* Show a warning once. We trust the version handling
 			   to abort when the format is truly incompatible.  */
@@ -670,6 +716,26 @@ void etrace_show(int fd, FILE *fp_out,
 		}
 	}
 	free(t.pkg);
-	gzclose(t.input);
+	if (gzclose(t.input) != Z_OK) {
+		fprintf(stderr, "Unable to finish ETrace input\n");
+		exit(EXIT_FAILURE);
+	}
+	if (t.final_status_required && !t.final_status_seen) {
+		fprintf(stderr, "ETrace is missing its final producer status\n");
+		exit(EXIT_FAILURE);
+	}
+	if (t.producer_failed) {
+		fprintf(stderr,
+			"ETrace producer reported invalid execution data: "
+			"unresolved-tb=%" PRIu64
+			" unresolved-discontinuity=%" PRIu64
+			" unresolved-vcpu=%" PRIu64
+			" write-errors=%" PRIu64 "\n",
+			t.status.unresolved_tb_exits,
+			t.status.unresolved_discontinuities,
+			t.status.unresolved_vcpu_exits,
+			t.status.output_errors);
+		exit(EXIT_FAILURE);
+	}
 	fprintf(stderr, "done.\n");
 }

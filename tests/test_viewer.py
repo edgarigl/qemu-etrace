@@ -6,7 +6,12 @@ import subprocess
 
 import etrace
 
-from tests.trace_builder import etrace_arch, etrace_discontinuity, etrace_exec32
+from tests.trace_builder import (
+    etrace_arch,
+    etrace_discontinuity,
+    etrace_exec32,
+    etrace_status,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +82,30 @@ def test_python_decoder_reads_discontinuity_record():
     assert record.all.discontinuity.kind == decoder.DISCONTINUITY_EXCEPTION
     assert record.all.discontinuity.flags == 5
     assert decoder.type_to_name(record.hdr.type) == "discontinuity"
+
+
+def test_python_decoder_reads_status_record():
+    decoder = etrace.etrace(
+        BytesIO(
+            etrace_status(
+                unresolved_tb_exits=1,
+                unresolved_discontinuities=2,
+                unresolved_vcpu_exits=3,
+                output_errors=4,
+                discontinuity_pc_mismatches=5,
+            )
+        )
+    )
+
+    record = decoder.stepf()
+
+    assert record.hdr.type == decoder.TYPE_STATUS
+    assert record.all.status.unresolved_tb_exits == 1
+    assert record.all.status.unresolved_discontinuities == 2
+    assert record.all.status.unresolved_vcpu_exits == 3
+    assert record.all.status.output_errors == 4
+    assert record.all.status.discontinuity_pc_mismatches == 5
+    assert decoder.type_to_name(record.hdr.type) == "status"
 
 
 def test_viewer_advances_after_last_execution_entry():

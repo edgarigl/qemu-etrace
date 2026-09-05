@@ -7,6 +7,8 @@ ETRACE_TYPE_EXEC = 1
 ETRACE_TYPE_TB = 2
 ETRACE_TYPE_OLD_EVENT_U64 = 7
 ETRACE_TYPE_DISCONTINUITY = 9
+ETRACE_TYPE_STATUS = 10
+ETRACE_INFO_F_FINAL_STATUS = 1 << 1
 QEMU_SIMPLE_HEADER_EVENT_ID = (1 << 64) - 1
 QEMU_SIMPLE_DROPPED_EVENT_ID = (1 << 64) - 2
 QEMU_SIMPLE_HEADER_MAGIC = 0xF2B177CB0AA429B4
@@ -49,6 +51,22 @@ def etrace_discontinuity(*, from_pc, to_pc, kind, flags=0, unit_id=0,
         payload + extension,
         unit_id=unit_id,
     )
+
+
+def etrace_status(*, unresolved_tb_exits=0, unresolved_discontinuities=0,
+                  unresolved_vcpu_exits=0, output_errors=0,
+                  discontinuity_pc_mismatches=0, flags=1, extension=b""):
+    payload = struct.pack(
+        "=QQQQQII",
+        unresolved_tb_exits,
+        unresolved_discontinuities,
+        unresolved_vcpu_exits,
+        output_errors,
+        discontinuity_pc_mismatches,
+        flags,
+        0,
+    )
+    return etrace_packet(ETRACE_TYPE_STATUS, payload + extension)
 
 
 def etrace_tb(*, guest_code=b"", host_code=b""):

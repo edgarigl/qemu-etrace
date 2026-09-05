@@ -98,6 +98,18 @@ class etrace_discontinuity(Structure):
 		("flags", c_uint32),
 	]
 
+class etrace_status(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("unresolved_tb_exits", c_uint64),
+		("unresolved_discontinuities", c_uint64),
+		("unresolved_vcpu_exits", c_uint64),
+		("output_errors", c_uint64),
+		("discontinuity_pc_mismatches", c_uint64),
+		("flags", c_uint32),
+		("reserved", c_uint32),
+	]
+
 class etrace_all_subtypes(Union):
 	_pack_ = 1
 	_fields_ = [
@@ -109,6 +121,7 @@ class etrace_all_subtypes(Union):
 		("mem", etrace_mem),
 		("event_u64", etrace_event_u64),
 		("discontinuity", etrace_discontinuity),
+		("status", etrace_status),
 		("texec", etrace_exec)
 	]
 class etrace_pkg(Structure):
@@ -129,6 +142,7 @@ class etrace(object):
 	TYPE_EVENT_U64_OLD = 7
 	TYPE_EVENT_U64 = 8
 	TYPE_DISCONTINUITY = 9
+	TYPE_STATUS = 10
 	TYPE_INFO = 0x4554
 
 	DISCONTINUITY_UNKNOWN = 0
@@ -161,7 +175,7 @@ class etrace(object):
 
 		typenames = ["none", "exec", "tb", "note", "mem",
 				"arch", "barrier", "old_event_u64", "event_u64",
-				"discontinuity"]
+				"discontinuity", "status"]
 		return typenames[type]
 
 	def discontinuity_kind_to_name(self, kind):
@@ -243,6 +257,9 @@ class etrace(object):
 			pkg.all.dev_name = dev_name
 		elif pkg.hdr.type == self.TYPE_DISCONTINUITY:
 			self.f.readinto(pkg.all.discontinuity)
+			self.f.seek(end_pos, 0)
+		elif pkg.hdr.type == self.TYPE_STATUS:
+			self.f.readinto(pkg.all.status)
 			self.f.seek(end_pos, 0)
 		elif pkg.hdr.type == self.TYPE_EXEC:
 			entry_count = (pkg.hdr.len - sizeof(pkg.all.texec))

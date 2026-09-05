@@ -31,6 +31,7 @@ enum {
 	TYPE_OLD_EVENT_U64 = 7,
 	TYPE_EVENT_U64 = 8,
 	TYPE_DISCONTINUITY = 9,
+	TYPE_STATUS = 10,
 	TYPE_INFO = 0x4554,
 } __attribute__ ((packed));
 
@@ -44,6 +45,7 @@ struct etrace_hdr {
 
 enum etrace_info_flags {
 	ETRACE_INFO_F_TB_CHAINING = (1 << 0),
+	ETRACE_INFO_F_FINAL_STATUS = (1 << 1),
 };
 
 struct etrace_info_data {
@@ -144,6 +146,20 @@ struct etrace_discontinuity {
 	uint32_t flags;
 } __attribute__ ((packed));
 
+enum etrace_status_flags {
+	ETRACE_STATUS_F_COMPLETE = (1 << 0),
+};
+
+struct etrace_status {
+	uint64_t unresolved_tb_exits;
+	uint64_t unresolved_discontinuities;
+	uint64_t unresolved_vcpu_exits;
+	uint64_t output_errors;
+	uint64_t discontinuity_pc_mismatches;
+	uint32_t flags;
+	uint32_t reserved;
+} __attribute__ ((packed));
+
 struct etrace_pkg {
 	struct etrace_hdr hdr;
 	union {
@@ -156,6 +172,7 @@ struct etrace_pkg {
 		struct etrace_old_event_u64 old_event_u64;
 		struct etrace_event_u64 event_u64;
 		struct etrace_discontinuity discontinuity;
+		struct etrace_status status;
 		uint8_t u8[0];
 		uint16_t u16[0];
 		uint32_t u32[0];
