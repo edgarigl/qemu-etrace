@@ -30,6 +30,13 @@ static qemu_plugin_udata_cb_t exit_cb;
 static void *trans_data;
 #endif
 static void *exit_data;
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+static qemu_plugin_vcpu_discon_cb_t discon_cb;
+static enum qemu_plugin_discon_type discon_types;
+#if QEMU_PLUGIN_VERSION >= 7
+static void *discon_data;
+#endif
+#endif
 
 extern int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 			       int argc, char **argv);
@@ -47,6 +54,27 @@ void qemu_plugin_register_vcpu_tb_trans_cb(
 {
 	trans_cb = cb;
 }
+#endif
+
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+#if QEMU_PLUGIN_VERSION >= 7
+void qemu_plugin_register_vcpu_discon_cb(
+	qemu_plugin_id_t id, enum qemu_plugin_discon_type type,
+	qemu_plugin_vcpu_discon_cb_t cb, void *userdata)
+{
+	discon_cb = cb;
+	discon_types = type;
+	discon_data = userdata;
+}
+#else
+void qemu_plugin_register_vcpu_discon_cb(
+	qemu_plugin_id_t id, enum qemu_plugin_discon_type type,
+	qemu_plugin_vcpu_discon_cb_t cb)
+{
+	discon_cb = cb;
+	discon_types = type;
+}
+#endif
 #endif
 
 void qemu_plugin_register_vcpu_tb_exec_cb(
@@ -132,6 +160,82 @@ static void finish_plugin(void)
 	exit_cb(1, exit_data);
 #endif
 }
+
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+static void emit_discontinuity(unsigned int cpu_index,
+			       enum qemu_plugin_discon_type type,
+			       uint64_t from_pc, uint64_t to_pc)
+{
+	g_assert_nonnull(discon_cb);
+	g_assert_true((discon_types & type) != 0);
+#if QEMU_PLUGIN_VERSION >= 7
+	discon_cb(cpu_index, type, from_pc, to_pc, discon_data);
+#else
+	discon_cb(1, cpu_index, type, from_pc, to_pc);
+#endif
+}
+
+struct discontinuity_observation {
+	unsigned int calls;
+	unsigned int cpu_index;
+	enum qemu_plugin_discon_type type;
+	uint64_t from_pc;
+	uint64_t to_pc;
+};
+
+static struct discontinuity_observation discontinuity_observation;
+
+#if QEMU_PLUGIN_VERSION >= 7
+static void observe_discontinuity(unsigned int cpu_index,
+				  enum qemu_plugin_discon_type type,
+				  uint64_t from_pc, uint64_t to_pc,
+				  void *userdata)
+#else
+static void observe_discontinuity(qemu_plugin_id_t id,
+				  unsigned int cpu_index,
+				  enum qemu_plugin_discon_type type,
+				  uint64_t from_pc, uint64_t to_pc)
+#endif
+{
+#if QEMU_PLUGIN_VERSION >= 7
+	struct discontinuity_observation *observation = userdata;
+#else
+	struct discontinuity_observation *observation =
+		&discontinuity_observation;
+
+	(void) id;
+#endif
+
+	observation->calls++;
+	observation->cpu_index = cpu_index;
+	observation->type = type;
+	observation->from_pc = from_pc;
+	observation->to_pc = to_pc;
+}
+
+static void test_discontinuity_callback_model(void)
+{
+	memset(&discontinuity_observation, 0,
+	       sizeof(discontinuity_observation));
+#if QEMU_PLUGIN_VERSION >= 7
+	qemu_plugin_register_vcpu_discon_cb(
+		1, QEMU_PLUGIN_DISCON_ALL, observe_discontinuity,
+		&discontinuity_observation);
+#else
+	qemu_plugin_register_vcpu_discon_cb(
+		1, QEMU_PLUGIN_DISCON_ALL, observe_discontinuity);
+#endif
+
+	emit_discontinuity(4, QEMU_PLUGIN_DISCON_EXCEPTION, 0x1004, 0x2000);
+
+	g_assert_cmpuint(discontinuity_observation.calls, ==, 1);
+	g_assert_cmpuint(discontinuity_observation.cpu_index, ==, 4);
+	g_assert_cmpuint(discontinuity_observation.type, ==,
+			 QEMU_PLUGIN_DISCON_EXCEPTION);
+	g_assert_cmpuint(discontinuity_observation.from_pc, ==, 0x1004);
+	g_assert_cmpuint(discontinuity_observation.to_pc, ==, 0x2000);
+}
+#endif
 
 struct callback_observation {
 	unsigned int calls;
@@ -553,6 +657,10 @@ int main(int argc, char **argv)
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/plugin/instruction-callback-model",
 			test_instruction_callback_model);
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+	g_test_add_func("/plugin/discontinuity-callback-model",
+			test_discontinuity_callback_model);
+#endif
 	g_test_add_func("/plugin/instruction-execution-trace",
 			test_instruction_execution_trace);
 	g_test_add_func("/plugin/instruction-gzip-equivalence",
