@@ -66,6 +66,13 @@ struct sym_store {
 	unsigned int nr_flush;
 	unsigned int hits_l[3];
 	unsigned int misses;
+
+	struct source_range {
+		uint64_t start;
+		uint64_t end;
+		struct sym_src_loc *locs;
+	} *line_ranges;
+	size_t nr_line_ranges;
 };
 
 void sym_show(const char *prefix, const struct sym *s)
@@ -242,6 +249,156 @@ static void sym_alloc_linemap(struct sym *sym)
 	sym->linemap = safe_mallocz(sizeof sym->linemap->locs[0] * nr_entries);
 }
 
+static struct sym_src_loc *new_source_loc(const char *filename,
+					  unsigned int linenr,
+					  unsigned int discriminator,
+					  uint32_t flags)
+{
+	struct sym_src_loc *loc = safe_mallocz(sizeof(*loc));
+
+	loc->filename = strdup(filename);
+	loc->linenr = linenr;
+	loc->discriminator = discriminator;
+	loc->flags = flags;
+	return loc;
+}
+
+static void append_source_loc(struct sym_src_loc **head,
+			      struct sym_src_loc *new_loc)
+{
+	struct sym_src_loc **tail = head;
+
+	while (*tail)
+		tail = &(*tail)->next;
+	*tail = new_loc;
+}
+
+static void free_source_locs(struct sym_src_loc *loc)
+{
+	while (loc) {
+		struct sym_src_loc *next = loc->next;
+
+		free((void *)loc->filename);
+		free(loc);
+		loc = next;
+	}
+}
+
+static void add_line_range(struct sym_store *ss, uint64_t start, uint64_t end,
+			   struct sym_src_loc *locs)
+{
+	struct source_range *range;
+
+	if (end <= start) {
+		free_source_locs(locs);
+		return;
+	}
+	ss->line_ranges = safe_realloc(ss->line_ranges,
+		(sizeof(*ss->line_ranges) * (ss->nr_line_ranges + 1)));
+	range = &ss->line_ranges[ss->nr_line_ranges++];
+	range->start = start;
+	range->end = end;
+	range->locs = locs;
+}
+
+static int line_range_compare(const void *a, const void *b)
+{
+	const struct source_range *ra = a;
+	const struct source_range *rb = b;
+
+	if (ra->start < rb->start)
+		return -1;
+	if (ra->start > rb->start)
+		return 1;
+	if (ra->end < rb->end)
+		return -1;
+	if (ra->end > rb->end)
+		return 1;
+	return 0;
+}
+
+static void sym_add_source_loc(struct sym *sym, uint64_t offset,
+			       const struct sym_src_loc *source)
+{
+	struct sym_src_loc *loc;
+
+	if (!sym->src_filename)
+		sym->src_filename = strdup(source->filename);
+	if (!sym->linemap)
+		sym_alloc_linemap(sym);
+	if (source->linenr >= sym->maxline)
+		sym->maxline = source->linenr;
+
+	loc = &sym->linemap->locs[offset];
+	if (loc->filename) {
+		while (loc->next)
+			loc = loc->next;
+		loc->next = safe_mallocz(sizeof(*loc));
+		loc = loc->next;
+	}
+	loc->filename = source->filename;
+	loc->linenr = source->linenr;
+	loc->discriminator = source->discriminator;
+	loc->flags = source->flags;
+}
+
+static void materialize_line_ranges(struct sym_store *ss)
+{
+	size_t i;
+
+	if (!ss->nr_line_ranges)
+		return;
+	qsort(ss->line_ranges, ss->nr_line_ranges,
+	      sizeof(*ss->line_ranges), line_range_compare);
+	for (i = 0; i < ss->nr_line_ranges; i++) {
+		struct source_range *range = &ss->line_ranges[i];
+		size_t high = ss->nr_stored;
+		size_t low = 0;
+		size_t j;
+
+		while (low < high) {
+			size_t mid = low + (high - low) / 2;
+
+			if (ss->allsyms[mid].addr < range->start)
+				low = mid + 1;
+			else
+				high = mid;
+		}
+		if (low > 0)
+			low--;
+		while (low > 0
+		       && ss->allsyms[low - 1].addr == ss->allsyms[low].addr)
+			low--;
+
+		for (j = low; j < ss->nr_stored; j++) {
+			struct sym *sym = &ss->allsyms[j];
+			uint64_t sym_end;
+			uint64_t end;
+			uint64_t start;
+			uint64_t addr;
+			struct sym_src_loc *source;
+
+			if (sym->addr >= range->end)
+				break;
+			if (!sym->size)
+				continue;
+			sym_end = sym->size > UINT64_MAX - sym->addr
+				? UINT64_MAX : sym->addr + sym->size;
+			if (sym_end <= range->start)
+				continue;
+			start = range->start > sym->addr
+				? range->start : sym->addr;
+			end = range->end < sym_end ? range->end : sym_end;
+			for (addr = start; addr < end; addr++) {
+				for (source = range->locs; source;
+				     source = source->next)
+					sym_add_source_loc(sym, addr - sym->addr,
+							   source);
+			}
+		}
+	}
+}
+
 void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 			uint32_t time)
 {
@@ -310,12 +467,16 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 {
 	char *od_argv[] = { (char *) dwarfdump, "-l", (char *) elf, NULL };
 	char tmpout_template[] = "/tmp/etrace-dd-out-XXXXXX";
-    unsigned int num_lines = 0;
+	struct {
+		uint64_t address;
+		struct sym_src_loc *locs;
+		bool valid;
+	} pending = { 0 };
+	unsigned int num_lines = 0;
 	int stdio[3] = {0, 1, 2};
 	int fdout_tmp;
-	struct sym *symp = NULL;
+	struct sym_store *ss = *store;
 	char *filename = NULL;
-	uint64_t addr = 0;
 	int pipefd[2];
 	FILE *fp;
 	int r;
@@ -361,7 +522,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 		char line[512];
 		struct dwarf_line_row row;
 		char *s;
-		bool inlined = false;
 
 		s = fgets(line, sizeof line, fp);
 		if (s == NULL) {
@@ -369,13 +529,20 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 		}
 		if (!dwarf_line_parse(s, &row))
 			continue;
-		addr = row.address;
 		if (row.filename) {
 			free(filename);
-			filename = row.filename;
+			filename = filename_sanitize(row.filename);
+			free(row.filename);
 			row.filename = NULL;
 		}
 		if (row.end_sequence) {
+			if (pending.valid && row.address >= pending.address)
+				add_line_range(ss, pending.address, row.address,
+					       pending.locs);
+			else
+				free_source_locs(pending.locs);
+			pending.locs = NULL;
+			pending.valid = false;
 			free(filename);
 			filename = NULL;
 			dwarf_line_row_clear(&row);
@@ -386,62 +553,35 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			continue;
 		}
 
-		symp = sym_lookup_by_addr(store, addr);
-		if (symp) {
-			struct sym_src_loc *loc;
-			uint64_t offset;
-
-			/* FIXME add a str store to reuse these.  */
-			if (!symp->src_filename)
-				symp->src_filename = filename_sanitize(filename);
-
-			if (!symp->linemap)
-				sym_alloc_linemap(symp);
-
-			if (row.line >= symp->maxline) {
-				symp->maxline = row.line;
+		if (pending.valid && row.address != pending.address) {
+			if (row.address > pending.address)
+				add_line_range(ss, pending.address, row.address,
+					       pending.locs);
+			else {
+				fprintf(stderr,
+					"Ignoring decreasing DWARF line address "
+					"0x%" PRIx64 " after 0x%" PRIx64 "\n",
+					row.address, pending.address);
+				free_source_locs(pending.locs);
 			}
-
-			offset = addr - symp->addr;
-
-			loc = &symp->linemap->locs[offset];
-			if (loc->filename) {
-				while (loc->next) {
-					loc = loc->next;
-				}
-				loc->next = safe_mallocz(sizeof *loc);
-				loc = loc->next;
-				loc->next = NULL;
-			}
-
-			if (strcmp(filename, symp->src_filename) == 0)
-				loc->filename = symp->src_filename;
-			else
-				loc->filename = filename_sanitize(filename);
-			loc->linenr = row.line;
-			if (inlined)
-				loc->flags |= LOC_F_INLINED;
-            num_lines++;
-#if 0
-			//			if (!strcmp("bdi_has_dirty_io", symp->name))
-			printf("%s:%p addr=%lx %s:%d flags=%x\n",
-					symp->name, loc, addr, loc->filename, loc->linenr, loc->flags);
-
-			if (0)
-			{
-				loc = &symp->linemap->locs[offset];
-				do {
-					printf("%x: symp=%p %p %s:%u\n", offset, symp, loc, loc->filename, loc->linenr); 
-					loc = loc->next;
-				} while (loc);
-			}
-#endif
+			pending.locs = NULL;
+			pending.valid = false;
 		}
+		if (!pending.valid) {
+			pending.address = row.address;
+			pending.valid = true;
+		}
+		append_source_loc(&pending.locs,
+			new_source_loc(filename, row.line, row.discriminator,
+				       0));
+		num_lines++;
 		dwarf_line_row_clear(&row);
 	}
 
+	free_source_locs(pending.locs);
 	free(filename);
 	fclose(fp);
+	materialize_line_ranges(ss);
 	if (!num_lines) {
 		fprintf(stderr, "WARNING: Unable to create linemap\n");
 	}

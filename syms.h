@@ -35,6 +35,7 @@ struct sym_src_loc {
 	struct sym_src_loc *next;
 	const char *filename;
 	unsigned int linenr;
+	unsigned int discriminator;
 	uint32_t flags;
 };
 

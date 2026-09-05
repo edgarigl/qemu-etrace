@@ -253,3 +253,20 @@ def test_line_hits_use_maximum_address_count(run_etrace, tmp_path, assembly_fixt
     assert start <= rows[0] < start + size
     assert start <= rows[1] < start + size
     assert source_b["lines"][70] == 2
+
+
+def test_macro_line_interval_maps_every_sized_function(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    names = ("macro_thunk_one", "macro_thunk_two", "macro_thunk_three")
+    start = symbols[names[0]][0]
+    end = symbols[names[-1]][0] + symbols[names[-1]][1]
+
+    records = run_lcov(run_etrace, tmp_path, assembly_fixture, start, end)
+    source_b = source_record(records, "assembly-boundary-b.S")
+
+    for name in names:
+        assert source_b["functions"][name] == 30
+        assert source_b["function_hits"][name] == 1
+    assert source_b["lines"][30] == 1
