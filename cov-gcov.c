@@ -767,50 +767,70 @@ done:
 	}
 }
 
-static void gcov_process_sym(struct sym *s, FILE *fp)
+static void gcov_process_source_ranges(void **store)
 {
-	uint64_t addr, end = s->addr + s->size;
-	struct gcov_file *f_src, *f;
+	const struct sym_source_range *ranges;
+	size_t nr_ranges;
+	size_t i;
 
-	if (!s->src_filename)
-		return;
+	ranges = sym_get_source_ranges(store, &nr_ranges);
+	for (i = 0; i < nr_ranges; i++) {
+		const struct sym_source_range *range = &ranges[i];
+		const struct sym_src_loc *loc;
+		uint64_t hits = 0;
+		uint64_t addr;
+		bool executable = false;
+
+		for (addr = range->start; addr < range->end; addr++) {
+			uint64_t count;
+
+			if (!sym_address_is_executable(store, addr))
+				continue;
+			executable = true;
+			count = sym_image_coverage_at(store, addr);
+			if (count > hits)
+				hits = count;
+		}
+		if (!executable)
+			continue;
+
+		for (loc = range->locs; loc; loc = loc->next) {
+			struct gcov_file *f;
+
+			if (!loc->filename || !loc->linenr)
+				continue;
+			f = gcov_find_file_no_fail(loc->filename,
+						   loc->linenr + 1);
+			f->instr_lines[loc->linenr - 1] = true;
+			if (hits > f->lines[loc->linenr - 1])
+				f->lines[loc->linenr - 1] = hits;
+		}
+	}
+}
+
+static void gcov_process_sym(struct sym *s)
+{
+	uint64_t addr;
+	uint64_t end = s->addr + s->size;
+
 	if (!s->linemap)
 		return;
 
-	f_src = gcov_find_file_no_fail(s->src_filename, s->maxline + 1);
-
 	for (addr = s->addr; addr < end; addr++) {
-		uint64_t v = 0;
 		struct sym_src_loc *loc;
 		uint64_t off = addr - s->addr;
-
-		if (s->cov_ent)
-			v = s->cov_ent->counter[off];
 
 		loc = &s->linemap->locs[off];
 		if (!loc->filename)
 			continue;
 
 		do {
-			unsigned int l = loc->linenr;
-			if (loc->filename == s->src_filename)
-				f = f_src;
-			else
-				f = gcov_find_file_no_fail(
-						loc->filename,
-						s->maxline + 1);
+			struct gcov_file *f;
 
-			assert(l < f->nr_lines);
-			/* Debug info line numbers are indexed from 1.
-			Some unknown entries come with ??:0  */
-			if (l > 0) {
-				if (v > f->lines[l - 1])
-					f->lines[l - 1] = v;
-				f->instr_lines[l - 1] = true;
-			}
-
-			loc = loc->next;
+			f = gcov_find_file_no_fail(loc->filename,
+						   loc->linenr + 1);
 			gcov_file_add_sym(f, s);
+			loc = loc->next;
 		} while (loc);
 	}
 }
@@ -1010,18 +1030,19 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 	struct gcov_file *f;
 	int i;
 
-	for (i = 0; i < nr_syms; i++) {
-		gcov_process_sym(&s[i], fp);
-	}
+	if (fmt == QCOV || fmt == LCOV) {
+		gcov_process_source_ranges(store);
+		for (i = 0; i < nr_syms; i++)
+			gcov_process_sym(&s[i]);
 
-	f = gcov_files;
-	while (f) {
-		/* OK, now go through all the files.  */
-		if (fmt == QCOV)
-			gcov_emit_qcov_file(f, gcov_strip, gcov_prefix);
-		if (fmt == LCOV)
-			lcov_emit_info(f, fp, exclude, function_policy);
-		f = f->next;
+		f = gcov_files;
+		while (f) {
+			if (fmt == QCOV)
+				gcov_emit_qcov_file(f, gcov_strip, gcov_prefix);
+			else
+				lcov_emit_info(f, fp, exclude, function_policy);
+			f = f->next;
+		}
 	}
 
 	if (fmt == GCOV)

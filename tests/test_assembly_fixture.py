@@ -270,3 +270,19 @@ def test_macro_line_interval_maps_every_sized_function(
         assert source_b["functions"][name] == 30
         assert source_b["function_hits"][name] == 1
     assert source_b["lines"][30] == 1
+
+
+def test_zero_sized_label_does_not_hide_line_coverage(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    start = symbols["zero_sized_entry"][0]
+    end = symbols["after_zero_sized"][0]
+
+    records = run_lcov(run_etrace, tmp_path, assembly_fixture, start, end)
+    source_b = source_record(records, "assembly-boundary-b.S")
+
+    assert source_b["lines"][40] > 0
+    assert source_b["lines"][50] == 0
+    assert 60 not in source_b["lines"]
+    assert "zero_sized_entry" not in source_b["functions"]
