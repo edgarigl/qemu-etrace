@@ -34,6 +34,7 @@
 #include <zlib.h>
 
 #include "util.h"
+#include "address-map.h"
 #include "safeio.h"
 #include "syms.h"
 #include "disas.h"
@@ -345,9 +346,11 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 	len /= ent_size;
 
 	for (i = 0; i < len; i++) {
-		struct sym *sym = NULL;
 		uint64_t start, end;
 		uint32_t duration;
+		uint64_t cursor;
+		uint64_t accounted = 0;
+		uint64_t total_len;
 
 		switch (t->arch.guest.arch_bits) {
 		case 32:
@@ -365,13 +368,44 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 			break;
 		}
 
-		if (t && t->tr.sym_tree && *t->tr.sym_tree)
-			sym = sym_lookup_by_addr(t->tr.sym_tree, start);
+		cursor = start;
+		total_len = end >= start ? end - start : 0;
+		while (cursor < end) {
+			struct address_map_segment segment;
+			struct sym *sym = NULL;
+			uint32_t segment_duration;
+			uint64_t segment_len;
 
-		if (t->tr.fp_out) {
+			if (!address_map_next_segment(t->tr.address_map, &cursor, end,
+						      &segment))
+				break;
+			segment_len = segment.runtime_end - segment.runtime_start;
+			if (segment.runtime_end == end) {
+				segment_duration = duration - accounted;
+			} else {
+				segment_duration = total_len
+					? (uint32_t)(((__uint128_t)duration * segment_len)
+						     / total_len) : 0;
+				accounted += segment_duration;
+			}
+
+			if (t->tr.sym_tree && *t->tr.sym_tree)
+				sym = sym_lookup_by_addr(t->tr.sym_tree,
+							 segment.linked_start);
+
+			if (t->tr.fp_out && segment.mapped
+			    && segment.runtime_start != segment.linked_start) {
+				fprintf(t->tr.fp_out,
+					"E%" PRIx16 " runtime=%" PRIx64 "-%" PRIx64
+					" linked=%" PRIx64 "-%" PRIx64 "%s%s\n",
+					(unsigned int)t->pkg->hdr.unit_id,
+					segment.runtime_start, segment.runtime_end,
+					segment.linked_start, segment.linked_end,
+					sym ? " " : "", sym ? sym->name : "");
+			} else if (t->tr.fp_out) {
 #if 0
 			printf("Trace %"PRIx64  " %" PRIx64 " - %" PRIx64 " ",
-				now, start, end);
+				now, segment.linked_start, segment.linked_end);
 #else
 			char out[80] = "E";
 			unsigned int pos = 1;
@@ -384,9 +418,9 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 			pos += u64todec(out + pos, now);
 			out[pos++] = ' ';
 #endif
-			pos += u64tohex(out + pos, start);
+			pos += u64tohex(out + pos, segment.linked_start);
 			out[pos++] = ' ';
-			pos += u64tohex(out + pos, end);
+			pos += u64tohex(out + pos, segment.linked_end);
 			if (sym) {
 				unsigned int namelen = sym->namelen;
 				out[pos++] = ' ';
@@ -399,9 +433,10 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 			out[pos++] = '\n';
 			fwrite(&out, 1, pos, t->tr.fp_out);
 #endif
-		}
+			}
 
-		if (cov_fmt != NONE) {
+			if (cov_fmt == NONE)
+				continue;
                         if (t->info.attr & ETRACE_INFO_F_TB_CHAINING) {
 				fprintf(stderr,
 					"Cannot do coverage on a trace with "
@@ -413,15 +448,15 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 				sym = sym_get_unknown(t->tr.sym_tree);
 
 			if (sym) {
-				uint64_t addr = start;
-				while (sym && addr < end) {
-					uint64_t tend = end;
+				uint64_t addr = segment.linked_start;
+				while (sym && addr < segment.linked_end) {
+					uint64_t tend = segment.linked_end;
 
 					if (tend > (sym->addr + sym->size)) {
 						tend = sym->addr + sym->size;
 						printf("WARNING: fixup sym %s has spans over to another symbol\n", sym->name);
 					}
-					sym_update_cov(sym, addr, tend, duration);
+					sym_update_cov(sym, addr, tend, segment_duration);
 					addr = tend;
 					sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
 				}
@@ -482,7 +517,8 @@ void etrace_show(int fd, FILE *fp_out,
 		 const char *guest_objdump, const char *guest_machine,
 		 void **sym_tree, enum cov_format cov_fmt,
 		 enum trace_format trace_in_fmt,
-		 enum trace_format trace_out_fmt)
+		 enum trace_format trace_out_fmt,
+		 const struct address_map *address_map)
 {
 	struct etracer t = { 0 };
 	bool unknown_pkg_warn = false;
@@ -494,6 +530,7 @@ void etrace_show(int fd, FILE *fp_out,
 	t.tr.fp_out = fp_out;
 	t.tr.out_fmt = trace_out_fmt;
 	t.tr.sym_tree = sym_tree;
+	t.tr.address_map = address_map;
 	t.tr.host.objdump = objdump;
 	t.tr.host.machine = machine;
 	t.tr.guest.objdump = guest_objdump;

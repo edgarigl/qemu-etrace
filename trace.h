@@ -23,6 +23,7 @@
 #include <stdint.h>
 
 struct sym;
+struct address_map;
 
 enum trace_format {
 	TRACE_NONE = 0,
@@ -44,6 +45,7 @@ struct tracer {
 	FILE *fp_out;
 	enum trace_format out_fmt;
 	void **sym_tree;
+	const struct address_map *address_map;
 
 	struct {
 		const char *objdump;

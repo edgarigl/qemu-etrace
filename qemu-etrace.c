@@ -35,6 +35,7 @@
 #include <fcntl.h>
 
 #include "config.h"
+#include "address-map.h"
 #include "trace-open.h"
 #include "coverage.h"
 #include "syms.h"
@@ -94,6 +95,7 @@ struct
 	enum trace_format trace_out_format;
 	enum cov_format coverage_format;
 	enum function_hit_policy function_hit_policy;
+	struct address_map address_map;
 	bool server;
 	char *coverage_output;
 	char *gcov_strip;
@@ -141,6 +143,7 @@ static const char etrace_usagestr[] = \
 "--coverage-format      Kind of coverage.\n"
 "--coverage-output      Coverage filename (if applicable).\n"
 "--function-hit-policy Function hits: entry or source.\n"
+"--address-map          Map runtime addresses to linked ELF addresses.\n"
 "\n";
 
 void usage(void)
@@ -228,13 +231,14 @@ static void parse_arguments(int argc, char **argv)
 			{"coverage-format", required_argument, 0, 'f' },
 			{"coverage-output", required_argument, 0, 'c' },
 			{"function-hit-policy", required_argument, 0, 'F' },
+			{"address-map", required_argument, 0, 'A' },
 			{"gcov-strip", required_argument, 0, 'z' },
 			{"gcov-prefix", required_argument, 0, 'p' },
 			{0,         0,                 0,  0 }
 		};
 		int option_index = 0;
 
-		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:w:F:",
+		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:w:F:A:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -295,6 +299,18 @@ static void parse_arguments(int argc, char **argv)
 		case 'F':
 			args.function_hit_policy = map_function_hit_policy(optarg);
 			break;
+		case 'A':
+		{
+			char error[128];
+
+			if (!address_map_add_spec(&args.address_map, optarg,
+						  error, sizeof(error))) {
+				fprintf(stderr, "Invalid address map '%s': %s\n",
+					optarg, error);
+				exit(EXIT_FAILURE);
+			}
+			break;
+		}
 		case 'y':
 			args.trace_in_format = map_traceformat(optarg);
 			break;
@@ -362,6 +378,10 @@ void validate_arguments(void)
 			"--coverage-format lcov\n");
 		exit(EXIT_FAILURE);
 	}
+	if (args.address_map.count && !args.elf) {
+		fprintf(stderr, "Address maps require --elf\n");
+		exit(EXIT_FAILURE);
+	}
 }
 
 sig_atomic_t got_sigint = false;
@@ -380,7 +400,8 @@ void trace_show(int fd, FILE *fp_out,
                  const char *guest_objdump, const char *guest_machine,
                  void **sym_tree, enum cov_format cov_fmt,
                  enum trace_format trace_in_fmt,
-                 enum trace_format trace_out_fmt)
+		 enum trace_format trace_out_fmt,
+		 const struct address_map *address_map)
 {
 	switch (trace_in_fmt) {
 	case TRACE_ETRACE:
@@ -388,7 +409,7 @@ void trace_show(int fd, FILE *fp_out,
 			    objdump, machine,
 			    guest_objdump, guest_machine,
 			    sym_tree, cov_fmt,
-			    trace_in_fmt, trace_out_fmt);
+			    trace_in_fmt, trace_out_fmt, address_map);
 		break;
 	case TRACE_ASCII_HEX:
 	case TRACE_ASCII_HEX_LE16:
@@ -401,14 +422,14 @@ void trace_show(int fd, FILE *fp_out,
 			    objdump, machine,
 			    guest_objdump, guest_machine,
 			    sym_tree, cov_fmt,
-			    trace_in_fmt, trace_out_fmt);
+			    trace_in_fmt, trace_out_fmt, address_map);
 		break;
 	case TRACE_QEMU_SIMPLE:
 		qemu_simple_trace_show(fd, fp_out,
 			    objdump, machine,
 			    guest_objdump, guest_machine,
 			    sym_tree, cov_fmt,
-			    trace_in_fmt, trace_out_fmt);
+			    trace_in_fmt, trace_out_fmt, address_map);
 		break;
 	default:
 		fprintf(stderr, "Unsupported trace format\n");
@@ -475,7 +496,8 @@ int main(int argc, char **argv)
 			   args.guest_objdump, args.guest_machine,
 			   &sym_tree, args.coverage_format,
 			   args.trace_in_format,
-			   args.trace_out_format);
+			   args.trace_out_format,
+			   &args.address_map);
 		close(fd);
 	} while (is_socket && !got_sigint && args.server);
 
@@ -490,6 +512,7 @@ int main(int argc, char **argv)
 				args.coverage_format,
 				args.gcov_strip, args.gcov_prefix,
 				args.exclude, args.function_hit_policy);
+	address_map_destroy(&args.address_map);
 
 	return EXIT_SUCCESS;
 }

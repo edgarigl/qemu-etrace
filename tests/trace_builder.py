@@ -57,6 +57,11 @@ def etrace_exec32(*, start_time=0, duration=0, start, end):
     return etrace_packet(ETRACE_TYPE_EXEC, payload)
 
 
+def etrace_exec64(*, start_time=0, duration=0, start, end):
+    payload = struct.pack("=QIQQ", start_time, duration, start, end)
+    return etrace_packet(ETRACE_TYPE_EXEC, payload)
+
+
 def etrace_arch(*, guest_bits=32, guest_big_endian=0,
                 host_bits=64, host_big_endian=0):
     payload = struct.pack(

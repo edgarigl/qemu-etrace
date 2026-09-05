@@ -26,6 +26,7 @@
 #include <sys/ioctl.h>
 
 #include "util.h"
+#include "address-map.h"
 #include "trace-qemu-simple.h"
 #include "syms.h"
 #include "safeio.h"
@@ -170,7 +171,7 @@ static bool handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r,
 				 size_t nr_args)
 {
 	uint64_t pc_start, pc_end, duration;
-	struct sym *sym = NULL;
+	uint64_t cursor;
 
 	if (nr_args < 3) {
 		PRINT_ERR("tb_enter_exec requires 3 arguments, got %zu\n",
@@ -186,27 +187,36 @@ static bool handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r,
 			" pc_start: %08"PRIx64", pc_end: %08"PRIx64"\n",
 			r->timestamp_ns, pc_start, pc_end);
 
-	if (t && t->tr.sym_tree && *t->tr.sym_tree) {
-		sym = sym_lookup_by_addr(t->tr.sym_tree, pc_start);
-	} else {
-		sym = sym_get_unknown(t->tr.sym_tree);
-	}
+	cursor = pc_start;
+	while (cursor < pc_end) {
+		struct address_map_segment segment;
+		struct sym *sym = NULL;
 
-	if (t->cov_fmt != NONE) {
-		if (sym) {
-			uint64_t addr = pc_start;
-			while (sym && addr < pc_end) {
-				uint64_t tend = pc_end;
+		if (!address_map_next_segment(t->tr.address_map, &cursor, pc_end,
+						      &segment))
+			break;
+		if (t->tr.sym_tree && *t->tr.sym_tree)
+			sym = sym_lookup_by_addr(t->tr.sym_tree,
+						 segment.linked_start);
+		else
+			sym = sym_get_unknown(t->tr.sym_tree);
 
-				if (tend > (sym->addr + sym->size)) {
-					tend = sym->addr + sym->size;
-					PRINT_ERR("WARNING: fixup sym %s has spans "
-					"over to another symbol\n", sym->name);
+		if (t->cov_fmt != NONE) {
+			if (sym) {
+				uint64_t addr = segment.linked_start;
+				while (sym && addr < segment.linked_end) {
+					uint64_t tend = segment.linked_end;
+
+					if (tend > (sym->addr + sym->size)) {
+						tend = sym->addr + sym->size;
+						PRINT_ERR("WARNING: fixup sym %s has spans "
+						"over to another symbol\n", sym->name);
+					}
+
+					sym_update_cov(sym, addr, tend, duration);
+					addr = tend;
+					sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
 				}
-
-				sym_update_cov(sym, addr, tend, duration);
-				addr = tend;
-				sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
 			}
 		}
 	}
@@ -404,7 +414,8 @@ void qemu_simple_trace_show(int fd, FILE *fp_out,
 							const char *guest_objdump, const char *guest_machine,
 							void **sym_tree, enum cov_format cov_fmt,
 							enum trace_format trace_in_fmt,
-							enum trace_format trace_out_fmt)
+							enum trace_format trace_out_fmt,
+							const struct address_map *address_map)
 {
 	qemu_simple_tracer t;
 	enum read_record_sta sta;
@@ -412,6 +423,7 @@ void qemu_simple_trace_show(int fd, FILE *fp_out,
 	t.tr.fd = fd;
 	t.tr.fp_out = fp_out;
 	t.tr.sym_tree = sym_tree;
+	t.tr.address_map = address_map;
 	t.tr.host.objdump = objdump;
 	t.tr.host.machine = machine;
 	t.tr.guest.objdump = guest_objdump;

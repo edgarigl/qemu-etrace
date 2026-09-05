@@ -31,6 +31,7 @@ void qemu_simple_trace_show(int fd, FILE *fp_out,
 							const char *guest_objdump, const char *guest_machine,
 							void **sym_tree, enum cov_format cov_fmt,
 							enum trace_format trace_in_fmt,
-							enum trace_format trace_out_fmt);
+							enum trace_format trace_out_fmt,
+							const struct address_map *address_map);
 
 #endif

@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include "util.h"
+#include "address-map.h"
 #include "safeio.h"
 #include "syms.h"
 #include "disas.h"
@@ -77,37 +78,67 @@ static void ht_process_exec(struct hextracer *t,
 			    uint64_t end,
 			    enum cov_format cov_fmt)
 {
-	struct sym *sym = NULL;
-	int64_t now = 0;
+	uint64_t cursor = start;
 	uint32_t duration = 1;
+	uint32_t accounted = 0;
+	uint64_t total_len = end >= start ? end - start : 0;
 
-	if (t && t->tr.sym_tree && *t->tr.sym_tree)
-		sym = sym_lookup_by_addr(t->tr.sym_tree, start);
+	while (cursor < end) {
+		struct address_map_segment segment;
+		struct sym *sym = NULL;
+		uint32_t segment_duration;
+		uint64_t segment_len;
 
-	if (t->tr.fp_out) {
-		fprintf(t->tr.fp_out,
-			"Trace %"PRIx64  " %" PRIx64 " - %" PRIx64 " %s\n",
-			now, start, end, sym ? sym->name : "");
-	}
-	if (cov_fmt != NONE) {
+		if (!address_map_next_segment(t->tr.address_map, &cursor, end,
+						      &segment))
+			break;
+		segment_len = segment.runtime_end - segment.runtime_start;
+		if (segment.runtime_end == end) {
+			segment_duration = duration - accounted;
+		} else {
+			segment_duration = total_len
+				? (uint32_t)(((__uint128_t)duration * segment_len)
+					     / total_len) : 0;
+			accounted += segment_duration;
+		}
+
+		if (t->tr.sym_tree && *t->tr.sym_tree)
+			sym = sym_lookup_by_addr(t->tr.sym_tree,
+						 segment.linked_start);
+
+		if (t->tr.fp_out && segment.mapped
+		    && segment.runtime_start != segment.linked_start) {
+			fprintf(t->tr.fp_out,
+				"Trace 0 runtime=%" PRIx64 "-%" PRIx64
+				" linked=%" PRIx64 "-%" PRIx64 " %s\n",
+				segment.runtime_start, segment.runtime_end,
+				segment.linked_start, segment.linked_end,
+				sym ? sym->name : "");
+		} else if (t->tr.fp_out) {
+			fprintf(t->tr.fp_out,
+				"Trace 0 %" PRIx64 " - %" PRIx64 " %s\n",
+				segment.linked_start, segment.linked_end,
+				sym ? sym->name : "");
+		}
+		if (cov_fmt == NONE)
+			continue;
 		if (!sym)
 			sym = sym_get_unknown(t->tr.sym_tree);
 
 		if (sym) {
-			uint64_t addr = start;
-			while (sym && addr < end) {
-				uint64_t tend = end;
+			uint64_t addr = segment.linked_start;
+			while (sym && addr < segment.linked_end) {
+				uint64_t tend = segment.linked_end;
 
 				if (tend > (sym->addr + sym->size)) {
 					tend = sym->addr + sym->size;
 					printf("WARNING: fixup sym %s has spans over to another symbol\n", sym->name);
 				}
-				sym_update_cov(sym, addr, tend, duration);
+				sym_update_cov(sym, addr, tend, segment_duration);
 				addr = tend;
 				sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
 			}
 		}
-		now += duration;
 	}
 }
 
@@ -116,7 +147,8 @@ void hextrace_show(int fd, FILE *fp_out,
 		 const char *guest_objdump, const char *guest_machine,
 		 void **sym_tree, enum cov_format cov_fmt,
 		 enum trace_format trace_in_fmt,
-		 enum trace_format trace_out_fmt)
+		 enum trace_format trace_out_fmt,
+		 const struct address_map *address_map)
 {
 	struct hextracer t;
 	FILE *fp_in;
@@ -135,6 +167,7 @@ void hextrace_show(int fd, FILE *fp_out,
 	t.tr.fd = fd;
 	t.tr.fp_out = fp_out;
 	t.tr.sym_tree = sym_tree;
+	t.tr.address_map = address_map;
 	t.tr.host.objdump = objdump;
 	t.tr.host.machine = machine;
 	t.tr.guest.objdump = guest_objdump;

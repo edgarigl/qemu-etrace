@@ -179,3 +179,23 @@ def test_source_policy_deduplicates_retained_inline_symbols(
     records = function_records(output, "shared_inline_helper")
     assert len(records) == 1
     assert records[0] == "FNDA:1,shared_inline_helper"
+
+
+@pytest.mark.parametrize("policy", ["entry", "source"])
+def test_address_map_applies_to_function_policy(run_etrace, tmp_path, policy):
+    if shutil.which("dwarfdump") is None or shutil.which("addr2line") is None:
+        pytest.skip("dwarfdump and addr2line are required")
+
+    linked = inline_body_addresses()[0]
+    runtime = 0x40000000
+    expected = run_coverage(run_etrace, tmp_path, policy, linked)
+    actual = run_coverage(
+        run_etrace,
+        tmp_path,
+        policy,
+        runtime,
+        "--address-map",
+        f"{runtime:x}:{linked:x}:4",
+    )
+
+    assert actual == expected
