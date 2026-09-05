@@ -98,6 +98,7 @@ struct
 	struct address_map address_map;
 	bool server;
 	char *coverage_output;
+	char *coverage_inventory;
 	char *gcov_strip;
 	char *gcov_prefix;
 } args = {
@@ -117,6 +118,7 @@ struct
 	.coverage_format = NONE,
 	.function_hit_policy = FUNCTION_HIT_ENTRY,
 	.coverage_output = NULL,
+	.coverage_inventory = NULL,
 	.gcov_strip = NULL,
 	.gcov_prefix = NULL,
 	.server = true,
@@ -142,6 +144,7 @@ static const char etrace_usagestr[] = \
 "--gcov-prefix          Prefix with the specified prefix.\n"
 "--coverage-format      Kind of coverage.\n"
 "--coverage-output      Coverage filename (if applicable).\n"
+"--coverage-inventory   Write a JSON Lines function inventory.\n"
 "--function-hit-policy Function hits: entry or source.\n"
 "--address-map          Map runtime addresses to linked ELF addresses.\n"
 "\n";
@@ -230,6 +233,7 @@ static void parse_arguments(int argc, char **argv)
 			{"guest-machine", required_argument, 0, 'g' },
 			{"coverage-format", required_argument, 0, 'f' },
 			{"coverage-output", required_argument, 0, 'c' },
+			{"coverage-inventory", required_argument, 0, 'I' },
 			{"function-hit-policy", required_argument, 0, 'F' },
 			{"address-map", required_argument, 0, 'A' },
 			{"gcov-strip", required_argument, 0, 'z' },
@@ -238,7 +242,7 @@ static void parse_arguments(int argc, char **argv)
 		};
 		int option_index = 0;
 
-		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:w:F:A:",
+		c = getopt_long(argc, argv, "bc:t:e:m:g:n:o:x:s:l:w:F:A:I:",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -250,6 +254,9 @@ static void parse_arguments(int argc, char **argv)
 			break;
 		case 'c':
 			args.coverage_output = optarg;
+			break;
+		case 'I':
+			args.coverage_inventory = optarg;
 			break;
 		case 'f':
 			args.coverage_format = map_covformat(optarg);
@@ -375,6 +382,12 @@ void validate_arguments(void)
 	if (args.function_hit_policy == FUNCTION_HIT_SOURCE
 	    && (!args.elf || args.coverage_format != LCOV)) {
 		fprintf(stderr, "Source function hits require --elf and "
+			"--coverage-format lcov\n");
+		exit(EXIT_FAILURE);
+	}
+	if (args.coverage_inventory
+	    && (!args.elf || args.coverage_format != LCOV)) {
+		fprintf(stderr, "Coverage inventory requires --elf and "
 			"--coverage-format lcov\n");
 		exit(EXIT_FAILURE);
 	}
@@ -511,7 +524,8 @@ int main(int argc, char **argv)
 		coverage_emit(&sym_tree, args.coverage_output,
 				args.coverage_format,
 				args.gcov_strip, args.gcov_prefix,
-				args.exclude, args.function_hit_policy);
+				args.exclude, args.function_hit_policy,
+				args.coverage_inventory);
 	address_map_destroy(&args.address_map);
 
 	return EXIT_SUCCESS;

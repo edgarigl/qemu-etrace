@@ -77,6 +77,7 @@ struct sym_store {
 	struct image_section {
 		uint64_t start;
 		uint64_t end;
+		char *name;
 		struct sym_coverage *cov;
 	} *sections;
 	size_t nr_sections;
@@ -544,11 +545,21 @@ static void infer_function_sizes(struct sym_store *ss)
 
 	for (i = 0; i < ss->nr_stored; i++) {
 		struct sym *sym = &ss->allsyms[i];
+		bool has_alias = false;
 		uint64_t end;
 		size_t j;
 
 		if (sym->size || !(sym->flags & SYM_F_FUNCTION)
 		    || !(sym->flags & SYM_F_EXECUTABLE))
+			continue;
+
+		for (j = 0; j < ss->nr_stored; j++) {
+			if (j != i && ss->allsyms[j].addr == sym->addr) {
+				has_alias = true;
+				break;
+			}
+		}
+		if (has_alias)
 			continue;
 
 		end = sym->section_end;
@@ -596,6 +607,7 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 		image = &ss->sections[ss->nr_sections++];
 		image->start = start;
 		image->end = start + size;
+		image->name = strdup(bfd_section_name(section));
 		image->cov = NULL;
 	}
 	qsort(ss->sections, ss->nr_sections, sizeof(*ss->sections),
@@ -615,6 +627,7 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 		ss->allsyms[i].flags |= SYM_F_EXECUTABLE;
 		ss->allsyms[i].section_start = image->start;
 		ss->allsyms[i].section_end = image->end;
+		ss->allsyms[i].section_name = image->name;
 	}
 	read_bfd_symbol_table(ss, abfd, false);
 	read_bfd_symbol_table(ss, abfd, true);

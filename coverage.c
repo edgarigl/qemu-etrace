@@ -75,8 +75,9 @@ static void coverage_dump(struct sym *s, size_t nr_syms,
 }
 
 void coverage_emit(void **store, const char *filename, enum cov_format fmt,
-		const char *gcov_strip, const char *gcov_prefix,
-		const char *exclude, enum function_hit_policy function_policy)
+			const char *gcov_strip, const char *gcov_prefix,
+			const char *exclude, enum function_hit_policy function_policy,
+			const char *inventory_filename)
 {
 	FILE *fp = NULL;
 	struct sym *s, *unknown;
@@ -114,7 +115,7 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 	default:
 		gcov_emit_gcov(store, s, nr_syms, unknown, fp,
 				gcov_strip, gcov_prefix, fmt,
-				ex, function_policy);
+				ex, function_policy, inventory_filename);
 		break;
 	}
 

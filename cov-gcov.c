@@ -813,7 +813,7 @@ static void gcov_process_sym(struct sym *s)
 	uint64_t addr;
 	uint64_t end = s->addr + s->size;
 
-	if (!s->linemap)
+	if (!(s->flags & SYM_F_FUNCTION) || !s->linemap)
 		return;
 
 	for (addr = s->addr; addr < end; addr++) {
@@ -900,6 +900,8 @@ struct sym_src_loc *gcov_find_decl_line(struct sym *s, const char *filename)
 {
 	uint64_t offset;
 
+	if (!s->linemap)
+		return NULL;
 	for (offset = 0; offset < s->size; offset++) {
 		struct sym_src_loc *loc = &s->linemap->locs[offset];
 		struct sym_src_loc *ret = NULL;
@@ -920,12 +922,12 @@ struct sym_src_loc *gcov_find_decl_line(struct sym *s, const char *filename)
 	return NULL;
 }
 
-static uint64_t lcov_function_hits(const struct sym *sym,
+static uint64_t lcov_function_hits(void **store, const struct sym *sym,
 				   enum function_hit_policy function_policy)
 {
 	if (function_policy == FUNCTION_HIT_SOURCE)
 		return sym->source_hits;
-	return sym->cov_ent ? sym->cov_ent->counter[0] : 0;
+	return sym_image_coverage_at(store, sym->addr);
 }
 
 static bool lcov_same_function(struct gcov_file *f, unsigned int first,
@@ -940,7 +942,7 @@ static bool lcov_same_function(struct gcov_file *f, unsigned int first,
 	return second_loc && second_loc->linenr == first_loc->linenr;
 }
 
-void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude,
+void lcov_emit_info(void **store, struct gcov_file *f, FILE *fp, void *exclude,
 		    enum function_hit_policy function_policy)
 {
 	unsigned int i;
@@ -981,13 +983,13 @@ void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude,
 			if (j != i)
 				continue;
 
-			hits = lcov_function_hits(f->syms[i], function_policy);
+			hits = lcov_function_hits(store, f->syms[i], function_policy);
 			for (j = i + 1; j < f->nr_syms; j++) {
 				uint64_t alias_hits;
 
 				if (!lcov_same_function(f, i, j, loc))
 					continue;
-				alias_hits = lcov_function_hits(f->syms[j],
+				alias_hits = lcov_function_hits(store, f->syms[j],
 							 function_policy);
 				if (alias_hits > hits)
 					hits = alias_hits;
@@ -1021,11 +1023,194 @@ void lcov_emit_info(struct gcov_file *f, FILE *fp, void *exclude,
 	fprintf(fp, "end_of_record\n");
 }
 
+static struct sym_src_loc *gcov_find_any_decl_line(struct sym *sym)
+{
+	uint64_t offset;
+
+	if (!sym->linemap)
+		return NULL;
+	for (offset = 0; offset < sym->size; offset++) {
+		struct sym_src_loc *loc = &sym->linemap->locs[offset];
+		struct sym_src_loc *best = NULL;
+
+		if (!loc->filename)
+			continue;
+		do {
+			if (loc->linenr && !(loc->flags & LOC_F_INLINED)
+			    && (!best || strcmp(loc->filename, best->filename) < 0
+				|| (!strcmp(loc->filename, best->filename)
+				    && loc->linenr < best->linenr)))
+				best = loc;
+			loc = loc->next;
+		} while (loc);
+		if (best)
+			return best;
+	}
+	return NULL;
+}
+
+static bool inventory_is_duplicate(struct sym *syms, size_t index,
+				   const struct sym_src_loc *loc)
+{
+	size_t i;
+
+	for (i = 0; i < index; i++) {
+		struct sym_src_loc *prior;
+
+		if (strcmp(syms[i].name, syms[index].name))
+			continue;
+		prior = gcov_find_decl_line(&syms[i], loc->filename);
+		if (prior && prior->linenr == loc->linenr)
+			return true;
+	}
+	return false;
+}
+
+static void json_write_string(FILE *fp, const char *value)
+{
+	const unsigned char *p = (const unsigned char *)value;
+
+	fputc('"', fp);
+	while (*p) {
+		switch (*p) {
+		case '"':
+		case '\\':
+			fputc('\\', fp);
+			fputc(*p, fp);
+			break;
+		case '\b':
+			fputs("\\b", fp);
+			break;
+		case '\f':
+			fputs("\\f", fp);
+			break;
+		case '\n':
+			fputs("\\n", fp);
+			break;
+		case '\r':
+			fputs("\\r", fp);
+			break;
+		case '\t':
+			fputs("\\t", fp);
+			break;
+		default:
+			if (*p < 0x20)
+				fprintf(fp, "\\u%04x", *p);
+			else
+				fputc(*p, fp);
+			break;
+		}
+		p++;
+	}
+	fputc('"', fp);
+}
+
+static const char *sym_kind_name(const struct sym *sym)
+{
+	return sym->flags & SYM_F_FUNCTION ? "function" : "text";
+}
+
+static const char *sym_binding_name(const struct sym *sym)
+{
+	if (sym->flags & SYM_F_WEAK)
+		return "weak";
+	if (sym->flags & SYM_F_LOCAL)
+		return "local";
+	if (sym->flags & SYM_F_GLOBAL)
+		return "global";
+	return "unknown";
+}
+
+static const char *sym_size_source(const struct sym *sym)
+{
+	if (sym->flags & SYM_F_INFERRED_SIZE)
+		return "inferred";
+	if (sym->flags & SYM_F_EXPLICIT_SIZE)
+		return "explicit";
+	return "none";
+}
+
+static const char *sym_inventory_status(struct sym *syms, size_t index,
+					const struct sym_src_loc *loc)
+{
+	const struct sym *sym = &syms[index];
+
+	if (!(sym->flags & SYM_F_EXECUTABLE))
+		return "omitted-non-executable";
+	if (!sym->size) {
+		if (sym->flags & SYM_F_FUNCTION)
+			return "omitted-unbounded-function";
+		return "omitted-zero-sized-label";
+	}
+	if (!(sym->flags & SYM_F_FUNCTION))
+		return "omitted-non-function";
+	if (!loc)
+		return "omitted-no-source";
+	if (inventory_is_duplicate(syms, index, loc))
+		return "deduplicated-alias";
+	return "emitted";
+}
+
+static void lcov_emit_inventory(void **store, struct sym *syms,
+				size_t nr_syms, const char *filename,
+				enum function_hit_policy function_policy)
+{
+	FILE *fp;
+	size_t i;
+
+	if (!filename)
+		return;
+	fp = fopen(filename, "w");
+	if (!fp) {
+		perror(filename);
+		exit(EXIT_FAILURE);
+	}
+
+	for (i = 0; i < nr_syms; i++) {
+		struct sym_src_loc *loc = gcov_find_any_decl_line(&syms[i]);
+		const char *status = sym_inventory_status(syms, i, loc);
+		uint64_t hits = lcov_function_hits(store, &syms[i],
+						       function_policy);
+
+		fputs("{\"status\":", fp);
+		json_write_string(fp, status);
+		fputs(",\"name\":", fp);
+		json_write_string(fp, syms[i].name);
+		fprintf(fp, ",\"address\":\"0x%" PRIx64
+			"\",\"size\":\"0x%" PRIx64 "\",\"kind\":",
+			syms[i].addr, syms[i].size);
+		json_write_string(fp, sym_kind_name(&syms[i]));
+		fputs(",\"binding\":", fp);
+		json_write_string(fp, sym_binding_name(&syms[i]));
+		fputs(",\"section\":", fp);
+		if (syms[i].section_name)
+			json_write_string(fp, syms[i].section_name);
+		else
+			fputs("null", fp);
+		fputs(",\"size_source\":", fp);
+		json_write_string(fp, sym_size_source(&syms[i]));
+		fputs(",\"source\":", fp);
+		if (loc)
+			json_write_string(fp, loc->filename);
+		else
+			fputs("null", fp);
+		fputs(",\"source_confidence\":", fp);
+		json_write_string(fp, loc ? "dwarf-line" : "none");
+		fprintf(fp, ",\"line\":%u,\"hits\":%" PRIu64 "}\n",
+			loc ? loc->linenr : 0, hits);
+	}
+	if (fclose(fp) != 0) {
+		perror(filename);
+		exit(EXIT_FAILURE);
+	}
+}
+
 void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 		struct sym *unknown, FILE *fp,
 		const char *gcov_strip, const char *gcov_prefix,
 		enum cov_format fmt,
-		void *exclude, enum function_hit_policy function_policy)
+		void *exclude, enum function_hit_policy function_policy,
+		const char *inventory_filename)
 {
 	struct gcov_file *f;
 	int i;
@@ -1040,9 +1225,12 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 			if (fmt == QCOV)
 				gcov_emit_qcov_file(f, gcov_strip, gcov_prefix);
 			else
-				lcov_emit_info(f, fp, exclude, function_policy);
+				lcov_emit_info(store, f, fp, exclude, function_policy);
 			f = f->next;
 		}
+		if (fmt == LCOV)
+			lcov_emit_inventory(store, s, nr_syms, inventory_filename,
+					    function_policy);
 	}
 
 	if (fmt == GCOV)

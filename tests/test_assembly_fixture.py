@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 import shutil
 import subprocess
@@ -114,6 +115,9 @@ def test_assembly_fixture_symbol_shapes(assembly_fixture):
     assert symbols["repeated_line"][1] > 0
     assert symbols["zero_sized_entry"][1] in (None, 0)
     assert symbols["zero_sized_function"][1] in (None, 0)
+    assert symbols["zero_sized_alias_one"][1] in (None, 0)
+    assert symbols["zero_sized_alias_two"][1] in (None, 0)
+    assert symbols["zero_sized_alias_one"][0] == symbols["zero_sized_alias_two"][0]
     assert "discarded_function" not in symbols
 
 
@@ -170,13 +174,15 @@ def source_record(records, suffix):
     return matches[0]
 
 
-def run_lcov(run_etrace, tmp_path, assembly_fixture, start, end):
+def run_lcov(
+    run_etrace, tmp_path, assembly_fixture, start, end, *, inventory=None
+):
     trace = tmp_path / "assembly.etrace"
     output = tmp_path / "assembly.info"
     trace.write_bytes(
         etrace_arch(guest_bits=64) + etrace_exec64(start=start, end=end)
     )
-    result = run_etrace(
+    arguments = [
         "--trace",
         trace,
         "--trace-output",
@@ -189,7 +195,10 @@ def run_lcov(run_etrace, tmp_path, assembly_fixture, start, end):
         "lcov",
         "--coverage-output",
         output,
-    )
+    ]
+    if inventory is not None:
+        arguments.extend(("--coverage-inventory", inventory))
+    result = run_etrace(*arguments)
     assert result.returncode == 0, result.stderr
     return parse_lcov(output)
 
@@ -302,3 +311,44 @@ def test_zero_sized_elf_function_uses_bounded_extent(
     assert source_b["functions"]["zero_sized_function"] == 45
     assert source_b["function_hits"]["zero_sized_function"] == 1
     assert "zero_sized_entry" not in source_b["functions"]
+
+
+def test_function_inventory_explains_assembly_symbols(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    start = symbols["boundary_source"][0]
+    after_start, after_size, _ = symbols["after_zero_sized"]
+    inventory = tmp_path / "inventory.jsonl"
+
+    run_lcov(
+        run_etrace,
+        tmp_path,
+        assembly_fixture,
+        start,
+        after_start + after_size,
+        inventory=inventory,
+    )
+    records = {
+        record["name"]: record
+        for line in inventory.read_text(encoding="utf-8").splitlines()
+        if (record := json.loads(line))
+    }
+
+    assert records["macro_thunk_three"]["status"] == "emitted"
+    assert records["macro_thunk_three"]["kind"] == "function"
+    assert records["macro_thunk_three"]["section"] == ".text"
+    assert records["macro_thunk_three"]["size_source"] == "explicit"
+    assert records["macro_thunk_three"]["source_confidence"] == "dwarf-line"
+    assert records["zero_sized_function"]["status"] == "emitted"
+    assert records["zero_sized_function"]["kind"] == "function"
+    assert records["zero_sized_function"]["size_source"] == "inferred"
+    assert records["zero_sized_function"]["hits"] == 1
+    assert records["zero_sized_entry"]["status"] == "omitted-zero-sized-label"
+    assert records["zero_sized_entry"]["kind"] == "text"
+    assert records["zero_sized_entry"]["size_source"] == "none"
+    assert records["zero_sized_alias_one"]["status"] == "omitted-unbounded-function"
+    assert records["zero_sized_alias_two"]["status"] == "omitted-unbounded-function"
+    assert records["zero_sized_alias_one"]["size_source"] == "none"
+    assert records["zero_sized_alias_two"]["size_source"] == "none"
+    assert "discarded_function" not in records

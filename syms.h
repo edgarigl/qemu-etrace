@@ -66,6 +66,7 @@ struct sym
 	uint64_t size;
 	uint64_t section_start;
 	uint64_t section_end;
+	const char *section_name;
 	uint32_t flags;
 	int hits;
 	uint64_t total_time;

@@ -45,6 +45,16 @@ zero_sized_function:
 	nop
 	ret
 
+	.globl	zero_sized_alias_one
+	.type	zero_sized_alias_one, @function
+	.globl	zero_sized_alias_two
+	.type	zero_sized_alias_two, @function
+zero_sized_alias_one:
+zero_sized_alias_two:
+	.loc	1 47 0
+	nop
+	ret
+
 	.globl	after_zero_sized
 	.type	after_zero_sized, @function
 after_zero_sized:

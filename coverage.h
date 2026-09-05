@@ -34,8 +34,9 @@ enum function_hit_policy {
 };
 
 void coverage_emit(void **store, const char *filename, enum cov_format fmt,
-		const char *gcov_strip, const char *gcov_prefix,
-		const char *exclude, enum function_hit_policy function_policy);
+			const char *gcov_strip, const char *gcov_prefix,
+			const char *exclude, enum function_hit_policy function_policy,
+			const char *inventory_filename);
 void coverage_init(void **store, const char *filename, enum cov_format fmt,
                 const char *gcov_strip, const char *gcov_prefix);
 
