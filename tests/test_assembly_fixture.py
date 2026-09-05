@@ -67,23 +67,30 @@ def assembly_fixture(tmp_path_factory):
     return binary
 
 
-def nm_symbols(binary):
+def nm_symbol_records(binary):
     result = subprocess.run(
         ["nm", "-S", "--defined-only", binary],
         text=True,
         capture_output=True,
         check=True,
     )
-    symbols = {}
+    symbols = []
     for line in result.stdout.splitlines():
         fields = line.split()
         if len(fields) == 4:
             address, size, symbol_type, name = fields
-            symbols[name] = (int(address, 16), int(size, 16), symbol_type)
+            symbols.append((name, int(address, 16), int(size, 16), symbol_type))
         elif len(fields) == 3:
             address, symbol_type, name = fields
-            symbols[name] = (int(address, 16), None, symbol_type)
+            symbols.append((name, int(address, 16), None, symbol_type))
     return symbols
+
+
+def nm_symbols(binary):
+    return {
+        name: (address, size, symbol_type)
+        for name, address, size, symbol_type in nm_symbol_records(binary)
+    }
 
 
 def line_rows(binary):
@@ -157,11 +164,17 @@ def parse_lcov(path):
     current = None
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("SF:"):
-            current = {"functions": {}, "function_hits": {}, "lines": {}}
+            current = {
+                "functions": {},
+                "function_records": [],
+                "function_hits": {},
+                "lines": {},
+            }
             records[line[3:]] = current
         elif line.startswith("FN:"):
             line_number, name = line[3:].split(",", 1)
             current["functions"][name] = int(line_number)
+            current["function_records"].append((int(line_number), name))
         elif line.startswith("FNDA:"):
             count, name = line[5:].split(",", 1)
             current["function_hits"][name] = int(count)
@@ -355,6 +368,45 @@ def test_function_inventory_explains_assembly_symbols(
     assert records["zero_sized_alias_one"]["size_source"] == "none"
     assert records["zero_sized_alias_two"]["size_source"] == "none"
     assert "discarded_function" not in records
+
+
+def test_lcov_folds_duplicate_function_names(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = [
+        (address, size)
+        for name, address, size, _ in nm_symbol_records(assembly_fixture)
+        if name == "duplicate_local"
+    ]
+    assert len(symbols) == 2
+    start = min(address for address, _ in symbols)
+    end = max(address + size for address, size in symbols)
+    inventory = tmp_path / "duplicates.jsonl"
+
+    records = run_lcov(
+        run_etrace,
+        tmp_path,
+        assembly_fixture,
+        start,
+        end,
+        inventory=inventory,
+    )
+    duplicate_source = source_record(records, "duplicate-assembly.S")
+    duplicate_functions = [
+        entry for entry in duplicate_source["function_records"]
+        if entry[1] == "duplicate_local"
+    ]
+    inventory_records = [
+        json.loads(line)
+        for line in inventory.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["name"] == "duplicate_local"
+    ]
+
+    assert duplicate_functions == [(90, "duplicate_local")]
+    assert {record["status"] for record in inventory_records} == {
+        "emitted",
+        "deduplicated-alias",
+    }
 
 
 def test_new_sequence_retains_dwarfdump_file_context(

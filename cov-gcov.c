@@ -931,15 +931,12 @@ static uint64_t lcov_function_hits(void **store, const struct sym *sym,
 }
 
 static bool lcov_same_function(struct gcov_file *f, unsigned int first,
-			       unsigned int second,
-			       const struct sym_src_loc *first_loc)
+			       unsigned int second)
 {
-	struct sym_src_loc *second_loc;
-
 	if (strcmp(f->syms[first]->name, f->syms[second]->name))
 		return false;
-	second_loc = gcov_find_decl_line(f->syms[second], f->filename);
-	return second_loc && second_loc->linenr == first_loc->linenr;
+	return gcov_find_decl_line(f->syms[first], f->filename)
+		&& gcov_find_decl_line(f->syms[second], f->filename);
 }
 
 void lcov_emit_info(void **store, struct gcov_file *f, FILE *fp, void *exclude,
@@ -965,6 +962,7 @@ void lcov_emit_info(void **store, struct gcov_file *f, FILE *fp, void *exclude,
 		for (i = 0; i < f->nr_syms; i++) {
 			struct sym_src_loc *loc;
 			uint64_t hits;
+			unsigned int decl_line;
 			unsigned int j;
 
 			loc = gcov_find_decl_line(f->syms[i], f->filename);
@@ -972,31 +970,30 @@ void lcov_emit_info(void **store, struct gcov_file *f, FILE *fp, void *exclude,
 				continue;
 			}
 			for (j = 0; j < i; j++) {
-				struct sym_src_loc *prior_loc;
-
-				prior_loc = gcov_find_decl_line(f->syms[j],
-							f->filename);
-				if (prior_loc
-				    && lcov_same_function(f, j, i, prior_loc))
+				if (lcov_same_function(f, j, i))
 					break;
 			}
 			if (j != i)
 				continue;
 
+			decl_line = loc->linenr;
 			hits = lcov_function_hits(store, f->syms[i], function_policy);
 			for (j = i + 1; j < f->nr_syms; j++) {
 				uint64_t alias_hits;
+				struct sym_src_loc *alias_loc;
 
-				if (!lcov_same_function(f, i, j, loc))
+				if (!lcov_same_function(f, i, j))
 					continue;
+				alias_loc = gcov_find_decl_line(f->syms[j], f->filename);
+				if (alias_loc->linenr < decl_line)
+					decl_line = alias_loc->linenr;
 				alias_hits = lcov_function_hits(store, f->syms[j],
 							 function_policy);
 				if (alias_hits > hits)
 					hits = alias_hits;
 			}
 
-			fprintf(fp, "FN:%u,%s\n",
-				loc->linenr, f->syms[i]->name);
+			fprintf(fp, "FN:%u,%s\n", decl_line, f->syms[i]->name);
 			fprintf(fp, "FNDA:%" PRIu64 ",%s\n",
 				hits, f->syms[i]->name);
 		}
@@ -1060,7 +1057,7 @@ static bool inventory_is_duplicate(struct sym *syms, size_t index,
 		if (strcmp(syms[i].name, syms[index].name))
 			continue;
 		prior = gcov_find_decl_line(&syms[i], loc->filename);
-		if (prior && prior->linenr == loc->linenr)
+		if (prior)
 			return true;
 	}
 	return false;

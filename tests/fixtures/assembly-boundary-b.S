@@ -32,6 +32,14 @@ repeated_line:
 	ret
 	.size	repeated_line, .-repeated_line
 
+	.file	2 "tests/fixtures/duplicate-assembly.S"
+	.local	duplicate_local
+	.type	duplicate_local, @function
+duplicate_local:
+	.loc	2 91 0
+	ret
+	.size	duplicate_local, .-duplicate_local
+
 	.globl	zero_sized_entry
 zero_sized_entry:
 	.loc	1 40 0
