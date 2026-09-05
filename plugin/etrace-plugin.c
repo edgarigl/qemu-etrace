@@ -27,12 +27,19 @@ struct tb_data {
 	struct tb_data *next;
 	uint64_t start;
 	uint64_t end;
+	size_t n_insns;
+	struct {
+		uint64_t start;
+		uint64_t end;
+	} insns[];
 };
 
-enum exec_mode {
-	EXEC_MODE_TB,
-	EXEC_MODE_INSN,
+#if QEMU_PLUGIN_VERSION >= 2
+struct vcpu_exec_state {
+	struct tb_data *pending;
+	uint64_t progress;
 };
+#endif
 
 struct etrace_info_packet {
 	struct etrace_hdr hdr;
@@ -69,7 +76,11 @@ static bool trace_failed;
 static uint8_t guest_address_bits;
 static int gzip_level = Z_BEST_SPEED;
 static bool gzip_output;
-static enum exec_mode exec_mode;
+#if QEMU_PLUGIN_VERSION >= 2
+static struct qemu_plugin_scoreboard *exec_state;
+static qemu_plugin_u64 exec_progress;
+static bool use_terminal_latch;
+#endif
 
 static bool write_raw(const void *buf, size_t len)
 {
@@ -174,9 +185,9 @@ static bool write_headers(void)
 		&& write_output(&arch_packet, sizeof(arch_packet));
 }
 
-static void vcpu_exec(unsigned int cpu_index, void *userdata)
+static void write_exec_range(unsigned int cpu_index, uint64_t start,
+			     uint64_t end)
 {
-	const struct tb_data *tb = userdata;
 	uint16_t unit_id = (uint16_t)cpu_index;
 	struct etrace_exec_packet32 packet32 = {
 		.hdr = {
@@ -187,8 +198,8 @@ static void vcpu_exec(unsigned int cpu_index, void *userdata)
 		.start_time = 0,
 		.entry = {
 			.duration = 0,
-			.start = (uint32_t)tb->start,
-			.end = (uint32_t)tb->end,
+			.start = (uint32_t)start,
+			.end = (uint32_t)end,
 		},
 	};
 	struct etrace_exec_packet packet = {
@@ -200,8 +211,8 @@ static void vcpu_exec(unsigned int cpu_index, void *userdata)
 		.start_time = 0,
 		.entry = {
 			.duration = 0,
-			.start = tb->start,
-			.end = tb->end,
+			.start = start,
+			.end = end,
 		},
 	};
 
@@ -210,6 +221,142 @@ static void vcpu_exec(unsigned int cpu_index, void *userdata)
 	else
 		write_packet(&packet, sizeof(packet));
 }
+
+#if QEMU_PLUGIN_VERSION < 2
+static void vcpu_exec(unsigned int cpu_index, void *userdata)
+{
+	const struct tb_data *tb = userdata;
+
+	write_exec_range(cpu_index, tb->start, tb->end);
+}
+#endif
+
+#if QEMU_PLUGIN_VERSION >= 2
+static bool tb_has_boundary(const struct tb_data *tb, uint64_t pc)
+{
+	size_t i;
+
+	if (pc == tb->end)
+		return true;
+	for (i = 0; i < tb->n_insns; i++) {
+		if (tb->insns[i].start == pc)
+			return true;
+	}
+	return false;
+}
+
+static void write_exec_prefix(unsigned int cpu_index,
+			      const struct tb_data *tb, uint64_t end)
+{
+	if (end > tb->start && end <= tb->end) {
+		write_exec_range(cpu_index, tb->start, end);
+	} else if (end != tb->start) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: unresolved TB exit at 0x%" PRIx64
+			" from [0x%" PRIx64 ",0x%" PRIx64 ")\n",
+			end, tb->start, tb->end);
+	}
+}
+
+static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
+{
+	struct vcpu_exec_state *state;
+	struct tb_data *current = userdata;
+	uint64_t progress;
+
+	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
+	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
+	if (state->pending) {
+		if (use_terminal_latch && progress) {
+			write_exec_range(cpu_index, state->pending->start,
+					 state->pending->end);
+		} else if (use_terminal_latch
+			   && tb_has_boundary(state->pending, current->start)) {
+			write_exec_prefix(cpu_index, state->pending,
+					  current->start);
+		} else if (!use_terminal_latch) {
+			write_exec_prefix(cpu_index, state->pending, progress);
+		} else {
+			fprintf(stderr,
+				"qemu-etrace-plugin: unable to resolve early TB "
+				"exit before 0x%" PRIx64 "\n",
+				current->start);
+		}
+	}
+
+	state->pending = current;
+	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
+}
+
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+static void flush_discontinuity_range(unsigned int cpu_index,
+				      enum qemu_plugin_discon_type type,
+				      uint64_t from_pc)
+{
+	struct vcpu_exec_state *state;
+	uint64_t progress;
+
+	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
+	if (!state->pending)
+		return;
+
+	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
+	if (!use_terminal_latch) {
+		write_exec_prefix(cpu_index, state->pending, progress);
+	} else if (type == QEMU_PLUGIN_DISCON_INTERRUPT) {
+		write_exec_range(cpu_index, state->pending->start,
+				 state->pending->end);
+	} else if (tb_has_boundary(state->pending, from_pc)) {
+		write_exec_prefix(cpu_index, state->pending, from_pc);
+	} else {
+		fprintf(stderr,
+			"qemu-etrace-plugin: discontinuity PC 0x%" PRIx64
+			" is outside pending TB [0x%" PRIx64 ",0x%" PRIx64
+			")\n", from_pc, state->pending->start,
+			state->pending->end);
+	}
+
+	state->pending = NULL;
+	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
+}
+#endif
+
+#if QEMU_PLUGIN_VERSION >= 7
+static void vcpu_exit(unsigned int cpu_index, void *userdata)
+#else
+static void vcpu_exit(qemu_plugin_id_t id, unsigned int cpu_index)
+#endif
+{
+	struct vcpu_exec_state *state;
+	uint64_t progress;
+
+#if QEMU_PLUGIN_VERSION >= 7
+	(void) userdata;
+#else
+	(void) id;
+#endif
+
+	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
+	if (!state->pending)
+		return;
+
+	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
+	if (use_terminal_latch && progress) {
+		write_exec_range(cpu_index, state->pending->start,
+				 state->pending->end);
+	} else if (!use_terminal_latch) {
+		write_exec_prefix(cpu_index, state->pending, progress);
+	} else {
+		fprintf(stderr,
+			"qemu-etrace-plugin: unresolved final TB [0x%" PRIx64
+			",0x%" PRIx64 ")\n",
+			state->pending->start, state->pending->end);
+	}
+
+	state->pending = NULL;
+	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
+}
+#endif
 
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 #if QEMU_PLUGIN_VERSION >= 7
@@ -223,6 +370,9 @@ static void vcpu_discontinuity(qemu_plugin_id_t id, unsigned int cpu_index,
 			       uint64_t from_pc, uint64_t to_pc)
 #endif
 {
+#if QEMU_PLUGIN_VERSION >= 2
+	flush_discontinuity_range(cpu_index, type, from_pc);
+#endif
 	struct etrace_discontinuity_packet packet = {
 		.hdr = {
 			.type = TYPE_DISCONTINUITY,
@@ -261,11 +411,17 @@ static void vcpu_discontinuity(qemu_plugin_id_t id, unsigned int cpu_index,
 #endif
 
 static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
-				     size_t last_size)
+				     size_t last_size, size_t n_insns)
 {
 	struct tb_data *data;
+	size_t alloc_size;
 
-	data = calloc(1, sizeof(*data));
+	if (n_insns > (SIZE_MAX - sizeof(*data)) / sizeof(data->insns[0])) {
+		fprintf(stderr, "qemu-etrace-plugin: execution data is too large\n");
+		return NULL;
+	}
+	alloc_size = sizeof(*data) + n_insns * sizeof(data->insns[0]);
+	data = calloc(1, alloc_size);
 	if (!data) {
 		fprintf(stderr, "qemu-etrace-plugin: unable to allocate execution data\n");
 		return NULL;
@@ -275,6 +431,7 @@ static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 		data->end = UINT64_MAX;
 	else
 		data->end = last_addr + last_size;
+	data->n_insns = n_insns;
 
 	pthread_mutex_lock(&lock);
 	data->next = translated_blocks;
@@ -290,7 +447,9 @@ static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 #endif
 {
+#if QEMU_PLUGIN_VERSION >= 2
 	struct qemu_plugin_insn *last_insn;
+#endif
 	struct tb_data *data;
 	size_t n_insns;
 	size_t i;
@@ -305,14 +464,16 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 	if (n_insns == 0)
 		return;
 
-	if (exec_mode == EXEC_MODE_INSN) {
+#if QEMU_PLUGIN_VERSION < 2
+	{
+		/* API version 1 has no inline per-vCPU scoreboard operations. */
 		for (i = 0; i < n_insns; i++) {
 			struct qemu_plugin_insn *insn;
 
 			insn = qemu_plugin_tb_get_insn(tb, i);
 			data = new_exec_data(qemu_plugin_insn_vaddr(insn),
 					     qemu_plugin_insn_vaddr(insn),
-					     qemu_plugin_insn_size(insn));
+					     qemu_plugin_insn_size(insn), 0);
 			if (!data)
 				continue;
 			qemu_plugin_register_vcpu_insn_exec_cb(
@@ -320,16 +481,39 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 		}
 		return;
 	}
+#else
 
 	last_insn = qemu_plugin_tb_get_insn(tb, n_insns - 1);
 	data = new_exec_data(qemu_plugin_tb_vaddr(tb),
 			     qemu_plugin_insn_vaddr(last_insn),
-			     qemu_plugin_insn_size(last_insn));
+			     qemu_plugin_insn_size(last_insn),
+			     n_insns);
 	if (!data)
 		return;
 
-	qemu_plugin_register_vcpu_tb_exec_cb(tb, vcpu_exec,
-					     QEMU_PLUGIN_CB_NO_REGS, data);
+	for (i = 0; i < n_insns; i++) {
+		struct qemu_plugin_insn *insn;
+
+		insn = qemu_plugin_tb_get_insn(tb, i);
+		data->insns[i].start = qemu_plugin_insn_vaddr(insn);
+		if (qemu_plugin_insn_size(insn)
+		    > UINT64_MAX - data->insns[i].start)
+			data->insns[i].end = UINT64_MAX;
+		else
+			data->insns[i].end = data->insns[i].start
+				+ qemu_plugin_insn_size(insn);
+		if (!use_terminal_latch || i == n_insns - 1) {
+			uint64_t value = use_terminal_latch
+				? 1 : data->insns[i].end;
+
+			qemu_plugin_register_vcpu_insn_exec_inline_per_vcpu(
+				insn, QEMU_PLUGIN_INLINE_STORE_U64,
+				exec_progress, value);
+		}
+	}
+	qemu_plugin_register_vcpu_tb_exec_cb(
+		tb, vcpu_tb_exec, QEMU_PLUGIN_CB_NO_REGS, data);
+#endif
 }
 
 #if QEMU_PLUGIN_VERSION >= 7
@@ -364,6 +548,13 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 		free(tb);
 		tb = next;
 	}
+
+#if QEMU_PLUGIN_VERSION >= 2
+	if (exec_state) {
+		qemu_plugin_scoreboard_free(exec_state);
+		exec_state = NULL;
+	}
+#endif
 }
 
 QEMU_PLUGIN_EXPORT
@@ -380,14 +571,9 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	gzip_output = false;
 	gzip_level = Z_BEST_SPEED;
 	trace_failed = false;
-	exec_mode = EXEC_MODE_TB;
 	for (i = 0; i < argc; i++) {
 		if (!strncmp(argv[i], "out=", 4) && argv[i][4]) {
 			output = argv[i] + 4;
-		} else if (!strcmp(argv[i], "exec=tb")) {
-			exec_mode = EXEC_MODE_TB;
-		} else if (!strcmp(argv[i], "exec=insn")) {
-			exec_mode = EXEC_MODE_INSN;
 		} else if (!strcmp(argv[i], "compress=gzip")) {
 			gzip_output = true;
 		} else if (!strcmp(argv[i], "compress=none")) {
@@ -447,6 +633,29 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 		}
 		return -1;
 	}
+
+#if QEMU_PLUGIN_VERSION >= 2
+	exec_state = qemu_plugin_scoreboard_new(sizeof(struct vcpu_exec_state));
+	if (!exec_state) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: unable to allocate execution "
+			"scoreboard\n");
+		return -1;
+	}
+	exec_progress = qemu_plugin_scoreboard_u64_in_struct(
+		exec_state, struct vcpu_exec_state, progress);
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+	/* System discontinuities identify every architectural early exit. */
+	use_terminal_latch = info->system_emulation;
+#else
+	use_terminal_latch = false;
+#endif
+#if QEMU_PLUGIN_VERSION >= 7
+	qemu_plugin_register_vcpu_exit_cb(id, vcpu_exit, NULL);
+#else
+	qemu_plugin_register_vcpu_exit_cb(id, vcpu_exit);
+#endif
+#endif
 
 #if QEMU_PLUGIN_VERSION >= 7
 	qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans, NULL);

@@ -42,12 +42,38 @@ static qemu_plugin_udata_cb_t exit_cb;
 #if QEMU_PLUGIN_VERSION >= 7
 static void *trans_data;
 #endif
+#if QEMU_PLUGIN_VERSION >= 2
+#if QEMU_PLUGIN_VERSION >= 7
+static qemu_plugin_vcpu_udata_cb_t vcpu_exit_cb;
+static void *vcpu_exit_data;
+#else
+static qemu_plugin_vcpu_simple_cb_t vcpu_exit_cb;
+#endif
+#endif
 static void *exit_data;
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 static qemu_plugin_vcpu_discon_cb_t discon_cb;
 static enum qemu_plugin_discon_type discon_types;
 #if QEMU_PLUGIN_VERSION >= 7
 static void *discon_data;
+#endif
+#endif
+
+#if QEMU_PLUGIN_VERSION >= 2
+#if QEMU_PLUGIN_VERSION >= 7
+void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_udata_cb_t cb,
+				       void *userdata)
+{
+	vcpu_exit_cb = cb;
+	vcpu_exit_data = userdata;
+}
+#else
+void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_simple_cb_t cb)
+{
+	vcpu_exit_cb = cb;
+}
 #endif
 #endif
 
@@ -238,6 +264,18 @@ static void finish_plugin(void)
 #endif
 }
 
+#if QEMU_PLUGIN_VERSION >= 2
+static void exit_vcpu(unsigned int cpu_index)
+{
+	g_assert_nonnull(vcpu_exit_cb);
+#if QEMU_PLUGIN_VERSION >= 7
+	vcpu_exit_cb(cpu_index, vcpu_exit_data);
+#else
+	vcpu_exit_cb(1, cpu_index);
+#endif
+}
+#endif
+
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 static void emit_discontinuity(unsigned int cpu_index,
 			       enum qemu_plugin_discon_type type,
@@ -399,16 +437,20 @@ static void read_data(const uint8_t **cursor, void *value, size_t size)
 	*cursor += size;
 }
 
-static void skip_trace_headers(const uint8_t **cursor)
+static uint64_t read_trace_headers(const uint8_t **cursor)
 {
+	struct etrace_info_data info;
 	struct etrace_hdr hdr;
 
 	read_data(cursor, &hdr, sizeof(hdr));
 	g_assert_cmpuint(hdr.type, ==, TYPE_INFO);
-	*cursor += hdr.len;
+	g_assert_cmpuint(hdr.len, >=, sizeof(info));
+	read_data(cursor, &info, sizeof(info));
+	*cursor += hdr.len - sizeof(info);
 	read_data(cursor, &hdr, sizeof(hdr));
 	g_assert_cmpuint(hdr.type, ==, TYPE_ARCH);
 	*cursor += hdr.len;
+	return info.attr;
 }
 
 static void assert_exec64(const uint8_t **cursor, unsigned int cpu_index,
@@ -464,7 +506,7 @@ static void test_discontinuity_trace(void)
 		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
 		.system_emulation = true,
 	};
-	char *args[2];
+	char *arg;
 	char *contents;
 	char *path = NULL;
 	const uint8_t *cursor;
@@ -475,10 +517,9 @@ static void test_discontinuity_trace(void)
 	g_assert_cmpint(fd, >=, 0);
 	close(fd);
 	unlink(path);
-	args[0] = g_strdup_printf("out=%s", path);
-	args[1] = "exec=insn";
+	arg = g_strdup_printf("out=%s", path);
 
-	g_assert_cmpint(qemu_plugin_install(1, &info, 2, args), ==, 0);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
 	g_assert_nonnull(discon_cb);
 	g_assert_cmpint(discon_types, ==, QEMU_PLUGIN_DISCON_ALL);
 	translate_tb(&tb);
@@ -490,7 +531,7 @@ static void test_discontinuity_trace(void)
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
-	skip_trace_headers(&cursor);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
 	assert_exec64(&cursor, 3, 0x1000, 0x1004);
 	assert_discontinuity(&cursor, 3, ETRACE_DISCONTINUITY_EXCEPTION,
 			     0x1004, 0x2000);
@@ -502,11 +543,12 @@ static void test_discontinuity_trace(void)
 
 	unlink(path);
 	g_free(contents);
-	g_free(args[0]);
+	g_free(arg);
 	g_free(path);
 }
 #endif
 
+#if QEMU_PLUGIN_VERSION < 2
 static void test_instruction_execution_trace(void)
 {
 	struct qemu_plugin_insn insns[] = {
@@ -524,7 +566,7 @@ static void test_instruction_execution_trace(void)
 		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
 		.system_emulation = true,
 	};
-	char *args[2];
+	char *arg;
 	char *contents;
 	char *path = NULL;
 	const uint8_t *cursor;
@@ -535,10 +577,9 @@ static void test_instruction_execution_trace(void)
 	g_assert_cmpint(fd, >=, 0);
 	close(fd);
 	unlink(path);
-	args[0] = g_strdup_printf("out=%s", path);
-	args[1] = "exec=insn";
+	arg = g_strdup_printf("out=%s", path);
 
-	g_assert_cmpint(qemu_plugin_install(1, &info, 2, args), ==, 0);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
 	translate_tb(&tb);
 	g_assert_null(tb.exec_cb);
 	g_assert_nonnull(insns[0].exec_cb);
@@ -552,7 +593,7 @@ static void test_instruction_execution_trace(void)
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
-	skip_trace_headers(&cursor);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
 	assert_exec64(&cursor, 5, 0x1000, 0x1002);
 	assert_exec64(&cursor, 5, 0x1000, 0x1002);
 	assert_exec64(&cursor, 5, 0x1002, 0x1006);
@@ -561,11 +602,12 @@ static void test_instruction_execution_trace(void)
 
 	unlink(path);
 	g_free(contents);
-	g_free(args[0]);
+	g_free(arg);
 	g_free(path);
 }
+#endif
 
-static void write_instruction_trace(const char *path, bool gzip)
+static void write_execution_trace(const char *path, bool gzip)
 {
 	struct qemu_plugin_insn insns[] = {
 		{ .vaddr = 0x4000, .size = 2 },
@@ -581,24 +623,26 @@ static void write_instruction_trace(const char *path, bool gzip)
 		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
 		.system_emulation = true,
 	};
-	char *args[3];
-	int argc = 2;
+	char *args[2];
+	int argc = 1;
 
 	args[0] = g_strdup_printf("out=%s", path);
-	args[1] = "exec=insn";
 	if (gzip) {
-		args[2] = "compress=gzip";
+		args[1] = "compress=gzip";
 		argc++;
 	}
 
 	g_assert_cmpint(qemu_plugin_install(1, &info, argc, args), ==, 0);
 	translate_tb(&tb);
 	execute_tb_prefix(&tb, 6, tb.n_insns);
+#if QEMU_PLUGIN_VERSION >= 2
+	exit_vcpu(6);
+#endif
 	finish_plugin();
 	g_free(args[0]);
 }
 
-static void test_instruction_gzip_equivalence(void)
+static void test_gzip_equivalence(void)
 {
 	uint8_t gzip_contents[512];
 	char *raw_contents;
@@ -618,8 +662,8 @@ static void test_instruction_gzip_equivalence(void)
 	close(fd);
 	unlink(gzip_path);
 
-	write_instruction_trace(raw_path, false);
-	write_instruction_trace(gzip_path, true);
+	write_execution_trace(raw_path, false);
+	write_execution_trace(gzip_path, true);
 
 	g_assert_true(g_file_get_contents(raw_path, &raw_contents, &raw_length,
 					      NULL));
@@ -638,32 +682,183 @@ static void test_instruction_gzip_equivalence(void)
 	g_free(gzip_path);
 }
 
-static void test_invalid_exec_mode(void)
+static void test_invalid_option(void)
 {
 	qemu_info_t info = {
 		.target_name = "aarch64",
 		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
 		.system_emulation = true,
 	};
-	char *arg = "exec=invalid";
+	char *arg = "invalid";
 
 	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, -1);
 }
 
-static void test_execution_trace(void)
+#if QEMU_PLUGIN_VERSION >= 2
+static void test_accurate_execution_trace(void)
 {
-	struct qemu_plugin_insn insns[] = {
+	struct qemu_plugin_insn first_insns[] = {
 		{ .vaddr = 0x1000, .size = 4 },
 		{ .vaddr = 0x1004, .size = 4 },
+		{ .vaddr = 0x1008, .size = 4 },
 	};
-	struct qemu_plugin_tb tb = {
+	struct qemu_plugin_insn second_insns[] = {
+		{ .vaddr = 0x2000, .size = 4 },
+		{ .vaddr = 0x2004, .size = 4 },
+		{ .vaddr = 0x2008, .size = 4 },
+	};
+	struct qemu_plugin_tb first = {
 		.vaddr = 0x1000,
-		.insns = insns,
-		.n_insns = G_N_ELEMENTS(insns),
+		.insns = first_insns,
+		.n_insns = G_N_ELEMENTS(first_insns),
+	};
+	struct qemu_plugin_tb second = {
+		.vaddr = 0x2000,
+		.insns = second_insns,
+		.n_insns = G_N_ELEMENTS(second_insns),
 	};
 	qemu_info_t info = {
 		.target_name = "aarch64",
 		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *arg;
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	arg = g_strdup_printf("out=%s", path);
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
+	g_assert_nonnull(vcpu_exit_cb);
+	translate_tb(&first);
+	translate_tb(&second);
+
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+	g_assert_false(first_insns[0].has_inline);
+	g_assert_false(first_insns[1].has_inline);
+	g_assert_true(first_insns[2].has_inline);
+	g_assert_false(second_insns[0].has_inline);
+	g_assert_false(second_insns[1].has_inline);
+	g_assert_true(second_insns[2].has_inline);
+
+	execute_tb_prefix(&first, 2, first.n_insns);
+	execute_tb_prefix(&second, 2, 1);
+	emit_discontinuity(2, QEMU_PLUGIN_DISCON_EXCEPTION, 0x2004, 0x3000);
+#else
+	g_assert_true(first_insns[0].has_inline);
+	g_assert_true(first_insns[1].has_inline);
+	g_assert_true(first_insns[2].has_inline);
+	g_assert_true(second_insns[0].has_inline);
+	g_assert_true(second_insns[1].has_inline);
+	g_assert_true(second_insns[2].has_inline);
+
+	execute_tb_prefix(&first, 2, 2);
+	execute_tb_prefix(&second, 2, second.n_insns);
+#endif
+	exit_vcpu(2);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+	assert_exec64(&cursor, 2, 0x1000, 0x100c);
+	assert_exec64(&cursor, 2, 0x2000, 0x2004);
+	assert_discontinuity(&cursor, 2, ETRACE_DISCONTINUITY_EXCEPTION,
+			     0x2004, 0x3000);
+#else
+	assert_exec64(&cursor, 2, 0x1000, 0x1008);
+	assert_exec64(&cursor, 2, 0x2000, 0x200c);
+#endif
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(arg);
+	g_free(path);
+}
+
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+static void test_accurate_internal_restart(void)
+{
+	struct qemu_plugin_insn original_insns[] = {
+		{ .vaddr = 0x1000, .size = 4 },
+		{ .vaddr = 0x1004, .size = 4 },
+		{ .vaddr = 0x1008, .size = 4 },
+	};
+	struct qemu_plugin_insn restart_insns[] = {
+		{ .vaddr = 0x1004, .size = 4 },
+		{ .vaddr = 0x1008, .size = 4 },
+	};
+	struct qemu_plugin_tb original = {
+		.vaddr = 0x1000,
+		.insns = original_insns,
+		.n_insns = G_N_ELEMENTS(original_insns),
+	};
+	struct qemu_plugin_tb restart = {
+		.vaddr = 0x1004,
+		.insns = restart_insns,
+		.n_insns = G_N_ELEMENTS(restart_insns),
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *arg;
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	arg = g_strdup_printf("out=%s", path);
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
+	translate_tb(&original);
+	translate_tb(&restart);
+	execute_tb_prefix(&original, 1, 1);
+	execute_tb_prefix(&restart, 1, restart.n_insns);
+	exit_vcpu(1);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+	assert_exec64(&cursor, 1, 0x1000, 0x1004);
+	assert_exec64(&cursor, 1, 0x1004, 0x100c);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(arg);
+	g_free(path);
+}
+#endif
+#endif
+
+static void test_execution_trace(void)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x1000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x1000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
 		.system_emulation = true,
 	};
 	struct etrace_info_data info_data;
@@ -688,8 +883,15 @@ static void test_execution_trace(void)
 	g_assert_nonnull(trans_cb);
 	g_assert_nonnull(exit_cb);
 	translate_tb(&tb);
+#if QEMU_PLUGIN_VERSION >= 2
 	g_assert_nonnull(tb.exec_cb);
+#else
+	g_assert_nonnull(insn.exec_cb);
+#endif
 	execute_tb_prefix(&tb, 3, tb.n_insns);
+#if QEMU_PLUGIN_VERSION >= 2
+	exit_vcpu(3);
+#endif
 	finish_plugin();
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
@@ -715,7 +917,7 @@ static void test_execution_trace(void)
 	g_assert_cmpuint(start_time, ==, 0);
 	g_assert_cmpuint(entry.duration, ==, 0);
 	g_assert_cmpuint(entry.start, ==, 0x1000);
-	g_assert_cmpuint(entry.end, ==, 0x1008);
+	g_assert_cmpuint(entry.end, ==, 0x1004);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -758,6 +960,9 @@ static void test_32bit_execution_trace(void)
 	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
 	translate_tb(&tb);
 	execute_tb_prefix(&tb, 2, tb.n_insns);
+#if QEMU_PLUGIN_VERSION >= 2
+	exit_vcpu(2);
+#endif
 	finish_plugin();
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
@@ -816,6 +1021,9 @@ static void test_gzip_execution_trace(void)
 	g_assert_cmpint(qemu_plugin_install(1, &info, 3, args), ==, 0);
 	translate_tb(&tb);
 	execute_tb_prefix(&tb, 4, tb.n_insns);
+#if QEMU_PLUGIN_VERSION >= 2
+	exit_vcpu(4);
+#endif
 	finish_plugin();
 
 	input = gzopen(path, "rb");
@@ -858,11 +1066,20 @@ int main(int argc, char **argv)
 	g_test_add_func("/plugin/discontinuity-trace",
 			test_discontinuity_trace);
 #endif
+#if QEMU_PLUGIN_VERSION < 2
 	g_test_add_func("/plugin/instruction-execution-trace",
 			test_instruction_execution_trace);
-	g_test_add_func("/plugin/instruction-gzip-equivalence",
-			test_instruction_gzip_equivalence);
-	g_test_add_func("/plugin/invalid-exec-mode", test_invalid_exec_mode);
+#endif
+	g_test_add_func("/plugin/gzip-equivalence", test_gzip_equivalence);
+	g_test_add_func("/plugin/invalid-option", test_invalid_option);
+#if QEMU_PLUGIN_VERSION >= 2
+	g_test_add_func("/plugin/accurate-execution-trace",
+			test_accurate_execution_trace);
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+	g_test_add_func("/plugin/accurate-internal-restart",
+			test_accurate_internal_restart);
+#endif
+#endif
 	g_test_add_func("/plugin/execution-trace", test_execution_trace);
 	g_test_add_func("/plugin/32bit-execution-trace",
 			test_32bit_execution_trace);

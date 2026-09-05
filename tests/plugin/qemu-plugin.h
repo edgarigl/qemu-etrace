@@ -66,6 +66,8 @@ typedef void (*qemu_plugin_vcpu_tb_trans_cb_t)(struct qemu_plugin_tb *tb,
 					       void *userdata);
 #else
 typedef void (*qemu_plugin_udata_cb_t)(qemu_plugin_id_t id, void *userdata);
+typedef void (*qemu_plugin_vcpu_simple_cb_t)(qemu_plugin_id_t id,
+					      unsigned int cpu_index);
 typedef void (*qemu_plugin_vcpu_tb_trans_cb_t)(qemu_plugin_id_t id,
 					       struct qemu_plugin_tb *tb);
 #endif
@@ -98,6 +100,14 @@ void qemu_plugin_register_vcpu_discon_cb(
 	qemu_plugin_id_t id, enum qemu_plugin_discon_type type,
 	qemu_plugin_vcpu_discon_cb_t cb);
 #endif
+#endif
+#if QEMU_PLUGIN_VERSION >= 7
+void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_udata_cb_t cb,
+				       void *userdata);
+#else
+void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_simple_cb_t cb);
 #endif
 void qemu_plugin_register_vcpu_tb_exec_cb(
 	struct qemu_plugin_tb *tb, qemu_plugin_vcpu_udata_cb_t cb,
