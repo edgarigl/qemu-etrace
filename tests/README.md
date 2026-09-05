@@ -23,6 +23,11 @@ and 7, covering QEMU 8.2, QEMU 10.2, and the callback ABI used by current
 upstream QEMU. They verify raw and gzip-compressed output without requiring a
 QEMU source tree or emulator binary.
 
+Build tests verify that system Binutils is the default, local Binutils adds its
+own include and library paths, and external programs are found through `PATH`.
+The staged-install test also runs the installed `etrace-view` launcher against
+its installed Python modules.
+
 Run only the Python integration tests after building `qemu-etrace` with:
 
 ```sh

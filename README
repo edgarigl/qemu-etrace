@@ -8,32 +8,32 @@ un-intrusive.
 
 BUILD
 -----
-qemu-etrace depends on dwarfdump, binutils libraries and on binutils programs at runtime.
-On debian/ubuntu machines, the packages to install are
-dwarfdump, binutils and binutils-dev.
+qemu-etrace depends on GLib, dwarfdump, the Binutils libraries, and the
+Binutils programs `nm`, `objdump`, and `addr2line`. The default build uses the
+system Binutils installation. On Debian and Ubuntu, install the prerequisites
+with:
 
-Preferably the binutils installation should be multi-arch.
+$ sudo apt install build-essential pkg-config python3 libglib2.0-dev \
+    dwarfdump binutils binutils-dev zlib1g-dev
 
-If your system is lacking these, you will have to download binutils and
-install it somewhere. Plus edit the Makefile.
+Then build qemu-etrace with:
 
-To simplify the binutils build, the Makefile has a rule that will download,
-build and install a local binutils installation (in the qemu-etrace src dir).
-
-For convenience, the Makefile also generates a qemu-etrace.sh shell script
-that pre-sets some qemu-etrace arguments pointing to binutils program paths
-into to the local binutils install.
-
-The make binutils step is optional, depending on your system:
-$ make binutils -j4
-
-To build qemu-etrace:
 $ make -j4
 
-Copy qemu-etrace.sh (if you used a local binutils) or qemu-etrace if you
-installed the system packages to somewhere in your PATH.
+The runtime Binutils programs and dwarfdump are resolved through `PATH`.
+Command-line options such as `--nm`, `--objdump`, `--addr2line`, and
+`--dwarfdump` can select different programs or explicit paths.
 
-$ cp qemu-etrace.sh ~/bin/
+If suitable Binutils libraries are not available on the host, build the local
+Binutils 2.42 fallback and select it explicitly:
+
+$ make binutils -j4
+$ make USE_LOCAL_BINUTILS=1 -j4
+
+Local mode links against the Binutils installation in this source tree and
+also creates `qemu-etrace.sh`. The wrapper selects the matching local `nm`,
+`objdump`, and `addr2line` programs. It is intended for running qemu-etrace
+from the build tree and is not installed by `make install`.
 
 TESTS
 -----
@@ -63,6 +63,10 @@ $ sudo make install QEMU_SRC=/path/to/qemu
 This installs:
 
     /usr/local/bin/qemu-etrace
+    /usr/local/bin/etrace-view
+    /usr/local/share/qemu-etrace/etrace-view.py
+    /usr/local/share/qemu-etrace/etrace.py
+    /usr/local/share/qemu-etrace/addr2line.py
     /usr/local/lib/qemu-etrace/plugins/5/libqemu-etrace.so
 
 The numeric directory is the QEMU plugin API version read from the selected
@@ -224,9 +228,14 @@ qemu-etrace
 Binutils
 --------
 qemu-etrace uses binutils, both its libraries and its programs (nm,
-objdump, addr2line). It was tested with binutils 2.22 and binutils 2.34.
-qemu-etrace has cmdline options to choose which binutils programs to
-use, see --help, --nm, --addr2line, --objdump.
+objdump, addr2line). The build expects the Binutils 2.29 or newer disassembler
+API. System Binutils is used by default; set `USE_LOCAL_BINUTILS=1` to use the
+local Binutils 2.42 build described above. `libiberty-dev` is not required with
+the shared Binutils libraries provided by Debian and Ubuntu.
+
+qemu-etrace searches `PATH` for the Binutils programs and dwarfdump. It also
+has command-line options to choose each program; see `--help`, `--nm`,
+`--addr2line`, `--objdump`, and `--dwarfdump`.
 
 Coverage
 --------
@@ -256,7 +265,11 @@ gcov-bad
 
 etrace-view
 -----------
-./etrace-view.py --trace ~/work/xilinx/m-arch/sw/tbm/apu.elog  --elf ~/work/xilinx/m-arch/sw/tbm/build/ronaldo/apu/ctest-bare
+The interactive Python viewer is installed as `etrace-view`:
+
+$ etrace-view --trace /tmp/elog --elf vmlinux
+
+Run `./etrace-view.py` instead when working directly from the source tree.
 
 
 LICENSE
