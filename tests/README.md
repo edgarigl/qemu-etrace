@@ -19,10 +19,11 @@ inline-entry attribution and rejection of execution that starts in a later
 inline-attributed block.
 
 The plugin unit tests use local API stubs for QEMU plugin API versions 1, 5,
-and 7. API version 5 is built both with and without the discontinuity callback
-to cover QEMU 10.1 and 10.2, while version 7 covers the callback ABI used by
-current upstream QEMU. The tests verify raw and gzip-compressed output without
-requiring a QEMU source tree or emulator binary.
+6, and 7. API version 5 is built both with and without the discontinuity
+callback to cover QEMU 10.1 and 10.2, version 6 covers QEMU 11.0, and version 7
+covers the callback ABI used by current upstream QEMU. The tests verify raw
+and gzip-compressed output without requiring a QEMU source tree or emulator
+binary.
 
 Build tests verify that system Binutils is the default, local Binutils adds its
 own include and library paths, and external programs are found through `PATH`.

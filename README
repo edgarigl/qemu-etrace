@@ -95,9 +95,8 @@ The plugin records execution callbacks for chained translation blocks, so
 records accurate execution ranges with zero duration, which supports coverage
 but does not provide time-based profiling. API version 1 uses one host callback
 per instruction. Newer APIs delay each TB record until execution is resolved:
-system emulation with discontinuity callbacks needs one inline
-terminal-instruction marker per TB, while older QEMU and user-mode emulation
-use an inline last-PC update per instruction.
+an inline progress update before each instruction records the exact dispatched
+prefix, including virtualization transitions without discontinuity callbacks.
 
 The ETrace format assumes that execution ranges are accurate; no opt-in flag is
 required. Instruction observation establishes dispatch, not architectural

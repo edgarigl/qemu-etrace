@@ -17,9 +17,9 @@ range completed. Synchronous exceptions can leave the block early.
 
 The QEMU plugin always emits accurate ranges. API version 1 emits one range for
 each instruction callback. Newer APIs delay TB ranges until they are resolved,
-using one terminal-instruction marker per TB when system-emulation
-discontinuities are available and a per-instruction inline progress marker as
-the compatibility fallback.
+using a per-instruction inline progress marker to record the end of the last
+dispatched instruction. This remains accurate when a virtualization or
+internal transition has no discontinuity callback.
 
 The trace establishes dispatch rather than architectural retirement. A
 faulting instruction might not complete and remains represented by its

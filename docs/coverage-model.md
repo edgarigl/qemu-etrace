@@ -65,12 +65,13 @@ the QEMU API:
 
 - API version 1 emits one exact half-open `[pc, pc + size)` range for every
   instruction callback;
-- newer APIs delay a TB record and maintain per-vCPU inline progress;
-- when system-emulation discontinuities are available, one inline marker on the
-  terminal instruction distinguishes normal completion while `from_pc` bounds
-  an early exception or host call;
-- older QEMU and user-mode execution update the inline last PC on every
-  instruction as a compatibility fallback.
+- newer APIs delay a TB record and update per-vCPU inline progress before every
+  instruction;
+- the last dispatched instruction bounds the range even when an architectural
+  transition has no discontinuity callback;
+- discontinuity records distinguish exceptions, interrupts, and host calls
+  from ordinary control flow without being required to reconstruct the
+  execution prefix.
 
 Instruction callbacks prove that QEMU dispatched an instruction, not that the
 architecture retired it. A faulting instruction may have produced its callback

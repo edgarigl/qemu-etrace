@@ -740,18 +740,6 @@ static void test_accurate_execution_trace(void)
 	translate_tb(&first);
 	translate_tb(&second);
 
-#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
-	g_assert_false(first_insns[0].has_inline);
-	g_assert_false(first_insns[1].has_inline);
-	g_assert_true(first_insns[2].has_inline);
-	g_assert_false(second_insns[0].has_inline);
-	g_assert_false(second_insns[1].has_inline);
-	g_assert_true(second_insns[2].has_inline);
-
-	execute_tb_prefix(&first, 2, first.n_insns);
-	execute_tb_prefix(&second, 2, 1);
-	emit_discontinuity(2, QEMU_PLUGIN_DISCON_EXCEPTION, 0x2004, 0x3000);
-#else
 	g_assert_true(first_insns[0].has_inline);
 	g_assert_true(first_insns[1].has_inline);
 	g_assert_true(first_insns[2].has_inline);
@@ -759,8 +747,10 @@ static void test_accurate_execution_trace(void)
 	g_assert_true(second_insns[1].has_inline);
 	g_assert_true(second_insns[2].has_inline);
 
-	execute_tb_prefix(&first, 2, 2);
-	execute_tb_prefix(&second, 2, second.n_insns);
+	execute_tb_prefix(&first, 2, first.n_insns);
+	execute_tb_prefix(&second, 2, 1);
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+	emit_discontinuity(2, QEMU_PLUGIN_DISCON_EXCEPTION, 0x41a7f1, 0x3000);
 #endif
 	exit_vcpu(2);
 	finish_plugin();
@@ -768,14 +758,11 @@ static void test_accurate_execution_trace(void)
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
 	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
-#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 	assert_exec64(&cursor, 2, 0x1000, 0x100c);
 	assert_exec64(&cursor, 2, 0x2000, 0x2004);
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 	assert_discontinuity(&cursor, 2, ETRACE_DISCONTINUITY_EXCEPTION,
-			     0x2004, 0x3000);
-#else
-	assert_exec64(&cursor, 2, 0x1000, 0x1008);
-	assert_exec64(&cursor, 2, 0x2000, 0x200c);
+			     0x41a7f1, 0x3000);
 #endif
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
@@ -786,6 +773,72 @@ static void test_accurate_execution_trace(void)
 }
 
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+static void test_unreported_system_transition(void)
+{
+	struct qemu_plugin_insn guest_insns[] = {
+		{ .vaddr = 0x41a807, .size = 3 },
+		{ .vaddr = 0x41a80a, .size = 6 },
+		{ .vaddr = 0x41a810, .size = 5 },
+	};
+	struct qemu_plugin_insn host_insns[] = {
+		{ .vaddr = UINT64_C(0xffff82d0402a4aab), .size = 4 },
+		{ .vaddr = UINT64_C(0xffff82d0402a4aaf), .size = 3 },
+	};
+	struct qemu_plugin_tb guest = {
+		.vaddr = 0x41a807,
+		.insns = guest_insns,
+		.n_insns = G_N_ELEMENTS(guest_insns),
+	};
+	struct qemu_plugin_tb host = {
+		.vaddr = UINT64_C(0xffff82d0402a4aab),
+		.insns = host_insns,
+		.n_insns = G_N_ELEMENTS(host_insns),
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *arg;
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	gsize length;
+	unsigned int i;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	arg = g_strdup_printf("out=%s", path);
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
+	translate_tb(&guest);
+	translate_tb(&host);
+	for (i = 0; i < 2; i++) {
+		execute_tb_prefix(&guest, 3, 2);
+		execute_tb_prefix(&host, 3, host.n_insns);
+	}
+	exit_vcpu(3);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	g_assert_cmpuint(read_trace_headers(&cursor), ==, 0);
+	for (i = 0; i < 2; i++) {
+		assert_exec64(&cursor, 3, 0x41a807, 0x41a810);
+		assert_exec64(&cursor, 3, UINT64_C(0xffff82d0402a4aab),
+			      UINT64_C(0xffff82d0402a4ab2));
+	}
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(arg);
+	g_free(path);
+}
+
 static void test_accurate_internal_restart(void)
 {
 	struct qemu_plugin_insn original_insns[] = {
@@ -1076,6 +1129,8 @@ int main(int argc, char **argv)
 	g_test_add_func("/plugin/accurate-execution-trace",
 			test_accurate_execution_trace);
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+	g_test_add_func("/plugin/unreported-system-transition",
+			test_unreported_system_transition);
 	g_test_add_func("/plugin/accurate-internal-restart",
 			test_accurate_internal_restart);
 #endif

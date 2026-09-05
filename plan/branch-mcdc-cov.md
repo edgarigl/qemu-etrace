@@ -5,12 +5,10 @@
 The execution-accuracy foundation is implemented:
 
 - API version 1 records exact per-instruction execution ranges.
-- API version 2 and newer use per-vCPU scoreboards and delayed range
-  emission.
-- System emulation with discontinuity support uses one terminal-instruction
-  latch per TB.
-- Older QEMU and user-mode emulation use a per-instruction inline progress
-  marker.
+- API version 2 and newer use per-vCPU scoreboards, per-instruction inline
+  progress, and delayed range emission.
+- Execution-prefix accuracy does not depend on discontinuity callbacks being
+  complete for virtualization and internal transitions.
 - Exceptions, interrupts, and host calls have explicit discontinuity records.
 - The build probes the selected QEMU header for discontinuity support instead
   of inferring support from the plugin API version.
@@ -20,10 +18,11 @@ The execution-accuracy foundation is implemented:
   conditional branches, jumps, calls, returns, traps, direct targets, and
   fall-through addresses.
 
-The plugin bookkeeping is covered with API versions 1, 5, and 7, including
+The plugin bookkeeping is covered with API versions 1, 5, 6, and 7, including
 QEMU 10.1-style version 5 without discontinuities and QEMU 10.2-style version
-5 with discontinuities. A real-QEMU regression that deliberately faults in
-the middle of a multi-instruction TB remains useful integration coverage.
+5 with discontinuities. Version 6 covers QEMU 11.0 virtualization transitions.
+A real-QEMU regression that deliberately faults in the middle of a
+multi-instruction TB remains useful integration coverage.
 
 ## Updated recommendation
 
@@ -132,8 +131,8 @@ At translation time:
 
 1. retain the TB start, nominal end, final instruction PC, instruction
    boundaries, and final instruction bytes in immutable `tb_data`;
-2. retain one terminal latch per TB when discontinuities are available;
-3. retain per-instruction progress for compatibility configurations.
+2. update per-vCPU progress with the exact instruction end before every
+   instruction is dispatched.
 
 At the next TB entry:
 
@@ -177,9 +176,9 @@ consumer can derive normal successors from adjacent per-vCPU instruction
 records. The plugin may emit explicit transition packets for consistency, but
 must not weaken the existing correctness reference.
 
-The API-version-2 fallback can map its last-dispatched-end scoreboard value
-back to the retained instruction boundaries. A transition is normal only when
-the terminal instruction was dispatched.
+API version 2 and newer can map the last-dispatched-end scoreboard value back
+to the retained instruction boundaries. A transition is normal only when the
+terminal instruction was dispatched.
 
 ## Translated instruction identity
 
@@ -237,8 +236,8 @@ Acceptance criteria:
 - internal restarts are not reported as program branches;
 - vCPU state and sequence numbers never cross CPUs under MTTCG;
 - the final unresolved transition is not fabricated at vCPU shutdown;
-- API versions 1, 5 without discontinuities, 5 with discontinuities, and 7
-  build and pass.
+- API versions 1, 5 without discontinuities, 5 with discontinuities, 6, and
+  7 build and pass.
 
 ## Phase 3: Derive dynamic branch outcomes
 
@@ -421,7 +420,7 @@ Completed foundation:
 
 1. exact instruction callbacks and dispatched-coverage semantics;
 2. discontinuity format, validation, feature probing, and plugin emission;
-3. terminal-latch and inline-progress execution-range tracking;
+3. per-instruction inline-progress execution-range tracking;
 4. byte-accurate variable-length execution coverage;
 5. normalized control-flow decoding and AArch64 golden tests.
 
@@ -465,7 +464,7 @@ delay-slot architectures follow without changing the transition format.
 ## Validation matrix
 
 - API version 1, version 5 without discontinuities, version 5 with
-  discontinuities, and version 7 plugin builds;
+  discontinuities, version 6, and version 7 plugin builds;
 - raw and gzip traces decode identically;
 - AArch64 taken, not-taken, unexpected, and unresolved successors;
 - direct target address zero and signed backward targets;

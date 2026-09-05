@@ -118,6 +118,7 @@ TEST_BINS += $(TEST_BUILD_DIR)/test-dwarf-lines
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v5-discon
+TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v6-discon
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v7
 TEST_BINS += $(TEST_BUILD_DIR)/test-run
 TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
@@ -228,6 +229,14 @@ $(TEST_BUILD_DIR)/test-plugin-v5-discon: tests/unit/test-plugin.c \
 		tests/unit/test-plugin.c plugin/etrace-plugin.c -pthread \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
+$(TEST_BUILD_DIR)/test-plugin-v6-discon: tests/unit/test-plugin.c \
+		plugin/etrace-plugin.c tests/plugin/qemu-plugin.h etrace-format.h \
+		| $(TEST_BUILD_DIR)
+	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=6 \
+		-DHAVE_QEMU_PLUGIN_VCPU_DISCON_CB -I. -Itests/plugin \
+		tests/unit/test-plugin.c plugin/etrace-plugin.c -pthread \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
+
 $(TEST_BUILD_DIR)/test-plugin-v7: tests/unit/test-plugin.c plugin/etrace-plugin.c \
 		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=7 \
@@ -274,6 +283,7 @@ check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-plugin
 	$(TEST_BUILD_DIR)/test-plugin-v1
 	$(TEST_BUILD_DIR)/test-plugin-v5-discon
+	$(TEST_BUILD_DIR)/test-plugin-v6-discon
 	$(TEST_BUILD_DIR)/test-plugin-v7
 	$(TEST_BUILD_DIR)/test-run
 	$(PYTEST) -q
