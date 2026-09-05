@@ -129,6 +129,13 @@ $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.etrace --cov
 To create coverage lcov style info:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --trace-output none
 
+By default, LCOV function hits represent entry into retained ELF symbols. To
+count execution of inlined source bodies as function hits, use:
+
+$ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --function-hit-policy source --trace-output none
+
+See `docs/coverage-model.md` for the exact semantics and known limitations.
+
 Lcov info files need to be furthered processed by lcov tools, in this case
 genhtml to create beautiful html reports.
 
