@@ -1,5 +1,14 @@
 # Assembly coverage review remediation plan
 
+## Status
+
+Implemented and validated against the retained Xen trace on 2026-09-05. The
+checked result is stored in
+[`tests/fixtures/xen-assembly-validation.json`](../tests/fixtures/xen-assembly-validation.json),
+and [`tests/xen_assembly_validation.py`](../tests/xen_assembly_validation.py)
+rechecks the report-level invariants without storing the multi-gigabyte trace
+in this repository.
+
 ## Goal
 
 Make LCOV line and function coverage for assembly code complete enough to be
@@ -178,8 +187,11 @@ When an end-sequence row is received:
 
 1. close the preceding normal row's interval at the end-sequence address;
 2. do not create a location for the end-sequence row itself;
-3. clear the current filename, line, discriminator, and sequence state;
-4. require the next sequence to establish its own source context.
+3. reset the pending address, line, and discriminator state without discarding
+   `dwarfdump`'s current filename, because the tool may omit a repeated `uri:`
+   on the next sequence;
+4. clear the filename when a new `.debug_line` unit begins and require that
+   unit's first usable row to establish its source context.
 
 Reject malformed decreasing or overflowing intervals with a diagnostic. An
 address reset after an end marker is valid and starts a new sequence.
@@ -298,7 +310,7 @@ so each retained symbol records:
 
 ```text
 ELF symbol type
-binding and visibility
+binding
 containing executable section
 explicit versus inferred size
 source-attribution confidence
@@ -357,7 +369,7 @@ Record the tool versions and ELF hash in the generated summary. Treat changed
 compiler or linker output as a new fixture baseline rather than silently
 updating expected totals.
 
-## Proposed bisectable commit sequence
+## Bisectable commit sequence
 
 Each commit should build and pass all tests, use a short imperative subject and
 body, and include Edgar's `Signed-off-by`.
@@ -369,32 +381,38 @@ body, and include Edgar's `Signed-off-by`.
    Separate textual row parsing and sequence state from symbol attachment.
 3. `syms: Ignore DWARF end sequences`
    Close intervals at `ET` rows without assigning those rows to code.
-4. `lcov: Find function body locations`
+4. `syms: Preserve DWARF file context`
+   Reset address state at each sequence while following `dwarfdump`'s elision
+   of repeated file names inside one compilation unit.
+5. `lcov: Find function body locations`
    Scan forward for the first eligible declaration location in each sized
    symbol.
-5. `lcov: Stabilize line hit aggregation`
+6. `lcov: Stabilize line hit aggregation`
    Prevent instruction width and aliased locations from inflating line counts.
-6. `syms: Map DWARF line intervals`
+7. `syms: Map DWARF line intervals`
    Apply normal row intervals across every overlapping sized symbol.
-7. `coverage: Index executable ELF ranges`
+8. `coverage: Index executable ELF ranges`
    Add BFD-backed executable sections and address-indexed execution coverage.
-8. `lcov: Emit symbol-independent lines`
+9. `lcov: Emit symbol-independent lines`
    Build line records from executable DWARF intervals rather than symbol-owned
    line maps.
-9. `syms: Classify assembly symbols`
+10. `syms: Classify assembly symbols`
    Retain ELF type, section, size provenance, and omission diagnostics.
-10. `lcov: Complete assembly function inventory`
+11. `lcov: Complete assembly function inventory`
     Emit every defensibly mapped sized or bounded function and report the rest.
-11. `tests: Validate Xen assembly coverage`
+12. `lcov: Merge duplicate function names`
+    Emit one LCOV function per source-file/name pair with deterministic line
+    and hit aggregation.
+13. `tests: Validate Xen assembly coverage`
     Re-run the retained audit and check the summarized invariants.
-12. `docs: Define assembly coverage semantics`
+14. `docs: Define assembly coverage semantics`
     Document line intervals, function inference, macro attribution, and known
     limits.
 
-The first corrective release point is after commit 4: it removes false
+The first corrective release point is after commit 5: it removes false
 end-sequence attribution and recovers functions with leading unmapped bytes.
-The first complete line-coverage release point is after commit 8. Function
-inventory claims should wait for commit 11's Xen validation.
+The first complete line-coverage release point is after commit 9. Function
+inventory claims should wait for commit 13's Xen validation.
 
 ## Explicit non-goals
 

@@ -179,6 +179,16 @@ count execution of inlined source bodies as function hits, use:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --function-hit-policy source --trace-output none
 
 See `docs/coverage-model.md` for the exact semantics and known limitations.
+See `docs/assembly-coverage.md` for DWARF line intervals, assembly function
+selection, and machine-readable function inventory output.
+
+Add `--coverage-inventory` when generating LCOV to record why each retained
+text symbol is emitted, inferred, deduplicated, or omitted:
+
+$ qemu-etrace ... \
+    --coverage-format lcov \
+    --coverage-output coverage.info \
+    --coverage-inventory functions.jsonl
 
 Lcov info files need to be furthered processed by lcov tools, in this case
 genhtml to create beautiful html reports.

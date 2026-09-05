@@ -34,6 +34,16 @@ line records. Its tests verify byte-precise line and function coverage for
 short and unaligned translation blocks, as well as the textual ETrace coverage
 output.
 
+The x86 assembly-attribution fixture covers adjacent DWARF line sequences,
+leading bytes without source rows, repeated line mappings, macro-generated
+functions, zero-sized labels and functions, and linker-discarded executable
+sections. It also verifies JSON Lines function-inventory diagnostics.
+
+`tests/xen_assembly_validation.py` validates a regenerated report from the
+retained Xen x86 audit. The multi-gigabyte trace is intentionally not part of
+the normal test suite; its checked summary is stored in
+`tests/fixtures/xen-assembly-validation.json`.
+
 Run only the Python integration tests after building `qemu-etrace` with:
 
 ```sh

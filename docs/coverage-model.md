@@ -4,6 +4,10 @@ qemu-etrace derives coverage from executed machine-code address ranges and
 debug information. This differs from compiler-instrumented GCOV coverage, so
 the metrics must be interpreted separately.
 
+Assembly line-sequence handling, zero-sized labels, inferred function bounds,
+and function inventory diagnostics are described in
+[Assembly coverage semantics](assembly-coverage.md).
+
 Loader-selected runtime addresses can be normalized with `--address-map`
 before applying this model. See [Runtime address maps](address-maps.md).
 
