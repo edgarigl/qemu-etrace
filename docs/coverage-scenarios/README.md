@@ -13,6 +13,7 @@ non-obvious relationships. Each scenario should include:
 Current scenarios:
 
 - [Inlined body with a dead symbol](inlined-body-with-dead-symbol.md)
+- [Shared epilogue in an inline range](shared-epilogue-inline-range.md)
 - [Early physical execution](early-physical-address.md)
 - [Partial translation-block execution](partial-tb-execution.md)
 - [Variable-length instructions](variable-length-instructions.md)

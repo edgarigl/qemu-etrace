@@ -21,6 +21,12 @@ These results describe different events:
 
 Inlining can make the second true while the first remains false.
 
+DWARF can also keep an inline range active over a shared return or epilogue
+block that is reachable without entering the inline function. Treating any
+executed address in that range as proof of entry creates a false positive. The
+source policy therefore requires execution of the inline instance's
+`DW_AT_entry_pc`, with `DW_AT_low_pc` as a conservative fallback.
+
 ## Expected policy results
 
 | Policy | Retained symbol entered | Inline body executed | Function hit |
@@ -29,7 +35,13 @@ Inlining can make the second true while the first remains false.
 | `source` | No | Yes | Yes |
 
 The regression fixture is `tests/fixtures/inline-function.c`, exercised by
-`tests/test_function_coverage.py`.
+`tests/test_function_coverage.py`. It checks both execution of the inline entry
+and a synthetic jump directly into a later inline-attributed address.
+
+When several retained local symbols describe the same source function, LCOV
+emission deduplicates them by normalized source path, declaration line, and
+function name. Their hit counts are combined using the maximum rather than a
+sum.
 
 ## Safety interpretation
 

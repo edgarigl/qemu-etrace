@@ -109,6 +109,31 @@ normally; an abruptly terminated QEMU process may leave a truncated gzip
 stream. The `out=` option accepts a regular file or a pre-created FIFO. UNIX
 socket output remains available through the Xilinx QEMU ETrace implementation.
 
+Runtime address mapping
+-----------------------
+Use a repeatable `--address-map` option when code executes at a loader-selected
+runtime address before reaching its linked ELF virtual address:
+
+$ qemu-etrace \
+    --trace /tmp/elog.gz \
+    --elf xen-syms.debug \
+    --address-map 0x1d600000:0xffff82d040000000:0x6b1198 \
+    --coverage-format lcov \
+    --coverage-output coverage.info \
+    --trace-output none
+
+Each value is hexadecimal and describes `runtime-start:linked-start:size`.
+Mappings use half-open ranges, may be repeated, and must not contain conflicting
+runtime overlaps. Execution ranges crossing a mapping boundary are split before
+coverage is recorded. Addresses outside the configured mappings are unchanged.
+
+Address maps work with regular files, gzip files, standard input, and UNIX
+sockets because they are supplied before trace processing starts. The stored
+trace remains unchanged. Decoded output shows both runtime and linked addresses
+when normalization occurs.
+
+See `docs/address-maps.md` for detailed semantics and examples.
+
 The Xilinx QEMU fork can instead use its built-in ETrace options.
 `-etrace-flags exec` enables execution tracing, `-d nochain` disables direct TB
 jumps so all executed code is traced, and `-accel tcg,thread=single` disables

@@ -4,6 +4,9 @@ qemu-etrace derives coverage from executed machine-code address ranges and
 debug information. This differs from compiler-instrumented GCOV coverage, so
 the metrics must be interpreted separately.
 
+Loader-selected runtime addresses can be normalized with `--address-map`
+before applying this model. See [Runtime address maps](address-maps.md).
+
 ## Line coverage
 
 An instrumented source line is hit when an executed address bucket maps to the
@@ -20,17 +23,18 @@ those counters.
 first address bucket of its retained ELF symbol executes. This answers whether
 the out-of-line machine-code function was entered.
 
-`--function-hit-policy=source` runs `addr2line -i` over executed addresses and
-attributes each address to every function in its inline stack. It reports the
-maximum observed address count as `FNDA` for each matching retained ELF
-function. This answers whether code originating from that source function was
-executed, including an inlined instance.
+`--function-hit-policy=source` reads inline-instance entry PCs from DWARF and
+uses `addr2line -i` to attribute executed entries to every function in their
+inline stacks. It reports the maximum observed instance-entry count as `FNDA`
+for each matching retained ELF function. This answers whether an out-of-line or
+inline instance of that source function was entered.
 
 The source count is a hit-oriented approximation, not an exact call count. The
 maximum prevents every instruction in one invocation from being added as a
 separate call. Functions with no retained ELF symbol are not currently added to
 the function denominator, even when an inline-only instance is visible in
-DWARF.
+DWARF. Inline instances without `DW_AT_entry_pc` use `DW_AT_low_pc`; instances
+without either attribute are ignored conservatively.
 
 Generate separate reports when both facts matter:
 
