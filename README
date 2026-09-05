@@ -95,6 +95,21 @@ The plugin records execution callbacks for chained translation blocks, so
 currently records TB ranges with a zero duration, which supports coverage but
 does not provide time-based profiling.
 
+Execution tracing defaults to `exec=tb`, which emits one range when a
+translation block starts. This is fast, but a synchronous exception can leave
+the block before its translated end. Use `exec=insn` to emit one exact range
+for every instruction callback when exception-sensitive coverage is more
+important than tracing overhead:
+
+$ qemu-system-aarch64 ... \
+    -accel tcg \
+    -plugin /usr/local/lib/qemu-etrace/plugins/5/libqemu-etrace.so,out=/tmp/elog,exec=insn \
+    -kernel vmlinux
+
+Instruction callbacks establish dispatch, not architectural retirement. An
+instruction that raises an exception might not complete and, on some exception
+paths, might not be visible through the normal instruction callback.
+
 Add `compress=gzip` to compress the trace while QEMU runs. Compression level 1
 is the default and levels from 0 through 9 can be selected with `level=`:
 

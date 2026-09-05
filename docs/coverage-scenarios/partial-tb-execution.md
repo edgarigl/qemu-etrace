@@ -14,6 +14,16 @@ can leave the block early.
 
 ## Expected handling
 
-Use TB-level tracing for normal coverage because of its lower overhead. Use a
-future instruction-level plugin mode for exception-sensitive investigations,
-and label TB-derived line coverage as conservative.
+Use `exec=tb` when lower overhead is more important and label its line coverage
+as optimistic around synchronous exceptions. Use the QEMU plugin's
+`exec=insn` mode for exception-sensitive investigations:
+
+```sh
+qemu-system-aarch64 ... \
+    -plugin libqemu-etrace.so,out=/tmp/elog,exec=insn
+```
+
+Instruction mode emits one exact half-open range for every instruction callback
+that QEMU delivers. It establishes dispatch rather than architectural
+retirement: the faulting instruction might not complete, and QEMU may omit its
+normal instruction callback on some exception paths.

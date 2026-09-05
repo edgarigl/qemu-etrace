@@ -53,14 +53,38 @@ qemu-etrace ... --function-hit-policy source --coverage-output source.info
 The distinction should remain visible in safety analysis. A source-body hit
 does not prove that the retained out-of-line symbol was entered.
 
+## Plugin execution modes
+
+The upstream QEMU plugin supports two execution modes:
+
+- `exec=tb` is the default. A callback at translation-block entry emits the
+  complete translated range. This minimizes callback and trace volume, but it
+  can over-report the tail of a TB after a synchronous exception.
+- `exec=insn` registers a callback for every translated instruction and emits
+  its exact half-open `[pc, pc + size)` range. Instructions after a synchronous
+  exception do not produce callbacks, so they are not marked as covered.
+
+Instruction callbacks prove that QEMU dispatched an instruction, not that the
+architecture retired it. A faulting instruction may have produced its callback
+without completing. QEMU also documents exception paths on which the faulting
+instruction is not observable through the general instruction callback. The
+metric is therefore dispatched-instruction coverage, not retirement coverage.
+
+Both modes use ordinary `TYPE_EXEC` records, so trace readers and coverage
+reports require no format change. `exec=insn` increases callback count and trace
+volume substantially and is intended as the correctness reference for future
+optimized precise tracing.
+
 ## Known sources of disagreement
 
 - Inline functions and compiler-generated clones can execute without entering
   the corresponding retained symbol.
 - Early boot code can execute at temporary physical addresses while ELF and
   DWARF data describe final virtual addresses.
-- A synchronous exception can terminate a QEMU translation block before its
-  final instruction, while TB-level tracing records the complete range.
+- In `exec=tb`, a synchronous exception can terminate a QEMU translation block
+  before its final instruction while the trace records the complete range.
+- In `exec=insn`, a faulting instruction can be dispatched without retiring or
+  can be absent from the normal instruction callback on some exception paths.
 - Several source locations can share one address, particularly around inline
   call sites, macros, and adjacent line-table sequences.
 
