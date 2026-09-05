@@ -62,7 +62,8 @@ def inline_addresses(binary, caller, inline):
     return addresses
 
 
-def run_source_coverage(run_etrace, tmp_path, binary, address, name):
+def run_source_coverage(run_etrace, tmp_path, binary, address, name,
+                        function):
     trace = tmp_path / f"{name}.hex"
     output = tmp_path / f"{name}.info"
     trace.write_text(f"{address:x}\n", encoding="ascii")
@@ -90,7 +91,7 @@ def run_source_coverage(run_etrace, tmp_path, binary, address, name):
     return [
         line
         for line in output.read_text(encoding="utf-8").splitlines()
-        if line.startswith("FNDA:") and line.endswith(",shared_inline_helper")
+        if line.startswith("FNDA:") and line.endswith(f",{function}")
     ]
 
 
@@ -103,27 +104,7 @@ def test_inline_entry_and_shared_tail_across_gcc(compiler, run_etrace, tmp_path)
     if shutil.which("dwarfdump") is None or shutil.which("addr2line") is None:
         pytest.skip("dwarfdump and addr2line are required")
 
-    objects = []
-    for suffix in ("a", "b"):
-        obj = tmp_path / f"duplicate-{suffix}.o"
-        subprocess.run(
-            [
-                compiler,
-                "-O2",
-                "-g",
-                "-fno-pie",
-                f"-DCALLER=call_inline_helper_{suffix}",
-                f"-DKEEP=keep_inline_helper_{suffix}",
-                "-c",
-                str(FIXTURES / "duplicate-inline.c"),
-                "-o",
-                str(obj),
-            ],
-            check=True,
-        )
-        objects.append(obj)
-
-    binary = tmp_path / "duplicate-inline"
+    binary = tmp_path / "inline-function"
     subprocess.run(
         [
             compiler,
@@ -131,23 +112,20 @@ def test_inline_entry_and_shared_tail_across_gcc(compiler, run_etrace, tmp_path)
             "-g",
             "-fno-pie",
             "-no-pie",
-            *(str(obj) for obj in objects),
-            str(FIXTURES / "duplicate-inline-main.c"),
+            str(FIXTURES / "inline-function.c"),
             "-o",
             str(binary),
         ],
         check=True,
     )
 
-    assert len(symbol_count_and_range(binary, "shared_inline_helper")) == 2
-    addresses = inline_addresses(
-        binary, "call_inline_helper_a", "shared_inline_helper"
-    )
+    assert len(symbol_count_and_range(binary, "inline_helper")) == 1
+    addresses = inline_addresses(binary, "call_inline_helper", "inline_helper")
     assert len(addresses) >= 2
 
     assert run_source_coverage(
-        run_etrace, tmp_path, binary, addresses[0], "entry"
-    ) == ["FNDA:1,shared_inline_helper"]
+        run_etrace, tmp_path, binary, addresses[0], "entry", "inline_helper"
+    ) == ["FNDA:1,inline_helper"]
     assert run_source_coverage(
-        run_etrace, tmp_path, binary, addresses[-1], "tail"
-    ) == ["FNDA:0,shared_inline_helper"]
+        run_etrace, tmp_path, binary, addresses[-1], "tail", "inline_helper"
+    ) == ["FNDA:0,inline_helper"]

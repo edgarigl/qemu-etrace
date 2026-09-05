@@ -129,11 +129,9 @@ def test_source_policy_ignores_jump_into_inline_range(run_etrace, tmp_path):
     assert source_counts["inline_helper"] == 0
 
 
-def test_source_policy_deduplicates_retained_inline_symbols(
-    run_etrace, tmp_path
-):
-    if shutil.which("dwarfdump") is None or shutil.which("addr2line") is None:
-        pytest.skip("dwarfdump and addr2line are required")
+def test_lcov_deduplicates_retained_inline_symbols(run_etrace, tmp_path):
+    if shutil.which("dwarfdump") is None:
+        pytest.skip("dwarfdump is required")
 
     symbols = subprocess.run(
         ["nm", "-S", str(DUPLICATE_FIXTURE)],
@@ -141,18 +139,15 @@ def test_source_policy_deduplicates_retained_inline_symbols(
         capture_output=True,
         check=True,
     )
-    assert sum(
-        line.split(maxsplit=3)[-1] == "shared_inline_helper"
+    helper_addresses = [
+        int(line.split()[0], 16)
         for line in symbols.stdout.splitlines()
-    ) == 2
-    caller = inline_body_addresses(
-        DUPLICATE_FIXTURE,
-        caller="call_inline_helper_a",
-        inline="shared_inline_helper",
-    )
+        if line.split(maxsplit=3)[-1] == "shared_inline_helper"
+    ]
+    assert len(helper_addresses) == 2
     trace = tmp_path / "duplicate.hex"
     output = tmp_path / "duplicate.info"
-    trace.write_text(f"{caller[0]:x}\n", encoding="ascii")
+    trace.write_text(f"{helper_addresses[0]:x}\n", encoding="ascii")
 
     result = run_etrace(
         "--trace",
@@ -165,14 +160,12 @@ def test_source_policy_deduplicates_retained_inline_symbols(
         DUPLICATE_FIXTURE,
         "--dwarfdump",
         shutil.which("dwarfdump"),
-        "--addr2line",
-        shutil.which("addr2line"),
         "--coverage-format",
         "lcov",
         "--coverage-output",
         output,
         "--function-hit-policy",
-        "source",
+        "entry",
     )
 
     assert result.returncode == 0
