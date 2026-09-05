@@ -111,6 +111,7 @@ def test_assembly_fixture_symbol_shapes(assembly_fixture):
     assert symbols["macro_thunk_one"][1] > 0
     assert symbols["macro_thunk_two"][1] > 0
     assert symbols["macro_thunk_three"][1] > 0
+    assert symbols["repeated_line"][1] > 0
     assert symbols["zero_sized_entry"][1] in (None, 0)
     assert "discarded_function" not in symbols
 
@@ -140,6 +141,7 @@ def test_assembly_fixture_line_sequence_shapes(assembly_fixture):
     ]
     assert macro_starts == sorted(macro_starts)
     assert any(address == 0 and line == 60 for address, line, _ in rows)
+    assert len([address for address, line, _ in rows if line == 70]) == 2
 
 
 def parse_lcov(path):
@@ -215,3 +217,39 @@ def test_function_declaration_uses_first_body_row(
 
     assert source_b["functions"]["boundary_target"] == 20
     assert source_b["function_hits"]["boundary_target"] == 1
+
+
+def test_line_hits_use_maximum_address_count(run_etrace, tmp_path, assembly_fixture):
+    symbols = nm_symbols(assembly_fixture)
+    start, size, _ = symbols["repeated_line"]
+    rows = [address for address, line, _ in line_rows(assembly_fixture) if line == 70]
+    assert len(rows) == 2
+
+    trace = tmp_path / "repeated-line.etrace"
+    output = tmp_path / "repeated-line.info"
+    trace.write_bytes(
+        etrace_arch(guest_bits=64)
+        + etrace_exec64(start=rows[0], end=rows[0] + 1)
+        + etrace_exec64(start=rows[1], end=rows[1] + 1)
+        + etrace_exec64(start=rows[1], end=rows[1] + 1)
+    )
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        assembly_fixture,
+        "--dwarfdump",
+        shutil.which("dwarfdump"),
+        "--coverage-format",
+        "lcov",
+        "--coverage-output",
+        output,
+    )
+    assert result.returncode == 0, result.stderr
+    source_b = source_record(parse_lcov(output), "assembly-boundary-b.S")
+
+    assert start <= rows[0] < start + size
+    assert start <= rows[1] < start + size
+    assert source_b["lines"][70] == 2

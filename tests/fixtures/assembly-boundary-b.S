@@ -22,6 +22,16 @@ boundary_target:
 	DEFINE_THUNK macro_thunk_two
 	DEFINE_THUNK macro_thunk_three
 
+	.globl	repeated_line
+	.type	repeated_line, @function
+repeated_line:
+	.loc	1 70 0 discriminator 1
+	nop
+	.loc	1 70 0 discriminator 2
+	nop
+	ret
+	.size	repeated_line, .-repeated_line
+
 	.globl	zero_sized_entry
 zero_sized_entry:
 	.loc	1 40 0

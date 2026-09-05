@@ -805,7 +805,7 @@ static void gcov_process_sym(struct sym *s, FILE *fp)
 			Some unknown entries come with ??:0  */
 			if (l > 0) {
 				if (v > f->lines[l - 1])
-					f->lines[l - 1] += v;
+					f->lines[l - 1] = v;
 				f->instr_lines[l - 1] = true;
 			}
 
