@@ -375,6 +375,12 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			filename = row.filename;
 			row.filename = NULL;
 		}
+		if (row.end_sequence) {
+			free(filename);
+			filename = NULL;
+			dwarf_line_row_clear(&row);
+			continue;
+		}
 		if (!filename) {
 			dwarf_line_row_clear(&row);
 			continue;

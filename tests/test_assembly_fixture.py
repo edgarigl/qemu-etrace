@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from tests.trace_builder import etrace_arch, etrace_exec64
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_A = ROOT / "tests" / "fixtures" / "assembly-boundary-a.S"
@@ -138,3 +140,63 @@ def test_assembly_fixture_line_sequence_shapes(assembly_fixture):
     ]
     assert macro_starts == sorted(macro_starts)
     assert any(address == 0 and line == 60 for address, line, _ in rows)
+
+
+def parse_lcov(path):
+    records = {}
+    current = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("SF:"):
+            current = {"functions": [], "lines": {}}
+            records[line[3:]] = current
+        elif line.startswith("FN:"):
+            _, name = line[3:].split(",", 1)
+            current["functions"].append(name)
+        elif line.startswith("DA:"):
+            number, count = line[3:].split(",", 1)
+            current["lines"][int(number)] = int(count)
+    return records
+
+
+def source_record(records, suffix):
+    matches = [record for name, record in records.items() if name.endswith(suffix)]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def run_lcov(run_etrace, tmp_path, assembly_fixture, start, end):
+    trace = tmp_path / "assembly.etrace"
+    output = tmp_path / "assembly.info"
+    trace.write_bytes(
+        etrace_arch(guest_bits=64) + etrace_exec64(start=start, end=end)
+    )
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        assembly_fixture,
+        "--dwarfdump",
+        shutil.which("dwarfdump"),
+        "--coverage-format",
+        "lcov",
+        "--coverage-output",
+        output,
+    )
+    assert result.returncode == 0, result.stderr
+    return parse_lcov(output)
+
+
+def test_end_sequence_does_not_map_next_function(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    start, size, _ = symbols["boundary_target"]
+    records = run_lcov(run_etrace, tmp_path, assembly_fixture, start, start + size)
+    source_a = source_record(records, "assembly-boundary-a.S")
+    source_b = source_record(records, "assembly-boundary-b.S")
+
+    assert source_a["lines"][12] == 0
+    assert "boundary_target" not in source_a["functions"]
+    assert source_b["lines"][20] > 0
