@@ -12,21 +12,23 @@
 struct qemu_plugin_insn {
 	uint64_t vaddr;
 	size_t size;
+	qemu_plugin_vcpu_udata_cb_t exec_cb;
+	void *exec_data;
 };
 
 struct qemu_plugin_tb {
 	uint64_t vaddr;
 	struct qemu_plugin_insn *insns;
 	size_t n_insns;
+	qemu_plugin_vcpu_udata_cb_t exec_cb;
+	void *exec_data;
 };
 
 static qemu_plugin_vcpu_tb_trans_cb_t trans_cb;
-static qemu_plugin_vcpu_udata_cb_t exec_cb;
 static qemu_plugin_udata_cb_t exit_cb;
 #if QEMU_PLUGIN_VERSION >= 7
 static void *trans_data;
 #endif
-static void *exec_data;
 static void *exit_data;
 
 extern int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
@@ -51,8 +53,16 @@ void qemu_plugin_register_vcpu_tb_exec_cb(
 	struct qemu_plugin_tb *tb, qemu_plugin_vcpu_udata_cb_t cb,
 	enum qemu_plugin_cb_flags flags, void *userdata)
 {
-	exec_cb = cb;
-	exec_data = userdata;
+	tb->exec_cb = cb;
+	tb->exec_data = userdata;
+}
+
+void qemu_plugin_register_vcpu_insn_exec_cb(
+	struct qemu_plugin_insn *insn, qemu_plugin_vcpu_udata_cb_t cb,
+	enum qemu_plugin_cb_flags flags, void *userdata)
+{
+	insn->exec_cb = cb;
+	insn->exec_data = userdata;
 }
 
 void qemu_plugin_register_atexit_cb(qemu_plugin_id_t id,
@@ -87,6 +97,83 @@ uint64_t qemu_plugin_insn_vaddr(const struct qemu_plugin_insn *insn)
 size_t qemu_plugin_insn_size(const struct qemu_plugin_insn *insn)
 {
 	return insn->size;
+}
+
+static void translate_tb(struct qemu_plugin_tb *tb)
+{
+#if QEMU_PLUGIN_VERSION >= 7
+	trans_cb(tb, trans_data);
+#else
+	trans_cb(1, tb);
+#endif
+}
+
+static void execute_tb_prefix(struct qemu_plugin_tb *tb,
+			      unsigned int cpu_index, size_t n_insns)
+{
+	size_t i;
+
+	g_assert_cmpuint(n_insns, <=, tb->n_insns);
+	if (tb->exec_cb)
+		tb->exec_cb(cpu_index, tb->exec_data);
+	for (i = 0; i < n_insns; i++) {
+		struct qemu_plugin_insn *insn = &tb->insns[i];
+
+		if (insn->exec_cb)
+			insn->exec_cb(cpu_index, insn->exec_data);
+	}
+}
+
+static void finish_plugin(void)
+{
+#if QEMU_PLUGIN_VERSION >= 7
+	exit_cb(exit_data);
+#else
+	exit_cb(1, exit_data);
+#endif
+}
+
+struct callback_observation {
+	unsigned int calls;
+	unsigned int cpu_index;
+};
+
+static void observe_instruction(unsigned int cpu_index, void *userdata)
+{
+	struct callback_observation *observation = userdata;
+
+	observation->calls++;
+	observation->cpu_index = cpu_index;
+}
+
+static void test_instruction_callback_model(void)
+{
+	struct callback_observation observations[3] = { 0 };
+	struct qemu_plugin_insn insns[] = {
+		{ .vaddr = 0x1000, .size = 2 },
+		{ .vaddr = 0x1002, .size = 4 },
+		{ .vaddr = 0x1006, .size = 3 },
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x1000,
+		.insns = insns,
+		.n_insns = G_N_ELEMENTS(insns),
+	};
+	size_t i;
+
+	for (i = 0; i < G_N_ELEMENTS(insns); i++) {
+		qemu_plugin_register_vcpu_insn_exec_cb(
+			&insns[i], observe_instruction, QEMU_PLUGIN_CB_NO_REGS,
+			&observations[i]);
+	}
+
+	execute_tb_prefix(&tb, 7, 2);
+
+	g_assert_cmpuint(observations[0].calls, ==, 1);
+	g_assert_cmpuint(observations[0].cpu_index, ==, 7);
+	g_assert_cmpuint(observations[1].calls, ==, 1);
+	g_assert_cmpuint(observations[1].cpu_index, ==, 7);
+	g_assert_cmpuint(observations[2].calls, ==, 0);
 }
 
 static void read_data(const uint8_t **cursor, void *value, size_t size)
@@ -132,18 +219,10 @@ static void test_execution_trace(void)
 	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
 	g_assert_nonnull(trans_cb);
 	g_assert_nonnull(exit_cb);
-#if QEMU_PLUGIN_VERSION >= 7
-	trans_cb(&tb, trans_data);
-#else
-	trans_cb(1, &tb);
-#endif
-	g_assert_nonnull(exec_cb);
-	exec_cb(3, exec_data);
-#if QEMU_PLUGIN_VERSION >= 7
-	exit_cb(exit_data);
-#else
-	exit_cb(1, exit_data);
-#endif
+	translate_tb(&tb);
+	g_assert_nonnull(tb.exec_cb);
+	execute_tb_prefix(&tb, 3, tb.n_insns);
+	finish_plugin();
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
@@ -209,17 +288,9 @@ static void test_32bit_execution_trace(void)
 	arg = g_strdup_printf("out=%s", path);
 
 	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
-#if QEMU_PLUGIN_VERSION >= 7
-	trans_cb(&tb, trans_data);
-#else
-	trans_cb(1, &tb);
-#endif
-	exec_cb(2, exec_data);
-#if QEMU_PLUGIN_VERSION >= 7
-	exit_cb(exit_data);
-#else
-	exit_cb(1, exit_data);
-#endif
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 2, tb.n_insns);
+	finish_plugin();
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
@@ -275,17 +346,9 @@ static void test_gzip_execution_trace(void)
 	args[2] = "level=1";
 
 	g_assert_cmpint(qemu_plugin_install(1, &info, 3, args), ==, 0);
-#if QEMU_PLUGIN_VERSION >= 7
-	trans_cb(&tb, trans_data);
-#else
-	trans_cb(1, &tb);
-#endif
-	exec_cb(4, exec_data);
-#if QEMU_PLUGIN_VERSION >= 7
-	exit_cb(exit_data);
-#else
-	exit_cb(1, exit_data);
-#endif
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 4, tb.n_insns);
+	finish_plugin();
 
 	input = gzopen(path, "rb");
 	g_assert_nonnull(input);
@@ -315,6 +378,8 @@ static void test_gzip_execution_trace(void)
 int main(int argc, char **argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/plugin/instruction-callback-model",
+			test_instruction_callback_model);
 	g_test_add_func("/plugin/execution-trace", test_execution_trace);
 	g_test_add_func("/plugin/32bit-execution-trace",
 			test_32bit_execution_trace);

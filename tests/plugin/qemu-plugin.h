@@ -56,6 +56,9 @@ void qemu_plugin_register_vcpu_tb_trans_cb(
 void qemu_plugin_register_vcpu_tb_exec_cb(
 	struct qemu_plugin_tb *tb, qemu_plugin_vcpu_udata_cb_t cb,
 	enum qemu_plugin_cb_flags flags, void *userdata);
+void qemu_plugin_register_vcpu_insn_exec_cb(
+	struct qemu_plugin_insn *insn, qemu_plugin_vcpu_udata_cb_t cb,
+	enum qemu_plugin_cb_flags flags, void *userdata);
 void qemu_plugin_register_atexit_cb(qemu_plugin_id_t id,
 				     qemu_plugin_udata_cb_t cb,
 				     void *userdata);
