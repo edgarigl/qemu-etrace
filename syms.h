@@ -43,6 +43,12 @@ struct sym_linemap {
 	struct sym_src_loc locs[0];
 };
 
+struct sym_source_range {
+	uint64_t start;
+	uint64_t end;
+	struct sym_src_loc *locs;
+};
+
 struct sym
 {
 	struct sym *next;
@@ -75,5 +81,10 @@ void sym_build_source_coverage(void **rootp, const char *addr2line,
 			       const char *dwarfdump, const char *elf);
 void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 			uint32_t time);
+void sym_update_image_cov(void **store, uint64_t start, uint64_t end);
+uint64_t sym_image_coverage_at(void **store, uint64_t addr);
+bool sym_address_is_executable(void **store, uint64_t addr);
+const struct sym_source_range *sym_get_source_ranges(void **store,
+						      size_t *nr_ranges);
 
 #endif

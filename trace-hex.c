@@ -122,6 +122,9 @@ static void ht_process_exec(struct hextracer *t,
 		}
 		if (cov_fmt == NONE)
 			continue;
+		if (t->tr.sym_tree && *t->tr.sym_tree)
+			sym_update_image_cov(t->tr.sym_tree,
+				segment.linked_start, segment.linked_end);
 		if (!sym)
 			sym = sym_get_unknown(t->tr.sym_tree);
 

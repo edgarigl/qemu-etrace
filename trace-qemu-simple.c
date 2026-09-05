@@ -202,6 +202,9 @@ static bool handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r,
 			sym = sym_get_unknown(t->tr.sym_tree);
 
 		if (t->cov_fmt != NONE) {
+			if (t->tr.sym_tree && *t->tr.sym_tree)
+				sym_update_image_cov(t->tr.sym_tree,
+					segment.linked_start, segment.linked_end);
 			if (sym) {
 				uint64_t addr = segment.linked_start;
 				while (sym && addr < segment.linked_end) {

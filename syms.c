@@ -36,12 +36,15 @@
 
 #include <search.h>
 
+#include "config.h"
 #include "filename.h"
 #include "dwarf-lines.h"
 #include "util.h"
 #include "safeio.h"
 #include "syms.h"
 #include "run.h"
+
+#include "bfd.h"
 
 #define LOOKUP_STATS 0
 #if LOOKUP_STATS
@@ -67,12 +70,15 @@ struct sym_store {
 	unsigned int hits_l[3];
 	unsigned int misses;
 
-	struct source_range {
+	struct sym_source_range *line_ranges;
+	size_t nr_line_ranges;
+
+	struct image_section {
 		uint64_t start;
 		uint64_t end;
-		struct sym_src_loc *locs;
-	} *line_ranges;
-	size_t nr_line_ranges;
+		struct sym_coverage *cov;
+	} *sections;
+	size_t nr_sections;
 };
 
 void sym_show(const char *prefix, const struct sym *s)
@@ -287,7 +293,7 @@ static void free_source_locs(struct sym_src_loc *loc)
 static void add_line_range(struct sym_store *ss, uint64_t start, uint64_t end,
 			   struct sym_src_loc *locs)
 {
-	struct source_range *range;
+	struct sym_source_range *range;
 
 	if (end <= start) {
 		free_source_locs(locs);
@@ -303,8 +309,8 @@ static void add_line_range(struct sym_store *ss, uint64_t start, uint64_t end,
 
 static int line_range_compare(const void *a, const void *b)
 {
-	const struct source_range *ra = a;
-	const struct source_range *rb = b;
+	const struct sym_source_range *ra = a;
+	const struct sym_source_range *rb = b;
 
 	if (ra->start < rb->start)
 		return -1;
@@ -351,7 +357,7 @@ static void materialize_line_ranges(struct sym_store *ss)
 	qsort(ss->line_ranges, ss->nr_line_ranges,
 	      sizeof(*ss->line_ranges), line_range_compare);
 	for (i = 0; i < ss->nr_line_ranges; i++) {
-		struct source_range *range = &ss->line_ranges[i];
+		struct sym_source_range *range = &ss->line_ranges[i];
 		size_t high = ss->nr_stored;
 		size_t low = 0;
 		size_t j;
@@ -396,6 +402,169 @@ static void materialize_line_ranges(struct sym_store *ss)
 							   source);
 			}
 		}
+	}
+}
+
+const struct sym_source_range *sym_get_source_ranges(void **store,
+						      size_t *nr_ranges)
+{
+	struct sym_store *ss = *store;
+
+	if (!ss) {
+		*nr_ranges = 0;
+		return NULL;
+	}
+	*nr_ranges = ss->nr_line_ranges;
+	return ss->line_ranges;
+}
+
+static int image_section_compare(const void *a, const void *b)
+{
+	const struct image_section *sa = a;
+	const struct image_section *sb = b;
+
+	if (sa->start < sb->start)
+		return -1;
+	if (sa->start > sb->start)
+		return 1;
+	return 0;
+}
+
+static struct image_section *image_section_find(struct sym_store *ss,
+						 uint64_t addr)
+{
+	size_t high = ss->nr_sections;
+	size_t low = 0;
+
+	while (low < high) {
+		size_t mid = low + (high - low) / 2;
+		struct image_section *section = &ss->sections[mid];
+
+		if (addr < section->start) {
+			high = mid;
+		} else if (addr >= section->end) {
+			low = mid + 1;
+		} else {
+			return section;
+		}
+	}
+	return NULL;
+}
+
+static uint64_t next_image_section_start(struct sym_store *ss, uint64_t addr)
+{
+	size_t high = ss->nr_sections;
+	size_t low = 0;
+
+	while (low < high) {
+		size_t mid = low + (high - low) / 2;
+
+		if (ss->sections[mid].start <= addr)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	return low < ss->nr_sections ? ss->sections[low].start : UINT64_MAX;
+}
+
+static void read_executable_sections(struct sym_store *ss, const char *elf)
+{
+	asection *section;
+	bfd *abfd;
+	size_t i;
+
+	abfd = bfd_openr(elf, NULL);
+	if (!abfd || !bfd_check_format(abfd, bfd_object)) {
+		fprintf(stderr, "Unable to read ELF sections from %s: %s\n",
+			elf, bfd_errmsg(bfd_get_error()));
+		exit(EXIT_FAILURE);
+	}
+
+	for (section = abfd->sections; section; section = section->next) {
+		flagword flags = bfd_section_flags(section);
+		bfd_size_type size = bfd_section_size(section);
+		bfd_vma start = bfd_section_vma(section);
+		struct image_section *image;
+
+		if (!(flags & SEC_ALLOC) || !(flags & SEC_CODE) || !size)
+			continue;
+		if (size > UINT64_MAX - start) {
+			fprintf(stderr, "Executable ELF section address overflow\n");
+			exit(EXIT_FAILURE);
+		}
+		ss->sections = safe_realloc(ss->sections,
+			(sizeof(*ss->sections) * (ss->nr_sections + 1)));
+		image = &ss->sections[ss->nr_sections++];
+		image->start = start;
+		image->end = start + size;
+		image->cov = NULL;
+	}
+	bfd_close(abfd);
+
+	qsort(ss->sections, ss->nr_sections, sizeof(*ss->sections),
+	      image_section_compare);
+	for (i = 1; i < ss->nr_sections; i++) {
+		if (ss->sections[i].start < ss->sections[i - 1].end) {
+			fprintf(stderr, "Overlapping executable ELF sections\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+}
+
+bool sym_address_is_executable(void **store, uint64_t addr)
+{
+	struct sym_store *ss = *store;
+
+	return ss && image_section_find(ss, addr);
+}
+
+uint64_t sym_image_coverage_at(void **store, uint64_t addr)
+{
+	struct sym_store *ss = *store;
+	struct image_section *section;
+
+	if (!ss)
+		return 0;
+	section = image_section_find(ss, addr);
+	if (!section || !section->cov)
+		return 0;
+	return section->cov->counter[addr - section->start];
+}
+
+void sym_update_image_cov(void **store, uint64_t start, uint64_t end)
+{
+	struct sym_store *ss = *store;
+	uint64_t cursor = start;
+
+	if (!ss || end <= start)
+		return;
+	while (cursor < end) {
+		struct image_section *section = image_section_find(ss, cursor);
+		uint64_t section_end;
+		uint64_t i;
+
+		if (!section) {
+			uint64_t next = next_image_section_start(ss, cursor);
+
+			if (next == UINT64_MAX || next >= end)
+				break;
+			cursor = next;
+			continue;
+		}
+		if (!section->cov) {
+			uint64_t size = section->end - section->start;
+
+			if (size > SIZE_MAX / sizeof(section->cov->counter[0])) {
+				fprintf(stderr, "Executable ELF section is too large\n");
+				exit(EXIT_FAILURE);
+			}
+			section->cov = safe_mallocz(
+				size * sizeof(section->cov->counter[0]));
+		}
+		section_end = end < section->end ? end : section->end;
+		for (i = cursor; i < section_end; i++)
+			section->cov->counter[i - section->start]++;
+		cursor = section_end;
 	}
 }
 
@@ -951,5 +1120,6 @@ void sym_read_from_elf(void **rootp, char *nm, char *elf)
 		exit(1);
 	}
 	process_nm_output(rootp, output, fsize);
+	read_executable_sections(*rootp, elf);
 	close(fd_tmp);
 }

@@ -450,8 +450,11 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 					"Cannot do coverage on a trace with "
 					"TB chaining.\n"
 					"Rerun QEMU with -no-tb-chain.\n");
-				exit(EXIT_FAILURE);
-                        }
+					exit(EXIT_FAILURE);
+			        }
+			if (t->tr.sym_tree && *t->tr.sym_tree)
+				sym_update_image_cov(t->tr.sym_tree,
+					segment.linked_start, segment.linked_end);
 			if (!sym)
 				sym = sym_get_unknown(t->tr.sym_tree);
 
