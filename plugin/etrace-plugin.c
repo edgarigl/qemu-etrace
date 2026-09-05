@@ -56,6 +56,11 @@ struct etrace_exec_packet32 {
 	struct etrace_entry32 entry;
 } __attribute__ ((packed));
 
+struct etrace_discontinuity_packet {
+	struct etrace_hdr hdr;
+	struct etrace_discontinuity data;
+} __attribute__ ((packed));
+
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct tb_data *translated_blocks;
 static int trace_fd = -1;
@@ -205,6 +210,55 @@ static void vcpu_exec(unsigned int cpu_index, void *userdata)
 	else
 		write_packet(&packet, sizeof(packet));
 }
+
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+#if QEMU_PLUGIN_VERSION >= 7
+static void vcpu_discontinuity(unsigned int cpu_index,
+			       enum qemu_plugin_discon_type type,
+			       uint64_t from_pc, uint64_t to_pc,
+			       void *userdata)
+#else
+static void vcpu_discontinuity(qemu_plugin_id_t id, unsigned int cpu_index,
+			       enum qemu_plugin_discon_type type,
+			       uint64_t from_pc, uint64_t to_pc)
+#endif
+{
+	struct etrace_discontinuity_packet packet = {
+		.hdr = {
+			.type = TYPE_DISCONTINUITY,
+			.unit_id = (uint16_t)cpu_index,
+			.len = sizeof(packet.data),
+		},
+		.data = {
+			.from_pc = from_pc,
+			.to_pc = to_pc,
+		},
+	};
+
+#if QEMU_PLUGIN_VERSION >= 7
+	(void) userdata;
+#else
+	(void) id;
+#endif
+
+	switch (type) {
+	case QEMU_PLUGIN_DISCON_INTERRUPT:
+		packet.data.kind = ETRACE_DISCONTINUITY_INTERRUPT;
+		break;
+	case QEMU_PLUGIN_DISCON_EXCEPTION:
+		packet.data.kind = ETRACE_DISCONTINUITY_EXCEPTION;
+		break;
+	case QEMU_PLUGIN_DISCON_HOSTCALL:
+		packet.data.kind = ETRACE_DISCONTINUITY_HOST_CALL;
+		break;
+	default:
+		packet.data.kind = ETRACE_DISCONTINUITY_UNKNOWN;
+		break;
+	}
+
+	write_packet(&packet, sizeof(packet));
+}
+#endif
 
 static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 				     size_t last_size)
@@ -398,6 +452,15 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans, NULL);
 #else
 	qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
+#endif
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+#if QEMU_PLUGIN_VERSION >= 7
+	qemu_plugin_register_vcpu_discon_cb(id, QEMU_PLUGIN_DISCON_ALL,
+					   vcpu_discontinuity, NULL);
+#else
+	qemu_plugin_register_vcpu_discon_cb(id, QEMU_PLUGIN_DISCON_ALL,
+					   vcpu_discontinuity);
+#endif
 #endif
 	qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
 	return 0;

@@ -110,6 +110,11 @@ Instruction callbacks establish dispatch, not architectural retirement. An
 instruction that raises an exception might not complete and, on some exception
 paths, might not be visible through the normal instruction callback.
 
+When the selected QEMU header provides discontinuity callbacks, the plugin also
+records interrupts, exceptions, and host calls with their source and destination
+PCs. The build detects this declaration directly because QEMU 10.1 and 10.2 use
+the same plugin API version even though only 10.2 provides the callback.
+
 Add `compress=gzip` to compress the trace while QEMU runs. Compression level 1
 is the default and levels from 0 through 9 can be selected with `level=`:
 

@@ -316,6 +316,84 @@ static void assert_exec64(const uint8_t **cursor, unsigned int cpu_index,
 	g_assert_cmpuint(entry.end, ==, end);
 }
 
+#ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
+static void assert_discontinuity(const uint8_t **cursor,
+				 unsigned int cpu_index, uint32_t kind,
+				 uint64_t from_pc, uint64_t to_pc)
+{
+	struct etrace_discontinuity discontinuity;
+	struct etrace_hdr hdr;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_DISCONTINUITY);
+	g_assert_cmpuint(hdr.unit_id, ==, cpu_index);
+	g_assert_cmpuint(hdr.len, ==, sizeof(discontinuity));
+	read_data(cursor, &discontinuity, sizeof(discontinuity));
+	g_assert_cmpuint(discontinuity.from_pc, ==, from_pc);
+	g_assert_cmpuint(discontinuity.to_pc, ==, to_pc);
+	g_assert_cmpuint(discontinuity.kind, ==, kind);
+	g_assert_cmpuint(discontinuity.flags, ==, 0);
+}
+
+static void test_discontinuity_trace(void)
+{
+	struct qemu_plugin_insn insns[] = {
+		{ .vaddr = 0x1000, .size = 4 },
+		{ .vaddr = 0x1004, .size = 4 },
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x1000,
+		.insns = insns,
+		.n_insns = G_N_ELEMENTS(insns),
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[2];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "exec=insn";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, args), ==, 0);
+	g_assert_nonnull(discon_cb);
+	g_assert_cmpint(discon_types, ==, QEMU_PLUGIN_DISCON_ALL);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 3, 1);
+	emit_discontinuity(3, QEMU_PLUGIN_DISCON_EXCEPTION, 0x1004, 0x2000);
+	emit_discontinuity(3, QEMU_PLUGIN_DISCON_INTERRUPT, 0x2004, 0x3000);
+	emit_discontinuity(3, QEMU_PLUGIN_DISCON_HOSTCALL, 0x3004, 0x3008);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	skip_trace_headers(&cursor);
+	assert_exec64(&cursor, 3, 0x1000, 0x1004);
+	assert_discontinuity(&cursor, 3, ETRACE_DISCONTINUITY_EXCEPTION,
+			     0x1004, 0x2000);
+	assert_discontinuity(&cursor, 3, ETRACE_DISCONTINUITY_INTERRUPT,
+			     0x2004, 0x3000);
+	assert_discontinuity(&cursor, 3, ETRACE_DISCONTINUITY_HOST_CALL,
+			     0x3004, 0x3008);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+#endif
+
 static void test_instruction_execution_trace(void)
 {
 	struct qemu_plugin_insn insns[] = {
@@ -660,6 +738,8 @@ int main(int argc, char **argv)
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 	g_test_add_func("/plugin/discontinuity-callback-model",
 			test_discontinuity_callback_model);
+	g_test_add_func("/plugin/discontinuity-trace",
+			test_discontinuity_trace);
 #endif
 	g_test_add_func("/plugin/instruction-execution-trace",
 			test_instruction_execution_trace);
