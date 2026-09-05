@@ -28,6 +28,11 @@ own include and library paths, and external programs are found through `PATH`.
 The staged-install test also runs the installed `etrace-view` launcher against
 its installed Python modules.
 
+The x86 variable-length fixture uses explicit instruction encodings and DWARF
+line records. Byte-precise coverage expectations are strict expected failures
+until the four-byte coverage representation is replaced; an unexpected pass
+therefore requires removing the marker as part of the corresponding fix.
+
 Run only the Python integration tests after building `qemu-etrace` with:
 
 ```sh
