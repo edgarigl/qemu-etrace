@@ -544,7 +544,7 @@ void gcov_process_func(struct gcov_ctx *ctx)
 	rec->counts.counts = safe_mallocz(num_counts * sizeof rec->counts.counts[0]);
 
 	if (s && s->linemap && s->cov) {
-		for (off = 0; off < (s->size / 4); off++) {
+		for (off = 0; off < s->size; off++) {
 			struct sym_src_loc *loc;
 
 			loc = &s->linemap->locs[off];
@@ -779,10 +779,10 @@ static void gcov_process_sym(struct sym *s, FILE *fp)
 
 	f_src = gcov_find_file_no_fail(s->src_filename, s->maxline + 1);
 
-	for (addr = s->addr; addr < end; addr += 4) {
+	for (addr = s->addr; addr < end; addr++) {
 		uint64_t v = 0;
 		struct sym_src_loc *loc;
-		uint64_t off = (addr - s->addr) / 4;
+		uint64_t off = addr - s->addr;
 
 		if (s->cov_ent)
 			v = s->cov_ent->counter[off];

@@ -231,14 +231,14 @@ struct sym *sym_lookup_by_addr(void **store, uint64_t addr)
 
 static void sym_alloc_cov(struct sym *sym)
 {
-	unsigned int nr_entries = sym->size / 4 + 1;
+	size_t nr_entries = sym->size + 1;
 	sym->cov = safe_mallocz(sizeof sym->cov->counter[0] * nr_entries);
 	sym->cov_ent = safe_mallocz(sizeof sym->cov_ent->counter[0] * nr_entries);
 }
 
 static void sym_alloc_linemap(struct sym *sym)
 {
-	unsigned int nr_entries = sym->size / 4 + 1;
+	size_t nr_entries = sym->size + 1;
 	sym->linemap = safe_mallocz(sizeof sym->linemap->locs[0] * nr_entries);
 }
 
@@ -247,9 +247,10 @@ void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 {
 	int64_t start_offset = start - sym->addr;
 	int64_t len = end - start;
-	unsigned int i, pos;
-	unsigned int time_per_word;
-	unsigned int words, accounted = 0;
+	uint64_t i, pos;
+	unsigned int time_per_entry;
+	uint64_t entries;
+	unsigned int accounted = 0;
 
 	/* Is this the unknown sym ?? */
 	if (sym->namelen == 0)
@@ -263,44 +264,44 @@ void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 	if (!sym->cov)
 		sym_alloc_cov(sym);
 
-	words = len / 4;
-	if (words == 0)
+	entries = len;
+	if (entries == 0)
 		return;
 
-	time_per_word = time / (words == 0 ? 1 : words);
-	if (time_per_word == 0 && time != 0)
-		time_per_word = 1;
+	time_per_entry = time / entries;
+	if (time_per_entry == 0 && time != 0)
+		time_per_entry = 1;
 
-	pos = start_offset / 4;
+	pos = start_offset;
 
 	/* First update the nr entries.  */
 	i = 0;
 	do {
 		sym->cov_ent->counter[pos + i] += 1;
 		i++;
-	} while (i < words);
+	} while (i < entries);
 
 repass:
 	i = 0;
 	do {
-		sym->cov->counter[pos + i] += time_per_word;
-		accounted += time_per_word;
+		sym->cov->counter[pos + i] += time_per_entry;
+		accounted += time_per_entry;
 		if (accounted >= time) {
 			break;
 		}
 		i++;
-	} while (i < words);
+	} while (i < entries);
 
 	/* FIXME: spread the granularity error evenly.  */
 	if (accounted < time) {
-		time_per_word = 1;
+		time_per_entry = 1;
 		goto repass;
 	}
 
 #if 0
 	if (accounted != time)
-		printf("WRONG COVERAGE accounted=%lu time=%lu tpw=%u words=%u\n",
-			accounted, time, time_per_word, words);
+		printf("WRONG COVERAGE accounted=%lu time=%lu tpe=%u entries=%lu\n",
+			accounted, time, time_per_entry, entries);
 #endif
 	assert (accounted == time);
 }
@@ -422,7 +423,6 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			}
 
 			offset = addr - symp->addr;
-			offset /= 4;
 
 			loc = &symp->linemap->locs[offset];
 			if (loc->filename) {
@@ -474,8 +474,8 @@ static uint64_t sym_coverage_at(struct sym_store *ss, uint64_t addr)
 
 	if (!sym || !sym->cov_ent)
 		return 0;
-	offset = (addr - sym->addr) / 4;
-	if (offset > sym->size / 4)
+	offset = addr - sym->addr;
+	if (offset >= sym->size)
 		return 0;
 	return sym->cov_ent->counter[offset];
 }

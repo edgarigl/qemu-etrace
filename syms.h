@@ -22,7 +22,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* A 64bit counter per 32bit word in the sym.  */
+/* A 64-bit counter for each byte in the symbol.  */
 struct sym_coverage {
 	uint64_t counter[0];
 };

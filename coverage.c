@@ -46,21 +46,20 @@
 static void coverage_dump_sym(struct sym *s, FILE *fp)
 {
 	uint64_t addr, end = s->addr + s->size;
-	unsigned int i =  0;
 	uint64_t accounted = 0;
 
-	for (addr = s->addr; addr < end; addr += 4) {
+	for (addr = s->addr; addr < end; addr++) {
+		uint64_t offset = addr - s->addr;
 		uint64_t v = 0;
 
 		if (s->cov)
-			v = s->cov->counter[i];
+			v = s->cov->counter[offset];
 		accounted += v;
 
 		fprintf(fp, "%" PRId64 " %" PRIx64 " %s %s:%d\n",
 			v, addr, s->name,
 			s->src_filename ? s->src_filename : "unknown",
-			s->linemap ? s->linemap->locs[i].linenr : 0);
-		i++;
+			s->linemap ? s->linemap->locs[offset].linenr : 0);
 	}
 }
 

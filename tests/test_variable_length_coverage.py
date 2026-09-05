@@ -10,10 +10,6 @@ from tests.trace_builder import etrace_arch, etrace_exec64
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "tests/fixtures/x86-variable-length.s"
-BYTE_COVERAGE_BUG = pytest.mark.xfail(
-    strict=True,
-    reason="coverage is stored in four-byte buckets",
-)
 
 
 def find_x86_compiler():
@@ -145,6 +141,46 @@ def run_lcov(run_etrace, tmp_path, fixture, start, end, policy="entry"):
     return lines, functions
 
 
+def test_etrace_coverage_uses_byte_addresses(run_etrace, tmp_path, x86_fixture):
+    start = x86_fixture.start
+    trace = tmp_path / "byte-coverage.etrace"
+    output = tmp_path / "byte-coverage.txt"
+    trace.write_bytes(
+        etrace_arch(guest_bits=64)
+        + etrace_exec64(duration=2, start=start + 1, end=start + 3)
+    )
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        x86_fixture.binary,
+        "--nm",
+        x86_fixture.tools["nm"],
+        "--dwarfdump",
+        x86_fixture.tools["dwarfdump"],
+        "--coverage-format",
+        "etrace",
+        "--coverage-output",
+        output,
+    )
+    assert result.returncode == 0, result.stderr
+
+    coverage = {
+        int(fields[1], 16): int(fields[0])
+        for line in output.read_text(encoding="utf-8").splitlines()
+        if len(fields := line.split()) >= 3
+        and fields[2] == "x86_coverage_fixture"
+    }
+    assert len(coverage) == 11
+    assert coverage[start] == 0
+    assert coverage[start + 1] == 1
+    assert coverage[start + 2] == 1
+    assert coverage[start + 3] == 0
+
+
 def test_x86_fixture_has_variable_length_instructions(x86_fixture):
     assert x86_fixture.instructions == [
         (0, 1),
@@ -156,7 +192,6 @@ def test_x86_fixture_has_variable_length_instructions(x86_fixture):
     ]
 
 
-@BYTE_COVERAGE_BUG
 def test_two_byte_tb_marks_its_source_line(run_etrace, tmp_path, x86_fixture):
     start = x86_fixture.start
 
@@ -165,7 +200,6 @@ def test_two_byte_tb_marks_its_source_line(run_etrace, tmp_path, x86_fixture):
     assert lines[11] == 1
 
 
-@BYTE_COVERAGE_BUG
 def test_unaligned_tb_does_not_hit_preceding_lines(
     run_etrace, tmp_path, x86_fixture
 ):
@@ -178,7 +212,6 @@ def test_unaligned_tb_does_not_hit_preceding_lines(
     assert lines[12] == 1
 
 
-@BYTE_COVERAGE_BUG
 def test_unaligned_tb_marks_its_final_instruction(run_etrace, tmp_path, x86_fixture):
     start = x86_fixture.start
 
@@ -190,7 +223,6 @@ def test_unaligned_tb_marks_its_final_instruction(run_etrace, tmp_path, x86_fixt
     assert lines[13] == 1
 
 
-@BYTE_COVERAGE_BUG
 @pytest.mark.parametrize("policy", ["entry", "source"])
 def test_short_unaligned_function_entry_is_counted(
     run_etrace, tmp_path, x86_fixture, policy
