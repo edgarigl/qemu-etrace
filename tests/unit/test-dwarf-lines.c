@@ -32,6 +32,17 @@ static void test_end_sequence_row(void)
 	dwarf_line_row_clear(&row);
 }
 
+static void test_zero_line_end_sequence_row(void)
+{
+	struct dwarf_line_row row;
+
+	g_assert_true(dwarf_line_parse(
+		"0x00401007  [   0, 0] ET\n", &row));
+	g_assert_cmpuint(row.line, ==, 0);
+	g_assert_true(row.end_sequence);
+	dwarf_line_row_clear(&row);
+}
+
 static void test_reject_non_row(void)
 {
 	struct dwarf_line_row row;
@@ -45,6 +56,8 @@ int main(int argc, char **argv)
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/dwarf-lines/normal-row", test_normal_row);
 	g_test_add_func("/dwarf-lines/end-sequence-row", test_end_sequence_row);
+	g_test_add_func("/dwarf-lines/zero-line-end-sequence-row",
+			test_zero_line_end_sequence_row);
 	g_test_add_func("/dwarf-lines/reject-non-row", test_reject_non_row);
 	return g_test_run();
 }

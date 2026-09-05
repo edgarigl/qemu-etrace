@@ -70,4 +70,12 @@ discarded_function:
 	ret
 	.size	discarded_function, .-discarded_function
 
+	.section .text.tail,"ax",@progbits
+	.globl	same_cu_restart
+	.type	same_cu_restart, @function
+same_cu_restart:
+	.loc	1 80 0
+	ret
+	.size	same_cu_restart, .-same_cu_restart
+
 	.section .note.GNU-stack,"",@progbits

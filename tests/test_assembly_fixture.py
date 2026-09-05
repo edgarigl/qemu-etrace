@@ -118,6 +118,7 @@ def test_assembly_fixture_symbol_shapes(assembly_fixture):
     assert symbols["zero_sized_alias_one"][1] in (None, 0)
     assert symbols["zero_sized_alias_two"][1] in (None, 0)
     assert symbols["zero_sized_alias_one"][0] == symbols["zero_sized_alias_two"][0]
+    assert symbols["same_cu_restart"][1] > 0
     assert "discarded_function" not in symbols
 
 
@@ -147,6 +148,8 @@ def test_assembly_fixture_line_sequence_shapes(assembly_fixture):
     assert macro_starts == sorted(macro_starts)
     assert any(address == 0 and line == 60 for address, line, _ in rows)
     assert len([address for address, line, _ in rows if line == 70]) == 2
+    assert any(address == symbols["same_cu_restart"][0] and line == 80
+               for address, line, _ in rows)
 
 
 def parse_lcov(path):
@@ -352,3 +355,16 @@ def test_function_inventory_explains_assembly_symbols(
     assert records["zero_sized_alias_one"]["size_source"] == "none"
     assert records["zero_sized_alias_two"]["size_source"] == "none"
     assert "discarded_function" not in records
+
+
+def test_new_sequence_uses_compilation_unit_default_file(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    start, size, _ = symbols["same_cu_restart"]
+
+    records = run_lcov(run_etrace, tmp_path, assembly_fixture, start, start + size)
+    source_b = source_record(records, "assembly-boundary-b.S")
+
+    assert source_b["lines"][80] == 1
+    assert source_b["functions"]["same_cu_restart"] == 80

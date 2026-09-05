@@ -102,7 +102,7 @@ bool dwarf_line_parse(const char *text, struct dwarf_line_row *row)
 
 	errno = 0;
 	line = strtoul(s, &end, 10);
-	if (errno || end == s || line == 0 || line > UINT32_MAX)
+	if (errno || end == s || line > UINT32_MAX)
 		return false;
 	row->line = line;
 

@@ -777,6 +777,7 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 	int stdio[3] = {0, 1, 2};
 	int fdout_tmp;
 	struct sym_store *ss = *store;
+	char *default_filename = NULL;
 	char *filename = NULL;
 	int pipefd[2];
 	FILE *fp;
@@ -828,11 +829,23 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 		if (s == NULL) {
 			break;
 		}
+		if (!strncmp(s, ".debug_line:", strlen(".debug_line:"))) {
+			free_source_locs(pending.locs);
+			pending.locs = NULL;
+			pending.valid = false;
+			free(default_filename);
+			default_filename = NULL;
+			free(filename);
+			filename = NULL;
+			continue;
+		}
 		if (!dwarf_line_parse(s, &row))
 			continue;
 		if (row.filename) {
 			free(filename);
 			filename = filename_sanitize(row.filename);
+			if (!default_filename)
+				default_filename = strdup(filename);
 			free(row.filename);
 			row.filename = NULL;
 		}
@@ -845,7 +858,8 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			pending.locs = NULL;
 			pending.valid = false;
 			free(filename);
-			filename = NULL;
+			filename = default_filename
+				? strdup(default_filename) : NULL;
 			dwarf_line_row_clear(&row);
 			continue;
 		}
@@ -880,6 +894,7 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 	}
 
 	free_source_locs(pending.locs);
+	free(default_filename);
 	free(filename);
 	fclose(fp);
 	materialize_line_ranges(ss);
