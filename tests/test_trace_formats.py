@@ -1,4 +1,6 @@
 from tests.trace_builder import (
+    etrace_arch,
+    etrace_exec64,
     etrace_info,
     qemu_simple_header,
     qemu_simple_mapping,
@@ -62,6 +64,20 @@ def test_etrace_passthrough_preserves_bytes(run_etrace, tmp_path):
 
     assert result.returncode == 0
     assert output.read_bytes() == trace_data
+
+
+def test_etrace_preserves_short_unaligned_execution_range(run_etrace, tmp_path):
+    trace = tmp_path / "unaligned.etrace"
+    output = tmp_path / "unaligned.txt"
+    trace.write_bytes(
+        etrace_arch(guest_bits=64)
+        + etrace_exec64(start=0x1001, end=0x1003)
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", output)
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="ascii").splitlines()[-1] == "E0 1001 1003"
 
 
 def test_qemu_simple_header_and_mapping_are_accepted(run_etrace, tmp_path):
