@@ -14,6 +14,12 @@ struct qemu_plugin_insn {
 	size_t size;
 	qemu_plugin_vcpu_udata_cb_t exec_cb;
 	void *exec_data;
+#if QEMU_PLUGIN_VERSION >= 2
+	bool has_inline;
+	enum qemu_plugin_op inline_op;
+	qemu_plugin_u64 inline_entry;
+	uint64_t inline_imm;
+#endif
 };
 
 struct qemu_plugin_tb {
@@ -23,6 +29,13 @@ struct qemu_plugin_tb {
 	qemu_plugin_vcpu_udata_cb_t exec_cb;
 	void *exec_data;
 };
+
+#if QEMU_PLUGIN_VERSION >= 2
+struct qemu_plugin_scoreboard {
+	GArray *entries;
+	size_t element_size;
+};
+#endif
 
 static qemu_plugin_vcpu_tb_trans_cb_t trans_cb;
 static qemu_plugin_udata_cb_t exit_cb;
@@ -93,6 +106,58 @@ void qemu_plugin_register_vcpu_insn_exec_cb(
 	insn->exec_data = userdata;
 }
 
+#if QEMU_PLUGIN_VERSION >= 2
+void qemu_plugin_register_vcpu_insn_exec_inline_per_vcpu(
+	struct qemu_plugin_insn *insn, enum qemu_plugin_op op,
+	qemu_plugin_u64 entry, uint64_t imm)
+{
+	insn->has_inline = true;
+	insn->inline_op = op;
+	insn->inline_entry = entry;
+	insn->inline_imm = imm;
+}
+
+struct qemu_plugin_scoreboard *qemu_plugin_scoreboard_new(size_t element_size)
+{
+	struct qemu_plugin_scoreboard *score;
+
+	score = g_new(struct qemu_plugin_scoreboard, 1);
+	score->entries = g_array_new(false, true, element_size);
+	score->element_size = element_size;
+	return score;
+}
+
+void qemu_plugin_scoreboard_free(struct qemu_plugin_scoreboard *score)
+{
+	g_array_free(score->entries, true);
+	g_free(score);
+}
+
+void *qemu_plugin_scoreboard_find(struct qemu_plugin_scoreboard *score,
+				  unsigned int cpu_index)
+{
+	if (score->entries->len <= cpu_index)
+		g_array_set_size(score->entries, cpu_index + 1);
+	return (uint8_t *)score->entries->data + cpu_index * score->element_size;
+}
+
+uint64_t qemu_plugin_u64_get(qemu_plugin_u64 entry,
+			     unsigned int cpu_index)
+{
+	uint8_t *element = qemu_plugin_scoreboard_find(entry.score, cpu_index);
+
+	return *(uint64_t *)(element + entry.offset);
+}
+
+void qemu_plugin_u64_set(qemu_plugin_u64 entry, unsigned int cpu_index,
+			 uint64_t value)
+{
+	uint8_t *element = qemu_plugin_scoreboard_find(entry.score, cpu_index);
+
+	*(uint64_t *)(element + entry.offset) = value;
+}
+#endif
+
 void qemu_plugin_register_atexit_cb(qemu_plugin_id_t id,
 				     qemu_plugin_udata_cb_t cb,
 				     void *userdata)
@@ -147,6 +212,18 @@ static void execute_tb_prefix(struct qemu_plugin_tb *tb,
 	for (i = 0; i < n_insns; i++) {
 		struct qemu_plugin_insn *insn = &tb->insns[i];
 
+#if QEMU_PLUGIN_VERSION >= 2
+		if (insn->has_inline) {
+			uint64_t value = qemu_plugin_u64_get(insn->inline_entry,
+							 cpu_index);
+
+			if (insn->inline_op == QEMU_PLUGIN_INLINE_STORE_U64)
+				value = insn->inline_imm;
+			else
+				value += insn->inline_imm;
+			qemu_plugin_u64_set(insn->inline_entry, cpu_index, value);
+		}
+#endif
 		if (insn->exec_cb)
 			insn->exec_cb(cpu_index, insn->exec_data);
 	}
@@ -279,6 +356,42 @@ static void test_instruction_callback_model(void)
 	g_assert_cmpuint(observations[1].cpu_index, ==, 7);
 	g_assert_cmpuint(observations[2].calls, ==, 0);
 }
+
+#if QEMU_PLUGIN_VERSION >= 2
+struct scoreboard_entry {
+	uint64_t reached_last;
+};
+
+static void test_scoreboard_inline_store_model(void)
+{
+	struct qemu_plugin_insn insns[] = {
+		{ .vaddr = 0x1000, .size = 4 },
+		{ .vaddr = 0x1004, .size = 4 },
+		{ .vaddr = 0x1008, .size = 4 },
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x1000,
+		.insns = insns,
+		.n_insns = G_N_ELEMENTS(insns),
+	};
+	struct qemu_plugin_scoreboard *score;
+	qemu_plugin_u64 reached_last;
+
+	score = qemu_plugin_scoreboard_new(sizeof(struct scoreboard_entry));
+	reached_last = qemu_plugin_scoreboard_u64_in_struct(
+		score, struct scoreboard_entry, reached_last);
+	qemu_plugin_register_vcpu_insn_exec_inline_per_vcpu(
+		&insns[2], QEMU_PLUGIN_INLINE_STORE_U64, reached_last, 1);
+
+	execute_tb_prefix(&tb, 1, 2);
+	g_assert_cmpuint(qemu_plugin_u64_get(reached_last, 1), ==, 0);
+	execute_tb_prefix(&tb, 1, tb.n_insns);
+	g_assert_cmpuint(qemu_plugin_u64_get(reached_last, 1), ==, 1);
+	g_assert_cmpuint(qemu_plugin_u64_get(reached_last, 2), ==, 0);
+
+	qemu_plugin_scoreboard_free(score);
+}
+#endif
 
 static void read_data(const uint8_t **cursor, void *value, size_t size)
 {
@@ -735,6 +848,10 @@ int main(int argc, char **argv)
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/plugin/instruction-callback-model",
 			test_instruction_callback_model);
+#if QEMU_PLUGIN_VERSION >= 2
+	g_test_add_func("/plugin/scoreboard-inline-store-model",
+			test_scoreboard_inline_store_model);
+#endif
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 	g_test_add_func("/plugin/discontinuity-callback-model",
 			test_discontinuity_callback_model);
