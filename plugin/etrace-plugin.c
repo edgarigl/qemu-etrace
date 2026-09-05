@@ -29,6 +29,11 @@ struct tb_data {
 	uint64_t end;
 };
 
+enum exec_mode {
+	EXEC_MODE_TB,
+	EXEC_MODE_INSN,
+};
+
 struct etrace_info_packet {
 	struct etrace_hdr hdr;
 	struct etrace_info_data data;
@@ -59,6 +64,7 @@ static bool trace_failed;
 static uint8_t guest_address_bits;
 static int gzip_level = Z_BEST_SPEED;
 static bool gzip_output;
+static enum exec_mode exec_mode;
 
 static bool write_raw(const void *buf, size_t len)
 {
@@ -163,7 +169,7 @@ static bool write_headers(void)
 		&& write_output(&arch_packet, sizeof(arch_packet));
 }
 
-static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
+static void vcpu_exec(unsigned int cpu_index, void *userdata)
 {
 	const struct tb_data *tb = userdata;
 	uint16_t unit_id = (uint16_t)cpu_index;
@@ -200,6 +206,30 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
 		write_packet(&packet, sizeof(packet));
 }
 
+static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
+				     size_t last_size)
+{
+	struct tb_data *data;
+
+	data = calloc(1, sizeof(*data));
+	if (!data) {
+		fprintf(stderr, "qemu-etrace-plugin: unable to allocate execution data\n");
+		return NULL;
+	}
+	data->start = start;
+	if (last_size > UINT64_MAX - last_addr)
+		data->end = UINT64_MAX;
+	else
+		data->end = last_addr + last_size;
+
+	pthread_mutex_lock(&lock);
+	data->next = translated_blocks;
+	translated_blocks = data;
+	pthread_mutex_unlock(&lock);
+
+	return data;
+}
+
 #if QEMU_PLUGIN_VERSION >= 7
 static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 #else
@@ -208,9 +238,8 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 {
 	struct qemu_plugin_insn *last_insn;
 	struct tb_data *data;
-	uint64_t last_addr;
 	size_t n_insns;
-	size_t last_size;
+	size_t i;
 
 #if QEMU_PLUGIN_VERSION >= 7
 	(void) userdata;
@@ -222,27 +251,30 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 	if (n_insns == 0)
 		return;
 
-	last_insn = qemu_plugin_tb_get_insn(tb, n_insns - 1);
-	last_addr = qemu_plugin_insn_vaddr(last_insn);
-	last_size = qemu_plugin_insn_size(last_insn);
+	if (exec_mode == EXEC_MODE_INSN) {
+		for (i = 0; i < n_insns; i++) {
+			struct qemu_plugin_insn *insn;
 
-	data = calloc(1, sizeof(*data));
-	if (!data) {
-		fprintf(stderr, "qemu-etrace-plugin: unable to allocate TB data\n");
+			insn = qemu_plugin_tb_get_insn(tb, i);
+			data = new_exec_data(qemu_plugin_insn_vaddr(insn),
+					     qemu_plugin_insn_vaddr(insn),
+					     qemu_plugin_insn_size(insn));
+			if (!data)
+				continue;
+			qemu_plugin_register_vcpu_insn_exec_cb(
+				insn, vcpu_exec, QEMU_PLUGIN_CB_NO_REGS, data);
+		}
 		return;
 	}
-	data->start = qemu_plugin_tb_vaddr(tb);
-	if (last_size > UINT64_MAX - last_addr)
-		data->end = UINT64_MAX;
-	else
-		data->end = last_addr + last_size;
 
-	pthread_mutex_lock(&lock);
-	data->next = translated_blocks;
-	translated_blocks = data;
-	pthread_mutex_unlock(&lock);
+	last_insn = qemu_plugin_tb_get_insn(tb, n_insns - 1);
+	data = new_exec_data(qemu_plugin_tb_vaddr(tb),
+			     qemu_plugin_insn_vaddr(last_insn),
+			     qemu_plugin_insn_size(last_insn));
+	if (!data)
+		return;
 
-	qemu_plugin_register_vcpu_tb_exec_cb(tb, vcpu_tb_exec,
+	qemu_plugin_register_vcpu_tb_exec_cb(tb, vcpu_exec,
 					     QEMU_PLUGIN_CB_NO_REGS, data);
 }
 
@@ -294,9 +326,14 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	gzip_output = false;
 	gzip_level = Z_BEST_SPEED;
 	trace_failed = false;
+	exec_mode = EXEC_MODE_TB;
 	for (i = 0; i < argc; i++) {
 		if (!strncmp(argv[i], "out=", 4) && argv[i][4]) {
 			output = argv[i] + 4;
+		} else if (!strcmp(argv[i], "exec=tb")) {
+			exec_mode = EXEC_MODE_TB;
+		} else if (!strcmp(argv[i], "exec=insn")) {
+			exec_mode = EXEC_MODE_INSN;
 		} else if (!strcmp(argv[i], "compress=gzip")) {
 			gzip_output = true;
 		} else if (!strcmp(argv[i], "compress=none")) {

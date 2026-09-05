@@ -182,6 +182,179 @@ static void read_data(const uint8_t **cursor, void *value, size_t size)
 	*cursor += size;
 }
 
+static void skip_trace_headers(const uint8_t **cursor)
+{
+	struct etrace_hdr hdr;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_INFO);
+	*cursor += hdr.len;
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_ARCH);
+	*cursor += hdr.len;
+}
+
+static void assert_exec64(const uint8_t **cursor, unsigned int cpu_index,
+			  uint64_t start, uint64_t end)
+{
+	struct etrace_entry64 entry;
+	struct etrace_hdr hdr;
+	uint64_t start_time;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_EXEC);
+	g_assert_cmpuint(hdr.unit_id, ==, cpu_index);
+	read_data(cursor, &start_time, sizeof(start_time));
+	read_data(cursor, &entry, sizeof(entry));
+	g_assert_cmpuint(start_time, ==, 0);
+	g_assert_cmpuint(entry.duration, ==, 0);
+	g_assert_cmpuint(entry.start, ==, start);
+	g_assert_cmpuint(entry.end, ==, end);
+}
+
+static void test_instruction_execution_trace(void)
+{
+	struct qemu_plugin_insn insns[] = {
+		{ .vaddr = 0x1000, .size = 2 },
+		{ .vaddr = 0x1002, .size = 4 },
+		{ .vaddr = 0x1006, .size = 3 },
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x1000,
+		.insns = insns,
+		.n_insns = G_N_ELEMENTS(insns),
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[2];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "exec=insn";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, args), ==, 0);
+	translate_tb(&tb);
+	g_assert_null(tb.exec_cb);
+	g_assert_nonnull(insns[0].exec_cb);
+	g_assert_nonnull(insns[1].exec_cb);
+	g_assert_nonnull(insns[2].exec_cb);
+
+	/* Model an early exit after the first instruction, then a full TB. */
+	execute_tb_prefix(&tb, 5, 1);
+	execute_tb_prefix(&tb, 5, tb.n_insns);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	skip_trace_headers(&cursor);
+	assert_exec64(&cursor, 5, 0x1000, 0x1002);
+	assert_exec64(&cursor, 5, 0x1000, 0x1002);
+	assert_exec64(&cursor, 5, 0x1002, 0x1006);
+	assert_exec64(&cursor, 5, 0x1006, 0x1009);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
+static void write_instruction_trace(const char *path, bool gzip)
+{
+	struct qemu_plugin_insn insns[] = {
+		{ .vaddr = 0x4000, .size = 2 },
+		{ .vaddr = 0x4002, .size = 5 },
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x4000,
+		.insns = insns,
+		.n_insns = G_N_ELEMENTS(insns),
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[3];
+	int argc = 2;
+
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "exec=insn";
+	if (gzip) {
+		args[2] = "compress=gzip";
+		argc++;
+	}
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, argc, args), ==, 0);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 6, tb.n_insns);
+	finish_plugin();
+	g_free(args[0]);
+}
+
+static void test_instruction_gzip_equivalence(void)
+{
+	uint8_t gzip_contents[512];
+	char *raw_contents;
+	char *gzip_path = NULL;
+	char *raw_path = NULL;
+	gsize raw_length;
+	gzFile input;
+	int gzip_length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &raw_path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(raw_path);
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX.gz", &gzip_path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(gzip_path);
+
+	write_instruction_trace(raw_path, false);
+	write_instruction_trace(gzip_path, true);
+
+	g_assert_true(g_file_get_contents(raw_path, &raw_contents, &raw_length,
+					      NULL));
+	input = gzopen(gzip_path, "rb");
+	g_assert_nonnull(input);
+	gzip_length = gzread(input, gzip_contents, sizeof(gzip_contents));
+	g_assert_cmpint(gzip_length, >, 0);
+	g_assert_cmpint(gzclose(input), ==, Z_OK);
+	g_assert_cmpuint(raw_length, ==, gzip_length);
+	g_assert_cmpmem(raw_contents, raw_length, gzip_contents, gzip_length);
+
+	unlink(raw_path);
+	unlink(gzip_path);
+	g_free(raw_contents);
+	g_free(raw_path);
+	g_free(gzip_path);
+}
+
+static void test_invalid_exec_mode(void)
+{
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *arg = "exec=invalid";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, -1);
+}
+
 static void test_execution_trace(void)
 {
 	struct qemu_plugin_insn insns[] = {
@@ -380,6 +553,11 @@ int main(int argc, char **argv)
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/plugin/instruction-callback-model",
 			test_instruction_callback_model);
+	g_test_add_func("/plugin/instruction-execution-trace",
+			test_instruction_execution_trace);
+	g_test_add_func("/plugin/instruction-gzip-equivalence",
+			test_instruction_gzip_equivalence);
+	g_test_add_func("/plugin/invalid-exec-mode", test_invalid_exec_mode);
 	g_test_add_func("/plugin/execution-trace", test_execution_trace);
 	g_test_add_func("/plugin/32bit-execution-trace",
 			test_32bit_execution_trace);
