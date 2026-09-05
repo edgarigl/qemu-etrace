@@ -75,7 +75,11 @@ def function_records(output, name):
 def run_coverage(run_etrace, tmp_path, policy, address, *extra_args):
     trace = tmp_path / f"{policy}.hex"
     output = tmp_path / f"{policy}.info"
-    trace.write_text(f"{address:x}\n", encoding="ascii")
+    addresses = (address,) if isinstance(address, int) else address
+    trace.write_text(
+        "".join(f"{item:x}\n" for item in addresses),
+        encoding="ascii",
+    )
 
     result = run_etrace(
         "--trace",
@@ -127,6 +131,47 @@ def test_source_policy_ignores_jump_into_inline_range(run_etrace, tmp_path):
     source_counts = run_coverage(run_etrace, tmp_path, "source", addresses[-1])
 
     assert source_counts["inline_helper"] == 0
+
+
+@pytest.mark.parametrize(
+    ("out_of_line_executions", "inline_executions"),
+    [(2, 3), (4, 2)],
+)
+def test_source_policy_uses_maximum_function_entry_count(
+    run_etrace,
+    tmp_path,
+    out_of_line_executions,
+    inline_executions,
+):
+    if shutil.which("dwarfdump") is None or shutil.which("addr2line") is None:
+        pytest.skip("dwarfdump and addr2line are required")
+
+    out_of_line_entry, _ = symbol_range("inline_helper")
+    inline_entry = inline_body_addresses()[0]
+    addresses = (
+        [out_of_line_entry] * out_of_line_executions
+        + [inline_entry] * inline_executions
+    )
+
+    entry_counts = run_coverage(
+        run_etrace,
+        tmp_path,
+        "entry",
+        addresses,
+    )
+    source_counts = run_coverage(
+        run_etrace,
+        tmp_path,
+        "source",
+        addresses,
+    )
+
+    assert entry_counts["inline_helper"] == out_of_line_executions
+    assert source_counts["inline_helper"] == max(
+        out_of_line_executions,
+        inline_executions,
+    )
+    assert source_counts["inline_helper"] >= entry_counts["inline_helper"]
 
 
 def test_lcov_deduplicates_retained_inline_symbols(run_etrace, tmp_path):
