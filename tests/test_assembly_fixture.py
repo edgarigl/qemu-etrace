@@ -113,6 +113,7 @@ def test_assembly_fixture_symbol_shapes(assembly_fixture):
     assert symbols["macro_thunk_three"][1] > 0
     assert symbols["repeated_line"][1] > 0
     assert symbols["zero_sized_entry"][1] in (None, 0)
+    assert symbols["zero_sized_function"][1] in (None, 0)
     assert "discarded_function" not in symbols
 
 
@@ -285,4 +286,19 @@ def test_zero_sized_label_does_not_hide_line_coverage(
     assert source_b["lines"][40] > 0
     assert source_b["lines"][50] == 0
     assert 60 not in source_b["lines"]
+    assert "zero_sized_entry" not in source_b["functions"]
+
+
+def test_zero_sized_elf_function_uses_bounded_extent(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = nm_symbols(assembly_fixture)
+    start = symbols["zero_sized_function"][0]
+    end = symbols["after_zero_sized"][0]
+
+    records = run_lcov(run_etrace, tmp_path, assembly_fixture, start, end)
+    source_b = source_record(records, "assembly-boundary-b.S")
+
+    assert source_b["functions"]["zero_sized_function"] == 45
+    assert source_b["function_hits"]["zero_sized_function"] == 1
     assert "zero_sized_entry" not in source_b["functions"]

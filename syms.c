@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <string.h>
+#include <ctype.h>
 #include <assert.h>
 #include <errno.h>
 #include <unistd.h>
@@ -117,7 +118,8 @@ static inline int sym_find(const void *pa, const void *pb)
 {
 	uint64_t addr = *(uint64_t *) pa;
 	const struct sym *sb = pb;
-	uint64_t sb_end = sb->addr + sb->size;
+	uint64_t sb_end = sb->size > UINT64_MAX - sb->addr
+		? UINT64_MAX : sb->addr + sb->size;
 
 	if (addr < sb->addr)
 		return -1;
@@ -467,6 +469,103 @@ static uint64_t next_image_section_start(struct sym_store *ss, uint64_t addr)
 	return low < ss->nr_sections ? ss->sections[low].start : UINT64_MAX;
 }
 
+static struct sym *find_bfd_symbol(struct sym_store *ss, const char *name,
+				   uint64_t addr)
+{
+	void *store = ss;
+	struct sym *sym;
+	size_t high = ss->nr_stored;
+	size_t low = 0;
+	size_t first;
+	size_t count = 0;
+
+	if (name && *name) {
+		sym = sym_lookup_by_name(&store, name);
+		if (sym && sym->addr == addr)
+			return sym;
+	}
+
+	while (low < high) {
+		size_t mid = low + (high - low) / 2;
+
+		if (ss->allsyms[mid].addr < addr)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	first = low;
+	while (low < ss->nr_stored && ss->allsyms[low].addr == addr) {
+		sym = &ss->allsyms[low++];
+		if (name && !strcmp(sym->name, name))
+			return sym;
+		count++;
+	}
+	return count == 1 ? &ss->allsyms[first] : NULL;
+}
+
+static void read_bfd_symbol_table(struct sym_store *ss, bfd *abfd,
+				  bool dynamic)
+{
+	asymbol **symbols;
+	long storage;
+	long count;
+	long i;
+
+	storage = dynamic ? bfd_get_dynamic_symtab_upper_bound(abfd)
+		: bfd_get_symtab_upper_bound(abfd);
+	if (storage <= 0)
+		return;
+	symbols = safe_malloc(storage);
+	count = dynamic ? bfd_canonicalize_dynamic_symtab(abfd, symbols)
+		: bfd_canonicalize_symtab(abfd, symbols);
+	if (count < 0) {
+		fprintf(stderr, "Unable to read ELF symbols: %s\n",
+			bfd_errmsg(bfd_get_error()));
+		exit(EXIT_FAILURE);
+	}
+
+	for (i = 0; i < count; i++) {
+		asymbol *bfd_sym = symbols[i];
+		struct sym *sym;
+
+		if (!(bfd_sym->flags & BSF_FUNCTION))
+			continue;
+		sym = find_bfd_symbol(ss, bfd_asymbol_name(bfd_sym),
+				      bfd_asymbol_value(bfd_sym));
+		if (sym)
+			sym->flags |= SYM_F_FUNCTION;
+	}
+	free(symbols);
+}
+
+static void infer_function_sizes(struct sym_store *ss)
+{
+	size_t i;
+
+	for (i = 0; i < ss->nr_stored; i++) {
+		struct sym *sym = &ss->allsyms[i];
+		uint64_t end;
+		size_t j;
+
+		if (sym->size || !(sym->flags & SYM_F_FUNCTION)
+		    || !(sym->flags & SYM_F_EXECUTABLE))
+			continue;
+
+		end = sym->section_end;
+		for (j = 0; j < ss->nr_stored; j++) {
+			struct sym *next = &ss->allsyms[j];
+
+			if (next->addr > sym->addr && next->addr < end
+			    && next->section_start == sym->section_start)
+				end = next->addr;
+		}
+		if (end > sym->addr) {
+			sym->size = end - sym->addr;
+			sym->flags |= SYM_F_INFERRED_SIZE;
+		}
+	}
+}
+
 static void read_executable_sections(struct sym_store *ss, const char *elf)
 {
 	asection *section;
@@ -499,8 +598,6 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 		image->end = start + size;
 		image->cov = NULL;
 	}
-	bfd_close(abfd);
-
 	qsort(ss->sections, ss->nr_sections, sizeof(*ss->sections),
 	      image_section_compare);
 	for (i = 1; i < ss->nr_sections; i++) {
@@ -509,6 +606,28 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 			exit(EXIT_FAILURE);
 		}
 	}
+	for (i = 0; i < ss->nr_stored; i++) {
+		struct image_section *image;
+
+		image = image_section_find(ss, ss->allsyms[i].addr);
+		if (!image)
+			continue;
+		ss->allsyms[i].flags |= SYM_F_EXECUTABLE;
+		ss->allsyms[i].section_start = image->start;
+		ss->allsyms[i].section_end = image->end;
+	}
+	read_bfd_symbol_table(ss, abfd, false);
+	read_bfd_symbol_table(ss, abfd, true);
+	infer_function_sizes(ss);
+	for (i = 0; i < ss->nr_stored; i++) {
+		struct sym *sym = &ss->allsyms[i];
+		uint64_t end = sym->size > UINT64_MAX - sym->addr
+			? UINT64_MAX : sym->addr + sym->size;
+
+		if (end > ss->max)
+			ss->max = end;
+	}
+	bfd_close(abfd);
 }
 
 bool sym_address_is_executable(void **store, uint64_t addr)
@@ -1008,7 +1127,6 @@ void sym_build_source_coverage(void **store, const char *addr2line,
 static void process_nm_output(void **store, char *s, size_t len)
 {
 	struct sym_store *ss;
-	struct sym *sym = NULL;
 	char *end = s + len;
 	int i;
 
@@ -1017,54 +1135,85 @@ static void process_nm_output(void **store, char *s, size_t len)
 	ss->min = ~(0ULL);
 
 	fprintf(stderr, "Build symtab\n");
-	do {
+	while (s < end) {
+		struct sym parsed = { 0 };
+		char *line_end = memchr(s, '\n', end - s);
+		char *name;
 		char *next;
+		char *p = s;
+		bool have_size = false;
 		int type;
+		size_t name_len;
 
-		ss->allsyms = safe_realloc(ss->allsyms,
-					   sizeof *sym * (ss->nr_stored + 1));
-		sym = &ss->allsyms[ss->nr_stored];
-		memset(sym, 0, sizeof *sym);
-
-		sym->addr = strtoull(s, &next, 16);
-		if (sym->addr == ULLONG_MAX && errno == ERANGE)
-			goto fail;
-
-		/* Advance the space.  */
-		s = next + 1;
-		sym->size = strtoull(s, &next, 16);
-		if (sym->size == ULLONG_MAX && errno == ERANGE)
-			goto fail;
-
-		s = next + 1;
-		type = s[0];
-		s += 2;
-
-		i = 0;
-		while (s[0] != '\n') {
-			if (i < (sizeof sym->name - 2)) {
-				sym->name[i] = s[0];
-				i++;
-			}
-			s++;
+		if (!line_end)
+			line_end = end;
+		while (p < line_end && isspace((unsigned char)*p))
+			p++;
+		errno = 0;
+		parsed.addr = strtoull(p, &next, 16);
+		if (next == p) {
+			s = line_end < end ? line_end + 1 : end;
+			continue;
 		}
-		sym->name[i] = 0;
-		sym->namelen = i;
-		s++;
+		if (parsed.addr == ULLONG_MAX && errno == ERANGE)
+			goto fail;
+		p = next;
+		while (p < line_end && isspace((unsigned char)*p))
+			p++;
+
+		errno = 0;
+		parsed.size = strtoull(p, &next, 16);
+		if (next != p) {
+			if (parsed.size == ULLONG_MAX && errno == ERANGE)
+				goto fail;
+			have_size = true;
+			p = next;
+		}
+		while (p < line_end && isspace((unsigned char)*p))
+			p++;
+		if (p == line_end)
+			goto fail;
+		type = *p++;
+		while (p < line_end && isspace((unsigned char)*p))
+			p++;
+		name = p;
+		name_len = line_end - name;
+		if (name_len && name[name_len - 1] == '\r')
+			name_len--;
+		s = line_end < end ? line_end + 1 : end;
 
 		if (type != 'T' && type != 't'
 		    && type != 'W' && type != 'w')
 			continue;
 
-		assert(sym->namelen > 0);
-		ss->nr_stored++;
-		if (sym->addr < ss->min)
-			ss->min = sym->addr;
-		if ((sym->addr + sym->size) > ss->max)
-			ss->max = sym->addr + sym->size;
-	} while (s < end);
+		if (!name_len)
+			goto fail;
+		if (name_len > sizeof(parsed.name) - 1)
+			name_len = sizeof(parsed.name) - 1;
+		memcpy(parsed.name, name, name_len);
+		parsed.name[name_len] = '\0';
+		parsed.namelen = name_len;
+		if (have_size)
+			parsed.flags |= SYM_F_EXPLICIT_SIZE;
+		if (type == 't' || type == 'w')
+			parsed.flags |= SYM_F_LOCAL;
+		else
+			parsed.flags |= SYM_F_GLOBAL;
+		if (type == 'W' || type == 'w')
+			parsed.flags |= SYM_F_WEAK;
 
-	qsort(ss->allsyms, ss->nr_stored, sizeof *sym, sym_compare);
+		ss->allsyms = safe_realloc(ss->allsyms,
+			(sizeof(parsed) * (ss->nr_stored + 1)));
+		ss->allsyms[ss->nr_stored] = parsed;
+		ss->nr_stored++;
+		if (parsed.addr < ss->min)
+			ss->min = parsed.addr;
+		if (parsed.size <= UINT64_MAX - parsed.addr
+		    && parsed.addr + parsed.size > ss->max)
+			ss->max = parsed.addr + parsed.size;
+	}
+
+	qsort(ss->allsyms, ss->nr_stored, sizeof(ss->allsyms[0]), sym_compare);
 
 	/* Now we are done.  */
 	for (i = 0; i < ss->nr_stored; i++) {

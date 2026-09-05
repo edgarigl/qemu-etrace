@@ -31,6 +31,16 @@ enum loc_flags {
 	LOC_F_INLINED = (1 << 0),
 };
 
+enum sym_flags {
+	SYM_F_EXPLICIT_SIZE = (1 << 0),
+	SYM_F_INFERRED_SIZE = (1 << 1),
+	SYM_F_FUNCTION = (1 << 2),
+	SYM_F_EXECUTABLE = (1 << 3),
+	SYM_F_LOCAL = (1 << 4),
+	SYM_F_GLOBAL = (1 << 5),
+	SYM_F_WEAK = (1 << 6),
+};
+
 struct sym_src_loc {
 	struct sym_src_loc *next;
 	const char *filename;
@@ -54,6 +64,9 @@ struct sym
 	struct sym *next;
 	uint64_t addr;
 	uint64_t size;
+	uint64_t section_start;
+	uint64_t section_end;
+	uint32_t flags;
 	int hits;
 	uint64_t total_time;
 	char *src_filename;

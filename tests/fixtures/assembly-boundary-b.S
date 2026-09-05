@@ -38,6 +38,13 @@ zero_sized_entry:
 	nop
 	ret
 
+	.globl	zero_sized_function
+	.type	zero_sized_function, @function
+zero_sized_function:
+	.loc	1 45 0
+	nop
+	ret
+
 	.globl	after_zero_sized
 	.type	after_zero_sized, @function
 after_zero_sized:
