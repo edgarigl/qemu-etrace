@@ -34,6 +34,8 @@ struct tb_data {
 	struct etrace_tb_mapping *mappings;
 	size_t n_mappings;
 	bool included;
+	bool context_unknown;
+	bool mapping_valid;
 	struct {
 		uint64_t start;
 		uint64_t end;
@@ -938,6 +940,9 @@ static bool write_exec_prefix(unsigned int cpu_index,
 
 		state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
 		if (!tb->included) {
+			if (tb->context_unknown)
+				increment_status_counter(
+					&producer_status.context_errors);
 			if (!state->gap_open) {
 				state->gap_open = true;
 				state->gap_from_context_id =
@@ -951,6 +956,8 @@ static bool write_exec_prefix(unsigned int cpu_index,
 			return true;
 		if (end > tb->n_insns)
 			return false;
+		if (exec_mapping && !tb->mapping_valid)
+			increment_status_counter(&producer_status.mapping_errors);
 		write_tb_execution(cpu_index, tb, ++state->sequence,
 				   state->pending_context_id, end);
 		state->last_included_context_id = state->pending_context_id;
@@ -1143,13 +1150,13 @@ static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 		data->end = last_addr + last_size;
 	data->n_insns = n_insns;
 	data->included = true;
+	data->mapping_valid = true;
 #if QEMU_PLUGIN_VERSION >= 2
 	if (hypervisor_filter) {
 		int classification = classify_context_range(data->start, data->end);
 
 		data->included = classification > 0;
-		if (classification < 0)
-			increment_status_counter(&producer_status.context_errors);
+		data->context_unknown = classification < 0;
 	}
 #endif
 
@@ -1236,9 +1243,8 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 		}
 	}
 #if QEMU_PLUGIN_VERSION >= 5
-	if (exec_mapping && (!hypervisor_filter || data->included)
-	    && !collect_mappings(data))
-		increment_status_counter(&producer_status.mapping_errors);
+	if (exec_mapping && (!hypervisor_filter || data->included))
+		data->mapping_valid = collect_mappings(data);
 #endif
 	if (tb_exec_output && (!hypervisor_filter || data->included))
 		write_tb_definition(data);
@@ -1493,6 +1499,11 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	if (exec_mapping && !tb_exec_output) {
 		fprintf(stderr,
 			"qemu-etrace-plugin: execution mappings require format v1\n");
+		return -1;
+	}
+	if (exec_mapping && !info->system_emulation) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: execution mappings require system emulation\n");
 		return -1;
 	}
 	if (context_register_basic

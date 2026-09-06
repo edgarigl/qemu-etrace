@@ -1417,6 +1417,61 @@ static void test_context_filter_options(void)
 	g_assert_cmpint(qemu_plugin_install(1, &info, 3, invalid_range), ==, -1);
 }
 
+static void test_hypervisor_filter_rejects_partial_tb(void)
+{
+	struct qemu_plugin_insn insns[] = {
+		{ .vaddr = 0x1000, .size = 4 },
+		{ .vaddr = 0x1004, .size = 4 },
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x1000,
+		.insns = insns,
+		.n_insns = G_N_ELEMENTS(insns),
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[4];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+	args[2] = "context=hypervisor";
+	args[3] = "context-range=0x1000:4";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 4, args), ==, 0);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 1, tb.n_insns);
+	exit_vcpu(1);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	read_trace_headers(&cursor);
+	assert_context(&cursor, 1, 1, 0);
+	assert_context_gap(&cursor, 1, 1, 0, 0, 1);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.context_errors, ==, 1);
+	g_assert_cmpuint(status.filtered_execs, ==, 1);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
 static void test_register_context_changes(void)
 {
 	struct qemu_plugin_insn insn = { .vaddr = 0x8000, .size = 4 };
@@ -1690,12 +1745,15 @@ static void test_execution_mapping_failure(void)
 
 	g_assert_cmpint(qemu_plugin_install(1, &info, 3, args), ==, 0);
 	translate_tb(&tb);
+	execute_tb_prefix(&tb, 1, 1);
+	exit_vcpu(1);
 	finish_plugin();
 
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
 	read_trace_headers(&cursor);
 	assert_tb_definition(&cursor, 1, 0x7000, 0, &insn, 1, NULL, 0);
+	assert_tb_execution(&cursor, 1, 1, 1, 0, 1);
 	status = read_status_v1(&cursor);
 	g_assert_cmpuint(status.mapping_errors, ==, 1);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
@@ -1717,6 +1775,18 @@ static void test_execution_mapping_requires_v1(void)
 	char *arg = "exec-mapping=on";
 
 	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, -1);
+}
+
+static void test_execution_mapping_requires_system_emulation(void)
+{
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 5, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = false,
+	};
+	char *args[] = { "format=v1", "exec-mapping=on" };
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, args), ==, -1);
 }
 #elif QEMU_PLUGIN_VERSION >= 2
 static void test_execution_mapping_requires_api_5(void)
@@ -2049,6 +2119,8 @@ int main(int argc, char **argv)
 	g_test_add_func("/plugin/hypervisor-filter", test_hypervisor_filter);
 	g_test_add_func("/plugin/context-filter-options",
 			test_context_filter_options);
+	g_test_add_func("/plugin/hypervisor-filter-partial-tb",
+			test_hypervisor_filter_rejects_partial_tb);
 	g_test_add_func("/plugin/register-context-changes",
 			test_register_context_changes);
 	g_test_add_func("/plugin/context-register-options",
@@ -2061,6 +2133,8 @@ int main(int argc, char **argv)
 			test_execution_mapping_failure);
 	g_test_add_func("/plugin/execution-mapping-requires-v1",
 			test_execution_mapping_requires_v1);
+	g_test_add_func("/plugin/execution-mapping-requires-system",
+			test_execution_mapping_requires_system_emulation);
 #else
 	g_test_add_func("/plugin/execution-mapping-requires-api-5",
 			test_execution_mapping_requires_api_5);
