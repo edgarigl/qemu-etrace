@@ -133,9 +133,15 @@ class traceview(object):
 			self.screen.addstr(h - self.log_lines + i - 1, 0, self.log[pos + i])
 
 	def step_end_of_subrecord(self, r):
-		self.record_pos = r.all.ex.ex32[self.record_idx].end - 4
-		if self.record_pos < r.all.ex.ex32[self.record_idx].start:
-			self.record_pos = r.all.ex.ex32[self.record_idx].start
+		entry = self.exec_entry(r)
+		self.record_pos = entry.end - 4
+		if self.record_pos < entry.start:
+			self.record_pos = entry.start
+
+	def exec_entry(self, r):
+		if hasattr(self.e, "exec_entry"):
+			return self.e.exec_entry(r, self.record_idx)
+		return r.all.ex.ex32[self.record_idx]
 
 	def step_end_of_record(self, r):
 		self.record_idx = r.all.ex.nr - 1
@@ -144,7 +150,7 @@ class traceview(object):
 	def step_start_of_record(self, r):
 		self.record_idx = 0
 		if r and r.hdr.type == self.e.TYPE_EXEC:
-			self.record_pos = r.all.ex.ex32[self.record_idx].start
+			self.record_pos = self.exec_entry(r).start
 
 	def step_existing_record_back(self, r):
 		if r == None or r.hdr.type != self.e.TYPE_EXEC:
@@ -155,7 +161,7 @@ class traceview(object):
 
 		# Now we know we've got an exec record.
 		# Step back.
-		if self.record_pos <= r.all.ex.ex32[self.record_idx].start:
+		if self.record_pos <= self.exec_entry(r).start:
 			if self.record_idx == 0:
 				r = self.step_existing_record_back(None)
 				return r
@@ -174,14 +180,14 @@ class traceview(object):
 			if r.hdr.type == self.e.TYPE_EXEC:
 				self.record_pos += 4
 
-				if self.record_pos >= r.all.ex.ex32[self.record_idx].end:
+				if self.record_pos >= self.exec_entry(r).end:
 					self.record_idx += 1
 					if self.record_idx == r.all.ex.nr:
 						self.record = None
 						r = self.e.stepf()
 						self.step_start_of_record(r)
 					else:
-						self.record_pos = r.all.ex.ex32[self.record_idx].start
+						self.record_pos = self.exec_entry(r).start
 			else:
 				r = self.e.stepf()
 				self.step_start_of_record(r)
@@ -366,8 +372,8 @@ class traceview(object):
 						"%d: type=%s %x len=%d PC=%x (%x-%x)" \
 						% (self.e.r_idx, self.e.type_to_name(r.hdr.type),
 						r.hdr.type, r.hdr.len, self.record_pos,
-						r.all.ex.ex32[self.record_idx].start,
-						r.all.ex.ex32[self.record_idx].end),
+						self.exec_entry(r).start,
+						self.exec_entry(r).end),
 						curses.A_REVERSE)
 
 				self.screen.addstr(1, 0,

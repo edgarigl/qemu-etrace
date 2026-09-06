@@ -51,11 +51,20 @@ class etrace_exec_entry32(Structure):
 		("end", c_uint32),
 	]
 
+class etrace_exec_entry64(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("duration", c_uint32),
+		("start", c_uint64),
+		("end", c_uint64),
+	]
+
 class etrace_exec_p(Structure):
 	_pack_ = 1
 	_fields_ = [
 		("nr", c_uint64),
 		("ex32", POINTER(etrace_exec_entry32)),
+		("ex64", POINTER(etrace_exec_entry64)),
 	]
 
 class etrace_exec(Structure):
@@ -110,6 +119,89 @@ class etrace_status(Structure):
 		("reserved", c_uint32),
 	]
 
+class etrace_version(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("major", c_uint16),
+		("minor", c_uint16),
+	]
+
+class etrace_info(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("attr", c_uint64),
+		("version", etrace_version),
+	]
+
+class etrace_tb_def(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("tb_id", c_uint64),
+		("vaddr", c_uint64),
+		("context_id", c_uint64),
+		("code_hash", c_uint64),
+		("size", c_uint32),
+		("code_len", c_uint32),
+		("insn_count", c_uint16),
+		("mapping_count", c_uint16),
+		("flags", c_uint32),
+		("reserved", c_uint32),
+	]
+
+class etrace_tb_insn(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("offset", c_uint32),
+		("size", c_uint16),
+		("flags", c_uint16),
+	]
+
+class etrace_tb_mapping(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("offset", c_uint32),
+		("len", c_uint32),
+		("paddr", c_uint64),
+	]
+
+class etrace_tb_exec(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("sequence", c_uint64),
+		("time", c_uint64),
+		("tb_id", c_uint64),
+		("context_id", c_uint64),
+		("duration", c_uint32),
+		("insn_count", c_uint16),
+		("flags", c_uint16),
+	]
+
+class etrace_context(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("context_id", c_uint64),
+		("pc", c_uint64),
+		("address_space_id", c_uint64),
+		("virtual_machine_id", c_uint64),
+		("state_hash", c_uint64),
+		("flags", c_uint32),
+		("architecture", c_uint16),
+		("privilege", c_uint8),
+		("register_count", c_uint8),
+		("reserved", c_uint32),
+	]
+
+class etrace_context_gap(Structure):
+	_pack_ = 1
+	_fields_ = [
+		("sequence", c_uint64),
+		("from_context_id", c_uint64),
+		("to_context_id", c_uint64),
+		("filtered_execs", c_uint64),
+		("reason", c_uint32),
+		("flags", c_uint32),
+	]
+
 class etrace_all_subtypes(Union):
 	_pack_ = 1
 	_fields_ = [
@@ -122,6 +214,11 @@ class etrace_all_subtypes(Union):
 		("event_u64", etrace_event_u64),
 		("discontinuity", etrace_discontinuity),
 		("status", etrace_status),
+		("info", etrace_info),
+		("tb_def", etrace_tb_def),
+		("tb_exec", etrace_tb_exec),
+		("context", etrace_context),
+		("context_gap", etrace_context_gap),
 		("texec", etrace_exec)
 	]
 class etrace_pkg(Structure):
@@ -143,6 +240,10 @@ class etrace(object):
 	TYPE_EVENT_U64 = 8
 	TYPE_DISCONTINUITY = 9
 	TYPE_STATUS = 10
+	TYPE_TB_DEF = 11
+	TYPE_TB_EXEC = 12
+	TYPE_CONTEXT = 13
+	TYPE_CONTEXT_GAP = 14
 	TYPE_INFO = 0x4554
 
 	DISCONTINUITY_UNKNOWN = 0
@@ -175,11 +276,17 @@ class etrace(object):
 
 		typenames = ["none", "exec", "tb", "note", "mem",
 				"arch", "barrier", "old_event_u64", "event_u64",
-				"discontinuity", "status"]
-		return typenames[type]
+				"discontinuity", "status", "tb_def", "tb_exec",
+				"context", "context_gap"]
+		return typenames[type] if type < len(typenames) else "unknown"
 
 	def discontinuity_kind_to_name(self, kind):
 		return ["unknown", "interrupt", "exception", "host-call"][kind]
+
+	def exec_entry(self, record, index):
+		if self.arch.guest.arch_bits == 32:
+			return record.all.ex.ex32[index]
+		return record.all.ex.ex64[index]
 
 	def push_pos(self):
 		pos = self.f.tell()
@@ -194,6 +301,7 @@ class etrace(object):
 		self.r_idx = 0
 		self.r_max_idx = 0
 		self.r_pos_cache = []
+		self.tb_defs = {}
 		self.f.seek(0, 0)
 
 	def stepb(self):
@@ -234,12 +342,16 @@ class etrace(object):
 			return None
 
 		end_pos = pos + pkg.hdr.len
-		if pkg.hdr.type == self.TYPE_ARCH:
+		if pkg.hdr.type == self.TYPE_INFO:
+			self.f.readinto(pkg.all.info)
+			self.f.seek(end_pos, 0)
+		elif pkg.hdr.type == self.TYPE_ARCH:
 			self.f.readinto(pkg.all.arch)
-			print(sizeof(pkg.all.arch))
 			self.arch = pkg.all.arch
 			if self.arch.guest.arch_bits == 32:
 				self.etype = etrace_exec_entry32
+			elif self.arch.guest.arch_bits == 64:
+				self.etype = etrace_exec_entry64
 			else:
 				assert False, "Unsupported arch bit %d" \
 						% self.arch.guest.arch_bits
@@ -261,6 +373,50 @@ class etrace(object):
 		elif pkg.hdr.type == self.TYPE_STATUS:
 			self.f.readinto(pkg.all.status)
 			self.f.seek(end_pos, 0)
+		elif pkg.hdr.type == self.TYPE_TB_DEF:
+			self.f.readinto(pkg.all.tb_def)
+			definition = pkg.all.tb_def
+			insns = (etrace_tb_insn * definition.insn_count)()
+			mappings = (etrace_tb_mapping * definition.mapping_count)()
+			self.f.readinto(insns)
+			self.f.readinto(mappings)
+			self.f.read(definition.code_len)
+			self.tb_defs[definition.tb_id] = (
+				definition.vaddr,
+				[(insn.offset, insn.size) for insn in insns],
+			)
+			pkg._tb_insns = insns
+			pkg._tb_mappings = mappings
+			self.f.seek(end_pos, 0)
+		elif pkg.hdr.type == self.TYPE_TB_EXEC:
+			wire = etrace_tb_exec()
+			self.f.readinto(wire)
+			self.f.seek(end_pos, 0)
+			definition = self.tb_defs.get(wire.tb_id)
+			if definition is None or not 0 < wire.insn_count <= len(definition[1]):
+				raise ValueError("invalid ETrace TB execution")
+			entry = self.etype()
+			entry.duration = wire.duration
+			entry.start = definition[0]
+			last = definition[1][wire.insn_count - 1]
+			entry.end = definition[0] + last[0] + last[1]
+			pkg._wire_type = self.TYPE_TB_EXEC
+			pkg._tb_execution = wire
+			pkg.hdr.type = self.TYPE_EXEC
+			pkg.all.ex.nr = 1
+			if self.arch.guest.arch_bits == 32:
+				entries = (etrace_exec_entry32 * 1)(entry)
+				pkg.all.ex.ex32 = cast(entries, POINTER(self.etype))
+			else:
+				entries = (etrace_exec_entry64 * 1)(entry)
+				pkg.all.ex.ex64 = cast(entries, POINTER(self.etype))
+			pkg._exec_entries = entries
+		elif pkg.hdr.type == self.TYPE_CONTEXT:
+			self.f.readinto(pkg.all.context)
+			self.f.seek(end_pos, 0)
+		elif pkg.hdr.type == self.TYPE_CONTEXT_GAP:
+			self.f.readinto(pkg.all.context_gap)
+			self.f.seek(end_pos, 0)
 		elif pkg.hdr.type == self.TYPE_EXEC:
 			entry_count = (pkg.hdr.len - sizeof(pkg.all.texec))
 			entry_count //= sizeof(self.etype)
@@ -270,7 +426,10 @@ class etrace(object):
 			pkg.all.ex.nr = entry_count
 			if self.arch.guest.arch_bits == 32:
 				pkg.all.ex.ex32 = cast(a, POINTER(self.etype))
-				pkg._exec_entries = a
+			else:
+				pkg.all.ex.ex64 = cast(a, POINTER(self.etype))
+			pkg._exec_entries = a
+			self.f.seek(end_pos, 0)
 		else:
 			self.f.seek(end_pos, 0)
 

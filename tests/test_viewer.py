@@ -8,9 +8,14 @@ import etrace
 
 from tests.trace_builder import (
     etrace_arch,
+    etrace_context,
+    etrace_context_gap,
     etrace_discontinuity,
     etrace_exec32,
+    etrace_info,
     etrace_status,
+    etrace_tb_def,
+    etrace_tb_exec,
 )
 
 
@@ -106,6 +111,59 @@ def test_python_decoder_reads_status_record():
     assert record.all.status.output_errors == 4
     assert record.all.status.discontinuity_pc_mismatches == 5
     assert decoder.type_to_name(record.hdr.type) == "status"
+
+
+def test_python_decoder_expands_v1_tb_execution():
+    decoder = etrace.etrace(
+        BytesIO(
+            etrace_info(major=1)
+            + etrace_arch(guest_bits=64)
+            + etrace_tb_def(
+                tb_id=7,
+                vaddr=0x100000000,
+                insns=((0, 2), (2, 5), (7, 3)),
+            )
+            + etrace_tb_exec(tb_id=7, insn_count=2, context_id=0)
+        )
+    )
+
+    assert decoder.stepf().hdr.type == decoder.TYPE_INFO
+    assert decoder.stepf().hdr.type == decoder.TYPE_ARCH
+    assert decoder.stepf().hdr.type == decoder.TYPE_TB_DEF
+    execution = decoder.stepf()
+
+    assert execution.hdr.type == decoder.TYPE_EXEC
+    assert execution._wire_type == decoder.TYPE_TB_EXEC
+    assert execution._tb_execution.tb_id == 7
+    assert execution.all.ex.nr == 1
+    assert decoder.exec_entry(execution, 0).start == 0x100000000
+    assert decoder.exec_entry(execution, 0).end == 0x100000007
+
+
+def test_python_decoder_reads_context_and_gap():
+    decoder = etrace.etrace(
+        BytesIO(
+            etrace_context(context_id=3, address_space_id=0x123000)
+            + etrace_context_gap(
+                sequence=4,
+                from_context_id=3,
+                to_context_id=0,
+                filtered_execs=5,
+            )
+        )
+    )
+
+    context = decoder.stepf()
+    gap = decoder.stepf()
+
+    assert context.hdr.type == decoder.TYPE_CONTEXT
+    assert context.all.context.context_id == 3
+    assert context.all.context.address_space_id == 0x123000
+    assert gap.hdr.type == decoder.TYPE_CONTEXT_GAP
+    assert gap.all.context_gap.sequence == 4
+    assert gap.all.context_gap.filtered_execs == 5
+    assert decoder.type_to_name(context.hdr.type) == "context"
+    assert decoder.type_to_name(gap.hdr.type) == "context_gap"
 
 
 def test_viewer_advances_after_last_execution_entry():
