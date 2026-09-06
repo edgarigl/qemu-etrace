@@ -135,6 +135,29 @@ normally; an abruptly terminated QEMU process may leave a truncated gzip
 stream. The `out=` option accepts a regular file or a pre-created FIFO. UNIX
 socket output remains available through the Xilinx QEMU ETrace implementation.
 
+The plugin writes the legacy ETrace 0.0 execution-range format by default. Its
+opt-in ETrace 1.0 mode emits translation-block definitions once and compact
+execution records that qemu-etrace expands into the same internal ranges:
+
+$ qemu-system-x86_64 ... \
+    -plugin /path/libqemu-etrace.so,out=/tmp/elog,format=v1
+
+Version 1 requires QEMU plugin API 2 or newer. Context registers are captured
+only when requested. `context-registers=basic` selects mode and address-space
+registers for x86, AArch64, or RISC-V; `context-register=NAME` can be repeated
+for an explicit set. Numeric execution mappings can be added with
+`exec-mapping=on`, which requires plugin API 5 or newer.
+
+An explicit range-based hypervisor filter is available in version 1:
+
+$ qemu-system-x86_64 ... \
+    -plugin /path/libqemu-etrace.so,out=/tmp/xen.elog,format=v1,context=hypervisor,context-range=0xffff82d040000000:0x6b1198
+
+Repeat `context-range=` for early or relocated mappings. Filtered intervals are
+represented by gap records so downstream control-flow analysis cannot connect
+unrelated retained ranges. See `docs/etrace-v1.md` for the event model,
+complete option reference, QEMU API requirements, and mapping limitations.
+
 Runtime address mapping
 -----------------------
 Use a repeatable `--address-map` option when code executes at a loader-selected

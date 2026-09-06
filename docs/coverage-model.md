@@ -79,11 +79,19 @@ without completing. QEMU also documents exception paths on which the faulting
 instruction is not observable through the general instruction callback. The
 metric is therefore dispatched-instruction coverage, not retirement coverage.
 
-Execution uses ordinary `TYPE_EXEC` records. Discontinuity-capable builds also
+Version 0 execution uses ordinary `TYPE_EXEC` records. With `format=v1`, the
+plugin emits one `TYPE_TB_DEF` per translation and a compact `TYPE_TB_EXEC`
+containing the dispatched instruction count. The reader expands that pair into
+the same internal half-open execution range, so coverage accounting is shared
+with version 0 and the other input formats. Discontinuity-capable builds also
 emit `TYPE_DISCONTINUITY` records containing the source PC, destination PC, and
 event kind. API version 1 has substantially higher callback and trace volume;
 its instruction-granularity results serve as the correctness reference for the
 optimized implementation.
+
+Version 1 can associate execution with context-change records and observed
+instruction mappings. A filtered trace contains explicit gap records between
+retained ranges. See `etrace-v1.md` for the format and plugin options.
 
 Plugin traces advertise `ETRACE_INFO_F_FINAL_STATUS` and end with a
 `TYPE_STATUS` record. The converter rejects a missing or incomplete final
