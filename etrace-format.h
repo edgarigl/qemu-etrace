@@ -34,6 +34,8 @@ enum {
 	TYPE_STATUS = 10,
 	TYPE_TB_DEF = 11,
 	TYPE_TB_EXEC = 12,
+	TYPE_CONTEXT = 13,
+	TYPE_CONTEXT_GAP = 14,
 	TYPE_INFO = 0x4554,
 } __attribute__ ((packed));
 
@@ -54,6 +56,20 @@ enum etrace_info_flags {
 	ETRACE_INFO_F_TB_CHAINING = (1 << 0),
 	ETRACE_INFO_F_FINAL_STATUS = (1 << 1),
 	ETRACE_INFO_F_TB_EXEC = (1 << 2),
+	ETRACE_INFO_F_CONTEXT = (1 << 3),
+	ETRACE_INFO_F_FILTERED = (1 << 4),
+};
+
+enum etrace_context_flags {
+	ETRACE_CONTEXT_F_PRIVILEGE_VALID = (1 << 0),
+	ETRACE_CONTEXT_F_ADDRESS_SPACE_VALID = (1 << 1),
+	ETRACE_CONTEXT_F_VM_VALID = (1 << 2),
+	ETRACE_CONTEXT_F_PAGING = (1 << 3),
+	ETRACE_CONTEXT_F_LONG_MODE = (1 << 4),
+	ETRACE_CONTEXT_F_VIRTUALIZED = (1 << 5),
+	ETRACE_CONTEXT_F_VIRTUALIZATION_ROOT = (1 << 6),
+	ETRACE_CONTEXT_F_HYPERVISOR = (1 << 7),
+	ETRACE_CONTEXT_F_INCOMPLETE = (1 << 8),
 };
 
 struct etrace_info_data {
@@ -160,6 +176,45 @@ struct etrace_tb_exec {
 	uint16_t flags;
 } __attribute__ ((packed));
 
+/*
+ * Version 1 execution context. Each register value is encoded as an
+ * etrace_context_register followed by name_len name bytes and size value
+ * bytes. Names are not NUL terminated and values use target byte order.
+ */
+struct etrace_context {
+	uint64_t context_id;
+	uint64_t pc;
+	uint64_t address_space_id;
+	uint64_t virtual_machine_id;
+	uint64_t state_hash;
+	uint32_t flags;
+	uint16_t architecture;
+	uint8_t privilege;
+	uint8_t register_count;
+	uint32_t reserved;
+	uint8_t data8[0];
+} __attribute__ ((packed));
+
+struct etrace_context_register {
+	uint16_t name_len;
+	uint16_t size;
+	uint32_t flags;
+	uint8_t data8[0];
+} __attribute__ ((packed));
+
+enum etrace_context_gap_reason {
+	ETRACE_CONTEXT_GAP_FILTERED = 1,
+};
+
+struct etrace_context_gap {
+	uint64_t sequence;
+	uint64_t from_context_id;
+	uint64_t to_context_id;
+	uint64_t filtered_execs;
+	uint32_t reason;
+	uint32_t flags;
+} __attribute__ ((packed));
+
 struct etrace_old_event_u64 {
 	uint64_t time;
 	uint64_t val;
@@ -218,6 +273,8 @@ struct etrace_pkg {
 		struct etrace_tb tb;
 		struct etrace_tb_def tb_def;
 		struct etrace_tb_exec tb_exec;
+		struct etrace_context context;
+		struct etrace_context_gap context_gap;
 		struct etrace_note note;
 		struct etrace_mem mem;
 		struct etrace_old_event_u64 old_event_u64;

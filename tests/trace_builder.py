@@ -10,7 +10,11 @@ ETRACE_TYPE_DISCONTINUITY = 9
 ETRACE_TYPE_STATUS = 10
 ETRACE_TYPE_TB_DEF = 11
 ETRACE_TYPE_TB_EXEC = 12
+ETRACE_TYPE_CONTEXT = 13
+ETRACE_TYPE_CONTEXT_GAP = 14
 ETRACE_INFO_F_FINAL_STATUS = 1 << 1
+ETRACE_INFO_F_CONTEXT = 1 << 3
+ETRACE_INFO_F_FILTERED = 1 << 4
 QEMU_SIMPLE_HEADER_EVENT_ID = (1 << 64) - 1
 QEMU_SIMPLE_DROPPED_EVENT_ID = (1 << 64) - 2
 QEMU_SIMPLE_HEADER_MAGIC = 0xF2B177CB0AA429B4
@@ -128,6 +132,53 @@ def etrace_tb_exec(*, tb_id=1, sequence=0, time=0, context_id=0,
     )
     return etrace_packet(
         ETRACE_TYPE_TB_EXEC,
+        payload + extension,
+        unit_id=unit_id,
+    )
+
+
+def etrace_context(*, context_id=1, pc=0x1000, address_space_id=0,
+                   virtual_machine_id=0, state_hash=0, flags=0,
+                   architecture=0, privilege=0xff, registers=(),
+                   reserved=0, extension=b"", unit_id=0):
+    payload = struct.pack(
+        "=QQQQQIHBBI",
+        context_id,
+        pc,
+        address_space_id,
+        virtual_machine_id,
+        state_hash,
+        flags,
+        architecture,
+        privilege,
+        len(registers),
+        reserved,
+    )
+    for name, value, reg_flags in registers:
+        encoded_name = name.encode("ascii")
+        payload += struct.pack("=HHI", len(encoded_name), len(value), reg_flags)
+        payload += encoded_name + value
+    return etrace_packet(
+        ETRACE_TYPE_CONTEXT,
+        payload + extension,
+        unit_id=unit_id,
+    )
+
+
+def etrace_context_gap(*, sequence=1, from_context_id=0, to_context_id=0,
+                       filtered_execs=1, reason=1, flags=0, unit_id=0,
+                       extension=b""):
+    payload = struct.pack(
+        "=QQQQII",
+        sequence,
+        from_context_id,
+        to_context_id,
+        filtered_execs,
+        reason,
+        flags,
+    )
+    return etrace_packet(
+        ETRACE_TYPE_CONTEXT_GAP,
         payload + extension,
         unit_id=unit_id,
     )

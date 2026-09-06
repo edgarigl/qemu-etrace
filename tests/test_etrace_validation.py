@@ -2,10 +2,14 @@ import pytest
 
 from tests.trace_builder import (
     ETRACE_INFO_F_FINAL_STATUS,
+    ETRACE_INFO_F_CONTEXT,
+    ETRACE_INFO_F_FILTERED,
     ETRACE_TYPE_DISCONTINUITY,
     ETRACE_TYPE_STATUS,
     ETRACE_TYPE_TB,
     etrace_discontinuity,
+    etrace_context,
+    etrace_context_gap,
     etrace_info,
     etrace_old_event,
     etrace_packet,
@@ -187,6 +191,7 @@ def test_etrace_expands_v1_tb_execution(run_etrace, tmp_path):
     output = tmp_path / "tb-exec.txt"
     trace.write_bytes(
         etrace_info(major=1)
+        + etrace_context(context_id=3, pc=0x1000, unit_id=4)
         + etrace_tb_def(
             tb_id=7,
             vaddr=0x1000,
@@ -206,6 +211,7 @@ def test_etrace_expands_v1_tb_execution(run_etrace, tmp_path):
 
     assert result.returncode == 0
     assert output.read_text(encoding="ascii").splitlines() == [
+        "C4 id=3 pc=1000 as=0 vm=0 privilege=255 flags=0 registers=0",
         "T id=7 virt=1000-100a context=3 insns=3 mappings=0",
         "E4 1000 1007",
     ]
@@ -281,6 +287,105 @@ def test_etrace_rejects_invalid_v1_tb_stream(
     run_etrace, tmp_path, records, diagnostic
 ):
     trace = tmp_path / "invalid-tb-stream.etrace"
+    trace.write_bytes(records)
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert diagnostic in result.stderr
+
+
+def test_etrace_decodes_context_registers_and_gap(run_etrace, tmp_path):
+    trace = tmp_path / "context-gap.etrace"
+    output = tmp_path / "context-gap.txt"
+    trace.write_bytes(
+        etrace_info(
+            major=1,
+            attributes=ETRACE_INFO_F_CONTEXT | ETRACE_INFO_F_FILTERED,
+        )
+        + etrace_context(
+            context_id=3,
+            pc=0x1000,
+            address_space_id=0x123000,
+            state_hash=0x45,
+            flags=3,
+            architecture=62,
+            privilege=0,
+            registers=(("cr3", b"\x00\x30\x12\x00\x00\x00\x00\x00", 0),),
+            unit_id=2,
+        )
+        + etrace_context(context_id=4, pc=0x2000, unit_id=2)
+        + etrace_context_gap(
+            sequence=9,
+            from_context_id=3,
+            to_context_id=4,
+            filtered_execs=17,
+            unit_id=2,
+        )
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", output)
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="ascii").splitlines() == [
+        "C2 id=3 pc=1000 as=123000 vm=0 privilege=0 flags=3 registers=1",
+        "C2 id=4 pc=2000 as=0 vm=0 privilege=255 flags=0 registers=0",
+        "G2 sequence=9 from=3 to=4 filtered=17 reason=1 flags=0",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("records", "diagnostic"),
+    [
+        (etrace_context(), "version 1 record without"),
+        (etrace_info(major=1) + etrace_context(context_id=0), "zero context ID"),
+        (
+            etrace_info(major=1)
+            + etrace_context(context_id=2)
+            + etrace_context(context_id=2),
+            "duplicate context ID",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_context(registers=(("cr3", b"", 0),)),
+            "context register exceeds payload",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_context(registers=(("bad\0name", b"\x01", 0),)),
+            "context register name contains NUL",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(tb_id=3)
+            + etrace_tb_exec(tb_id=3, context_id=7),
+            "undefined context ID",
+        ),
+        (
+            etrace_info(major=1) + etrace_context_gap(),
+            "context gap in an unfiltered trace",
+        ),
+        (
+            etrace_info(major=1, attributes=ETRACE_INFO_F_FILTERED)
+            + etrace_context_gap(reason=2),
+            "unknown context gap reason",
+        ),
+        (
+            etrace_info(major=1, attributes=ETRACE_INFO_F_FILTERED)
+            + etrace_context_gap(filtered_execs=0),
+            "empty context gap",
+        ),
+        (
+            etrace_info(major=1, attributes=ETRACE_INFO_F_FILTERED)
+            + etrace_context_gap(from_context_id=99),
+            "undefined source context ID",
+        ),
+    ],
+)
+def test_etrace_rejects_invalid_context_stream(
+    run_etrace, tmp_path, records, diagnostic
+):
+    trace = tmp_path / "invalid-context.etrace"
     trace.write_bytes(records)
 
     result = run_etrace("--trace", trace, "--trace-output", "none")

@@ -53,6 +53,7 @@ struct etracer {
 	struct etrace_arch arch;
 	struct etrace_status status;
 	GHashTable *tb_defs;
+	GHashTable *contexts;
 	struct etrace_pkg *pkg;
 	gzFile input;
 	bool info_seen;
@@ -239,6 +240,45 @@ static bool etrace_validate_tb_def(const struct etrace_pkg *pkg)
 	return true;
 }
 
+static bool etrace_validate_context(const struct etrace_pkg *pkg)
+{
+	const struct etrace_context *context = &pkg->context;
+	size_t fixed_len = offsetof(struct etrace_context, data8);
+	size_t remaining;
+	const uint8_t *cursor;
+	uint8_t i;
+
+	if (pkg->hdr.len < fixed_len)
+		return etrace_invalid_pkg(pkg, "short context payload");
+	if (!context->context_id)
+		return etrace_invalid_pkg(pkg, "zero context ID");
+
+	cursor = context->data8;
+	remaining = pkg->hdr.len - fixed_len;
+	for (i = 0; i < context->register_count; i++) {
+		const struct etrace_context_register *reg;
+		size_t value_len;
+
+		if (remaining < offsetof(struct etrace_context_register, data8))
+			return etrace_invalid_pkg(pkg,
+				"short context register header");
+		reg = (const void *)cursor;
+		value_len = (size_t)reg->name_len + reg->size;
+		if (!reg->name_len || !reg->size
+		    || value_len > remaining
+			- offsetof(struct etrace_context_register, data8))
+			return etrace_invalid_pkg(pkg,
+				"context register exceeds payload");
+		if (memchr(reg->data8, '\0', reg->name_len))
+			return etrace_invalid_pkg(pkg,
+				"context register name contains NUL");
+		value_len += offsetof(struct etrace_context_register, data8);
+		cursor += value_len;
+		remaining -= value_len;
+	}
+	return true;
+}
+
 static bool etrace_validate_pkg(struct etracer *t)
 {
 	struct etrace_pkg *pkg = t->pkg;
@@ -329,6 +369,20 @@ static bool etrace_validate_pkg(struct etracer *t)
 			return false;
 		if (pkg->hdr.len < sizeof(pkg->tb_exec))
 			return etrace_invalid_pkg(pkg, "short TB execution payload");
+		break;
+	case TYPE_CONTEXT:
+		if (!etrace_v1_record(t, pkg))
+			return false;
+		return etrace_validate_context(pkg);
+	case TYPE_CONTEXT_GAP:
+		if (!etrace_v1_record(t, pkg))
+			return false;
+		if (pkg->hdr.len < sizeof(pkg->context_gap))
+			return etrace_invalid_pkg(pkg, "short context gap payload");
+		if (pkg->context_gap.reason != ETRACE_CONTEXT_GAP_FILTERED)
+			return etrace_invalid_pkg(pkg, "unknown context gap reason");
+		if (!pkg->context_gap.filtered_execs)
+			return etrace_invalid_pkg(pkg, "empty context gap");
 		break;
 	default:
 		break;
@@ -476,6 +530,9 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 	definition = g_hash_table_lookup(t->tb_defs, &tb_exec->tb_id);
 	if (!definition)
 		return etrace_invalid_pkg(t->pkg, "undefined TB ID");
+	if (tb_exec->context_id
+	    && !g_hash_table_contains(t->contexts, &tb_exec->context_id))
+		return etrace_invalid_pkg(t->pkg, "undefined context ID");
 	if (!tb_exec->insn_count
 	    || tb_exec->insn_count > definition->insn_count)
 		return etrace_invalid_pkg(t->pkg,
@@ -494,6 +551,55 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 		.flags = tb_exec->flags,
 	};
 	trace_process_exec(&t->tr, cov_fmt, &exec, etrace_output_exec, NULL);
+	return true;
+}
+
+static bool etrace_process_context(struct etracer *t)
+{
+	const struct etrace_context *context = &t->pkg->context;
+	uint64_t *id;
+
+	if (g_hash_table_contains(t->contexts, &context->context_id))
+		return etrace_invalid_pkg(t->pkg, "duplicate context ID");
+	id = safe_malloc(sizeof(*id));
+	*id = context->context_id;
+	g_hash_table_add(t->contexts, id);
+
+	if (t->tr.fp_out) {
+		fprintf(t->tr.fp_out,
+			"C%u id=%" PRIx64 " pc=%" PRIx64 " as=%" PRIx64
+			" vm=%" PRIx64 " privilege=%u flags=%x registers=%u\n",
+			t->pkg->hdr.unit_id, context->context_id, context->pc,
+			context->address_space_id, context->virtual_machine_id,
+			context->privilege, context->flags,
+			context->register_count);
+	}
+	return true;
+}
+
+static bool etrace_process_context_gap(struct etracer *t)
+{
+	const struct etrace_context_gap *gap = &t->pkg->context_gap;
+
+	if (!(t->info.attr & ETRACE_INFO_F_FILTERED))
+		return etrace_invalid_pkg(t->pkg,
+			"context gap in an unfiltered trace");
+	if (gap->from_context_id
+	    && !g_hash_table_contains(t->contexts, &gap->from_context_id))
+		return etrace_invalid_pkg(t->pkg, "undefined source context ID");
+	if (gap->to_context_id
+	    && !g_hash_table_contains(t->contexts, &gap->to_context_id))
+		return etrace_invalid_pkg(t->pkg,
+			"undefined destination context ID");
+
+	if (t->tr.fp_out) {
+		fprintf(t->tr.fp_out,
+			"G%u sequence=%" PRIu64 " from=%" PRIx64 " to=%" PRIx64
+			" filtered=%" PRIu64 " reason=%u flags=%x\n",
+			t->pkg->hdr.unit_id, gap->sequence,
+			gap->from_context_id, gap->to_context_id,
+			gap->filtered_execs, gap->reason, gap->flags);
+	}
 	return true;
 }
 
@@ -758,6 +864,7 @@ void etrace_show(int fd, FILE *fp_out,
 
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
 	t.tb_defs = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, free);
+	t.contexts = g_hash_table_new_full(g_int64_hash, g_int64_equal, free, NULL);
 
 	/* Short path for passthrough.  */
 	if (trace_out_fmt == trace_in_fmt) {
@@ -829,6 +936,22 @@ void etrace_show(int fd, FILE *fp_out,
 				exit(EXIT_FAILURE);
 			}
 			break;
+		case TYPE_CONTEXT:
+			if (!etrace_process_context(&t)) {
+				g_hash_table_destroy(t.contexts);
+				g_hash_table_destroy(t.tb_defs);
+				free(t.pkg);
+				exit(EXIT_FAILURE);
+			}
+			break;
+		case TYPE_CONTEXT_GAP:
+			if (!etrace_process_context_gap(&t)) {
+				g_hash_table_destroy(t.contexts);
+				g_hash_table_destroy(t.tb_defs);
+				free(t.pkg);
+				exit(EXIT_FAILURE);
+			}
+			break;
 		default:
 			/* Show a warning once. We trust the version handling
 			   to abort when the format is truly incompatible.  */
@@ -862,6 +985,7 @@ void etrace_show(int fd, FILE *fp_out,
 			}
 		}
 	}
+	g_hash_table_destroy(t.contexts);
 	g_hash_table_destroy(t.tb_defs);
 	free(t.pkg);
 	if (gzclose(t.input) != Z_OK) {
