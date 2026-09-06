@@ -399,10 +399,34 @@ def test_etrace_decodes_context_registers_and_gap(run_etrace, tmp_path):
 
     assert result.returncode == 0
     assert output.read_text(encoding="ascii").splitlines() == [
-        "C2 id=3 pc=1000 as=123000 vm=0 privilege=0 flags=3 registers=1",
+        "C2 id=3 pc=1000 as=123000 vm=0 privilege=0 flags=3 registers=1 "
+        "cr3=0x0000000000123000",
         "C2 id=4 pc=2000 as=0 vm=0 privilege=255 flags=0 registers=0",
         "G2 sequence=9 from=3 to=4 filtered=17 reason=1 flags=0",
     ]
+
+
+def test_etrace_displays_all_tb_mapping_segments(run_etrace, tmp_path):
+    trace = tmp_path / "tb-mappings.etrace"
+    output = tmp_path / "tb-mappings.txt"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=4,
+            vaddr=0x1000,
+            size=8,
+            insns=((0, 4), (4, 4)),
+            mappings=((0, 4, 0x8000), (4, 4, 0xA000)),
+        )
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", output)
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="ascii").strip() == (
+        "T id=4 virt=1000-1008 context=0 insns=2 mappings=2 "
+        "map=1000-1004:8000 map=1004-1008:a000"
+    )
 
 
 @pytest.mark.parametrize(

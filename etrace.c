@@ -536,15 +536,20 @@ static bool etrace_process_tb_def(struct etracer *t)
 	if (t->tr.fp_out) {
 		const struct etrace_tb_mapping *mappings = (const void *)(
 			tb->data8 + (size_t)tb->insn_count * sizeof(*insns));
+		uint16_t i;
 
 		fprintf(t->tr.fp_out,
 			"T id=%" PRIx64 " virt=%" PRIx64 "-%" PRIx64
 			" context=%" PRIx64 " insns=%u mappings=%u",
 			tb->tb_id, tb->vaddr, tb->vaddr + tb->size,
 			tb->context_id, tb->insn_count, tb->mapping_count);
-		if (tb->mapping_count)
-			fprintf(t->tr.fp_out, " phys=%" PRIx64,
-				mappings[0].paddr);
+		for (i = 0; i < tb->mapping_count; i++) {
+			fprintf(t->tr.fp_out,
+				" map=%" PRIx64 "-%" PRIx64 ":%" PRIx64,
+				tb->vaddr + mappings[i].offset,
+				tb->vaddr + mappings[i].offset + mappings[i].len,
+				mappings[i].paddr);
+		}
 		fputc('\n', t->tr.fp_out);
 	}
 
@@ -595,7 +600,9 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 static bool etrace_process_context(struct etracer *t)
 {
 	const struct etrace_context *context = &t->pkg->context;
+	const uint8_t *cursor = context->data8;
 	uint64_t *id;
+	uint8_t i;
 
 	if (g_hash_table_contains(t->contexts, &context->context_id))
 		return etrace_invalid_pkg(t->pkg, "duplicate context ID");
@@ -606,11 +613,31 @@ static bool etrace_process_context(struct etracer *t)
 	if (t->tr.fp_out) {
 		fprintf(t->tr.fp_out,
 			"C%u id=%" PRIx64 " pc=%" PRIx64 " as=%" PRIx64
-			" vm=%" PRIx64 " privilege=%u flags=%x registers=%u\n",
+			" vm=%" PRIx64 " privilege=%u flags=%x registers=%u",
 			t->pkg->hdr.unit_id, context->context_id, context->pc,
 			context->address_space_id, context->virtual_machine_id,
 			context->privilege, context->flags,
 			context->register_count);
+		for (i = 0; i < context->register_count; i++) {
+			const struct etrace_context_register *reg =
+				(const void *)cursor;
+			const uint8_t *name = reg->data8;
+			const uint8_t *value = name + reg->name_len;
+			int byte;
+
+			fprintf(t->tr.fp_out, " %.*s=0x", reg->name_len,
+				(const char *)name);
+			if (t->arch.guest.big_endian) {
+				for (byte = 0; byte < reg->size; byte++)
+					fprintf(t->tr.fp_out, "%02x", value[byte]);
+			} else {
+				for (byte = reg->size - 1; byte >= 0; byte--)
+					fprintf(t->tr.fp_out, "%02x", value[byte]);
+			}
+			cursor += offsetof(struct etrace_context_register, data8)
+				+ reg->name_len + reg->size;
+		}
+		fputc('\n', t->tr.fp_out);
 	}
 	return true;
 }
