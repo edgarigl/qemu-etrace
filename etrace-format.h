@@ -53,6 +53,7 @@ struct etrace_hdr {
 enum etrace_info_flags {
 	ETRACE_INFO_F_TB_CHAINING = (1 << 0),
 	ETRACE_INFO_F_FINAL_STATUS = (1 << 1),
+	ETRACE_INFO_F_TB_EXEC = (1 << 2),
 };
 
 struct etrace_info_data {
