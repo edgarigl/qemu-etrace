@@ -4,9 +4,12 @@ from tests.trace_builder import (
     ETRACE_INFO_F_FINAL_STATUS,
     ETRACE_INFO_F_CONTEXT,
     ETRACE_INFO_F_FILTERED,
+    ETRACE_TYPE_CONTEXT,
     ETRACE_TYPE_DISCONTINUITY,
     ETRACE_TYPE_STATUS,
     ETRACE_TYPE_TB,
+    ETRACE_TYPE_TB_DEF,
+    ETRACE_TYPE_TB_EXEC,
     etrace_discontinuity,
     etrace_context,
     etrace_context_gap,
@@ -107,6 +110,22 @@ def test_etrace_requires_extended_v1_status(run_etrace, tmp_path):
 
     assert result.returncode != 0
     assert "short version 1 status payload" in result.stderr
+
+
+def test_etrace_reports_v1_status_counters(run_etrace, tmp_path):
+    trace = tmp_path / "v1-status.etrace"
+    output = tmp_path / "v1-status.txt"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_FINAL_STATUS)
+        + etrace_status_v1(filtered_execs=7)
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", output)
+
+    assert result.returncode == 0
+    assert "S1 filtered-exec=7 context-errors=0 mapping-errors=0" in (
+        output.read_text(encoding="ascii")
+    )
 
 
 def test_etrace_rejects_record_after_final_status(run_etrace, tmp_path):
@@ -310,6 +329,29 @@ def test_etrace_reuses_v1_tb_definition(run_etrace, tmp_path):
             + etrace_tb_exec(tb_id=5, insn_count=2),
             "invalid dispatched instruction count",
         ),
+        (
+            etrace_info(major=1)
+            + etrace_packet(ETRACE_TYPE_TB_DEF, bytes(47)),
+            "short TB definition payload",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_packet(ETRACE_TYPE_TB_EXEC, bytes(39)),
+            "short TB execution payload",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(size=4, code=b"\x00"),
+            "partial TB code image",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(
+                size=4,
+                mappings=((0, 2, 0x8000), (3, 1, 0x9000)),
+            ),
+            "non-contiguous TB mapping layout",
+        ),
     ],
 )
 def test_etrace_rejects_invalid_v1_tb_stream(
@@ -409,6 +451,11 @@ def test_etrace_decodes_context_registers_and_gap(run_etrace, tmp_path):
             + etrace_context_gap(from_context_id=99),
             "undefined source context ID",
         ),
+        (
+            etrace_info(major=1)
+            + etrace_packet(ETRACE_TYPE_CONTEXT, bytes(47)),
+            "short context payload",
+        ),
     ],
 )
 def test_etrace_rejects_invalid_context_stream(
@@ -421,3 +468,13 @@ def test_etrace_rejects_invalid_context_stream(
 
     assert result.returncode != 0
     assert diagnostic in result.stderr
+
+
+def test_etrace_rejects_unknown_major_version(run_etrace, tmp_path):
+    trace = tmp_path / "future.etrace"
+    trace.write_bytes(etrace_info(major=2))
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "only supports versions through 1.x" in result.stderr

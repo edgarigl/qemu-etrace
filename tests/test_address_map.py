@@ -8,6 +8,9 @@ import pytest
 from tests.trace_builder import (
     etrace_arch,
     etrace_exec64,
+    etrace_info,
+    etrace_tb_def,
+    etrace_tb_exec,
     qemu_simple_event,
     qemu_simple_header,
     qemu_simple_mapping,
@@ -116,6 +119,31 @@ def test_gzip_etrace_runtime_address_is_normalized(run_etrace, tmp_path):
             etrace_arch(guest_bits=64)
             + etrace_exec64(duration=0, start=runtime, end=runtime + 4)
         )
+    )
+
+    output = run_lcov(
+        run_etrace,
+        tmp_path,
+        trace,
+        "etrace",
+        "--address-map",
+        f"{runtime:x}:{linked:x}:4",
+    )
+
+    assert "FNDA:1,covered" in output
+
+
+def test_v1_tb_runtime_address_is_normalized(run_etrace, tmp_path):
+    if shutil.which("dwarfdump") is None:
+        pytest.skip("dwarfdump is required for LCOV generation")
+
+    linked = symbol_address("covered")
+    runtime = 0x31000000
+    trace = tmp_path / "runtime-v1.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(tb_id=3, vaddr=runtime, insns=((0, 4),))
+        + etrace_tb_exec(tb_id=3, insn_count=1)
     )
 
     output = run_lcov(

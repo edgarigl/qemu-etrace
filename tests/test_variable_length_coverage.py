@@ -5,7 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.trace_builder import etrace_arch, etrace_exec64
+from tests.trace_builder import (
+    etrace_arch,
+    etrace_exec64,
+    etrace_info,
+    etrace_tb_def,
+    etrace_tb_exec,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,6 +185,61 @@ def test_etrace_coverage_uses_byte_addresses(run_etrace, tmp_path, x86_fixture):
     assert coverage[start + 1] == 1
     assert coverage[start + 2] == 1
     assert coverage[start + 3] == 0
+
+
+def test_v1_partial_tb_matches_execution_range(run_etrace, tmp_path, x86_fixture):
+    if shutil.which("dwarfdump") is None:
+        pytest.skip("dwarfdump is required for LCOV generation")
+
+    start = x86_fixture.start
+    executed_insns = 3
+    end = start + sum(size for _, size in x86_fixture.instructions[:executed_insns])
+    v1_trace = tmp_path / "v1-tb.etrace"
+    v1_trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=11,
+            vaddr=start,
+            insns=tuple(x86_fixture.instructions),
+        )
+        + etrace_tb_exec(tb_id=11, insn_count=executed_insns)
+    )
+
+    legacy_lines, legacy_functions = run_lcov(
+        run_etrace, tmp_path, x86_fixture, start, end
+    )
+    output = tmp_path / "v1.info"
+    result = run_etrace(
+        "--trace",
+        v1_trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        x86_fixture.binary,
+        "--nm",
+        x86_fixture.tools["nm"],
+        "--addr2line",
+        x86_fixture.tools["addr2line"],
+        "--dwarfdump",
+        x86_fixture.tools["dwarfdump"],
+        "--coverage-format",
+        "lcov",
+        "--coverage-output",
+        output,
+    )
+    assert result.returncode == 0, result.stderr
+    v1_lines = {}
+    v1_functions = {}
+    for line in output.read_text(encoding="utf-8").splitlines():
+        if line.startswith("DA:"):
+            number, count = line[3:].split(",", 1)
+            v1_lines[int(number)] = int(count)
+        elif line.startswith("FNDA:"):
+            count, name = line[5:].split(",", 1)
+            v1_functions[name] = int(count)
+
+    assert v1_lines == legacy_lines
+    assert v1_functions == legacy_functions
 
 
 def test_x86_fixture_has_variable_length_instructions(x86_fixture):
