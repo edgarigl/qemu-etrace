@@ -58,6 +58,7 @@ enum etrace_info_flags {
 	ETRACE_INFO_F_TB_EXEC = (1 << 2),
 	ETRACE_INFO_F_CONTEXT = (1 << 3),
 	ETRACE_INFO_F_FILTERED = (1 << 4),
+	ETRACE_INFO_F_EXEC_MAPPING = (1 << 5),
 };
 
 enum etrace_context_flags {
@@ -262,6 +263,13 @@ struct etrace_status {
 	uint64_t discontinuity_pc_mismatches;
 	uint32_t flags;
 	uint32_t reserved;
+} __attribute__ ((packed));
+
+struct etrace_status_v1 {
+	struct etrace_status base;
+	uint64_t filtered_execs;
+	uint64_t context_errors;
+	uint64_t mapping_errors;
 } __attribute__ ((packed));
 
 struct etrace_pkg {

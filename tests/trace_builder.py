@@ -75,6 +75,14 @@ def etrace_status(*, unresolved_tb_exits=0, unresolved_discontinuities=0,
     return etrace_packet(ETRACE_TYPE_STATUS, payload + extension)
 
 
+def etrace_status_v1(*, filtered_execs=0, context_errors=0,
+                     mapping_errors=0, **kwargs):
+    extension = struct.pack(
+        "=QQQ", filtered_execs, context_errors, mapping_errors
+    )
+    return etrace_status(extension=extension, **kwargs)
+
+
 def etrace_tb(*, guest_code=b"", host_code=b""):
     payload = struct.pack(
         "=QQQII",

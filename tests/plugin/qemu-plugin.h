@@ -130,6 +130,9 @@ struct qemu_plugin_insn *
 qemu_plugin_tb_get_insn(const struct qemu_plugin_tb *tb, size_t index);
 uint64_t qemu_plugin_insn_vaddr(const struct qemu_plugin_insn *insn);
 size_t qemu_plugin_insn_size(const struct qemu_plugin_insn *insn);
+#if QEMU_PLUGIN_VERSION >= 5
+bool qemu_plugin_translate_vaddr(uint64_t vaddr, uint64_t *hwaddr);
+#endif
 
 #if QEMU_PLUGIN_VERSION >= 2
 struct qemu_plugin_scoreboard *qemu_plugin_scoreboard_new(size_t element_size);

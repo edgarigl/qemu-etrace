@@ -28,7 +28,11 @@ struct tb_data {
 	uint64_t id;
 	uint64_t start;
 	uint64_t end;
+	uint64_t context_id;
 	size_t n_insns;
+	struct etrace_tb_mapping *mappings;
+	size_t n_mappings;
+	bool included;
 	struct {
 		uint64_t start;
 		uint64_t end;
@@ -40,6 +44,10 @@ struct vcpu_exec_state {
 	struct tb_data *pending;
 	uint64_t progress;
 	uint64_t sequence;
+	uint64_t last_included_context_id;
+	uint64_t gap_from_context_id;
+	uint64_t filtered_execs;
+	bool gap_open;
 	bool seen;
 };
 #endif
@@ -82,6 +90,14 @@ struct producer_status {
 	uint64_t unresolved_vcpu_exits;
 	uint64_t output_errors;
 	uint64_t discontinuity_pc_mismatches;
+	uint64_t filtered_execs;
+	uint64_t context_errors;
+	uint64_t mapping_errors;
+};
+
+struct context_range {
+	uint64_t start;
+	uint64_t end;
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -93,7 +109,11 @@ static uint8_t guest_address_bits;
 static int gzip_level = Z_BEST_SPEED;
 static bool gzip_output;
 static bool tb_exec_output;
+static bool hypervisor_filter;
+static bool exec_mapping;
 static uint64_t next_tb_id;
+static struct context_range *context_ranges;
+static size_t nr_context_ranges;
 static struct producer_status producer_status;
 #if QEMU_PLUGIN_VERSION >= 2
 static struct qemu_plugin_scoreboard *exec_state;
@@ -180,7 +200,10 @@ static bool write_headers(void)
 		},
 		.data = {
 			.attr = ETRACE_INFO_F_FINAL_STATUS
-				| (tb_exec_output ? ETRACE_INFO_F_TB_EXEC : 0),
+				| (tb_exec_output ? ETRACE_INFO_F_TB_EXEC : 0)
+				| (hypervisor_filter ? ETRACE_INFO_F_CONTEXT
+					| ETRACE_INFO_F_FILTERED : 0)
+				| (exec_mapping ? ETRACE_INFO_F_EXEC_MAPPING : 0),
 			.version = {
 				.major = tb_exec_output ? ETRACE_VERSION_TB_EXEC
 					: ETRACE_VERSION_LEGACY,
@@ -207,9 +230,158 @@ static bool write_headers(void)
 		},
 	};
 
-	return write_output(&info_packet, sizeof(info_packet))
-		&& write_output(&arch_packet, sizeof(arch_packet));
+	if (!write_output(&info_packet, sizeof(info_packet))
+	    || !write_output(&arch_packet, sizeof(arch_packet)))
+		return false;
+	if (hypervisor_filter) {
+		struct {
+			struct etrace_hdr hdr;
+			struct etrace_context data;
+		} __attribute__ ((packed)) context = {
+			.hdr = {
+				.type = TYPE_CONTEXT,
+				.len = sizeof(context.data),
+			},
+			.data = {
+				.context_id = 1,
+				.pc = context_ranges[0].start,
+				.flags = ETRACE_CONTEXT_F_HYPERVISOR
+					| ETRACE_CONTEXT_F_INCOMPLETE,
+				.privilege = UINT8_MAX,
+			},
+		};
+
+		if (!write_output(&context, sizeof(context)))
+			return false;
+		context.data.context_id = 2;
+		context.data.pc = 0;
+		context.data.flags = ETRACE_CONTEXT_F_INCOMPLETE;
+		if (!write_output(&context, sizeof(context)))
+			return false;
+	}
+	return true;
 }
+
+static bool add_context_range(const char *arg)
+{
+	struct context_range *ranges;
+	unsigned long long start;
+	unsigned long long size;
+	char *separator;
+	char *end;
+
+	errno = 0;
+	start = strtoull(arg, &separator, 0);
+	if (errno || separator == arg || *separator != ':')
+		return false;
+	errno = 0;
+	size = strtoull(separator + 1, &end, 0);
+	if (errno || end == separator + 1 || *end || !size
+	    || start > UINT64_MAX - size)
+		return false;
+	ranges = realloc(context_ranges,
+			 (nr_context_ranges + 1) * sizeof(*context_ranges));
+	if (!ranges)
+		return false;
+	context_ranges = ranges;
+	context_ranges[nr_context_ranges].start = start;
+	context_ranges[nr_context_ranges].end = start + size;
+	nr_context_ranges++;
+	return true;
+}
+
+#if QEMU_PLUGIN_VERSION >= 2
+static int classify_context_range(uint64_t start, uint64_t end)
+{
+	bool overlaps = false;
+	size_t i;
+
+	for (i = 0; i < nr_context_ranges; i++) {
+		if (start >= context_ranges[i].start
+		    && end <= context_ranges[i].end)
+			return 1;
+		if (start < context_ranges[i].end
+		    && end > context_ranges[i].start)
+			overlaps = true;
+	}
+	return overlaps ? -1 : 0;
+}
+#endif
+
+#if QEMU_PLUGIN_VERSION >= 5
+static bool append_mapping(struct tb_data *tb, uint64_t vaddr,
+			   uint64_t paddr, uint64_t len)
+{
+	struct etrace_tb_mapping *mapping;
+	struct etrace_tb_mapping *mappings;
+
+	if (vaddr < tb->start || vaddr - tb->start > UINT32_MAX
+	    || !len || len > UINT32_MAX
+	    || paddr > UINT64_MAX - len)
+		return false;
+	if (tb->n_mappings) {
+		mapping = &tb->mappings[tb->n_mappings - 1];
+		if ((uint64_t)mapping->offset + mapping->len == vaddr - tb->start
+		    && mapping->paddr + mapping->len == paddr
+		    && (uint64_t)mapping->len + len <= UINT32_MAX) {
+			mapping->len += len;
+			return true;
+		}
+	}
+	if (tb->n_mappings == UINT16_MAX)
+		return false;
+	mappings = realloc(tb->mappings,
+			   (tb->n_mappings + 1) * sizeof(*tb->mappings));
+	if (!mappings)
+		return false;
+	tb->mappings = mappings;
+	mapping = &tb->mappings[tb->n_mappings++];
+	mapping->offset = vaddr - tb->start;
+	mapping->len = len;
+	mapping->paddr = paddr;
+	return true;
+}
+
+static bool collect_mappings(struct tb_data *tb)
+{
+	size_t i;
+
+	for (i = 0; i < tb->n_insns; i++) {
+		uint64_t start = tb->insns[i].start;
+		uint64_t size = tb->insns[i].end - start;
+		uint64_t pstart;
+		uint64_t pend;
+
+		if (!qemu_plugin_translate_vaddr(start, &pstart)
+		    || !qemu_plugin_translate_vaddr(tb->insns[i].end - 1,
+						   &pend))
+			goto fail;
+		if (pstart <= UINT64_MAX - (size - 1)
+		    && pstart + size - 1 == pend) {
+			if (!append_mapping(tb, start, pstart, size))
+				goto fail;
+		} else {
+			uint64_t offset;
+
+			for (offset = 0; offset < size; offset++) {
+				uint64_t paddr;
+
+				if (!qemu_plugin_translate_vaddr(start + offset,
+							 &paddr)
+				    || !append_mapping(tb, start + offset, paddr, 1))
+					goto fail;
+			}
+		}
+	}
+	return true;
+
+fail:
+	free(tb->mappings);
+	tb->mappings = NULL;
+	tb->n_mappings = 0;
+	return false;
+}
+#endif
 
 #if QEMU_PLUGIN_VERSION >= 2
 static void write_tb_definition(const struct tb_data *tb)
@@ -223,7 +395,8 @@ static void write_tb_definition(const struct tb_data *tb)
 	size_t i;
 
 	payload_len = offsetof(struct etrace_tb_def, data8)
-		+ tb->n_insns * sizeof(*insns);
+		+ tb->n_insns * sizeof(*insns)
+		+ tb->n_mappings * sizeof(*tb->mappings);
 	packet_len = sizeof(*hdr) + payload_len;
 	packet = calloc(1, packet_len);
 	if (!packet) {
@@ -241,11 +414,17 @@ static void write_tb_definition(const struct tb_data *tb)
 	hdr->len = payload_len;
 	definition->tb_id = tb->id;
 	definition->vaddr = tb->start;
+	definition->context_id = tb->context_id;
 	definition->size = tb->end - tb->start;
 	definition->insn_count = tb->n_insns;
+	definition->mapping_count = tb->n_mappings;
 	for (i = 0; i < tb->n_insns; i++) {
 		insns[i].offset = tb->insns[i].start - tb->start;
 		insns[i].size = tb->insns[i].end - tb->insns[i].start;
+	}
+	if (tb->n_mappings) {
+		memcpy(&insns[tb->n_insns], tb->mappings,
+		       tb->n_mappings * sizeof(*tb->mappings));
 	}
 	write_packet(packet, packet_len);
 	free(packet);
@@ -292,7 +471,8 @@ static void write_exec_range(unsigned int cpu_index, uint64_t start,
 #if QEMU_PLUGIN_VERSION >= 2
 static void write_tb_execution(unsigned int cpu_index,
 			       const struct tb_data *tb,
-			       uint64_t sequence, uint64_t progress)
+			       uint64_t sequence, uint64_t context_id,
+			       uint64_t progress)
 {
 	struct {
 		struct etrace_hdr hdr;
@@ -306,11 +486,40 @@ static void write_tb_execution(unsigned int cpu_index,
 		.data = {
 			.sequence = sequence,
 			.tb_id = tb->id,
+			.context_id = context_id,
 			.insn_count = (uint16_t)progress,
 		},
 	};
 
 	write_packet(&packet, sizeof(packet));
+}
+
+static void write_context_gap(unsigned int cpu_index,
+			      struct vcpu_exec_state *state,
+			      uint64_t to_context_id)
+{
+	struct {
+		struct etrace_hdr hdr;
+		struct etrace_context_gap data;
+	} __attribute__ ((packed)) packet = {
+		.hdr = {
+			.type = TYPE_CONTEXT_GAP,
+			.unit_id = (uint16_t)cpu_index,
+			.len = sizeof(packet.data),
+		},
+		.data = {
+			.sequence = ++state->sequence,
+			.from_context_id = state->gap_from_context_id,
+			.to_context_id = to_context_id,
+			.filtered_execs = state->filtered_execs,
+			.reason = ETRACE_CONTEXT_GAP_FILTERED,
+		},
+	};
+
+	write_packet(&packet, sizeof(packet));
+	state->gap_open = false;
+	state->gap_from_context_id = 0;
+	state->filtered_execs = 0;
 }
 #endif
 
@@ -351,12 +560,26 @@ static bool write_exec_prefix(unsigned int cpu_index,
 	if (tb_exec_output) {
 		struct vcpu_exec_state *state;
 
+		state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
+		if (!tb->included) {
+			if (!state->gap_open) {
+				state->gap_open = true;
+				state->gap_from_context_id =
+					state->last_included_context_id;
+			}
+			state->filtered_execs++;
+			increment_status_counter(&producer_status.filtered_execs);
+			return true;
+		}
 		if (!end)
 			return true;
 		if (end > tb->n_insns)
 			return false;
-		state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
-		write_tb_execution(cpu_index, tb, ++state->sequence, end);
+		if (state->gap_open)
+			write_context_gap(cpu_index, state, tb->context_id);
+		write_tb_execution(cpu_index, tb, ++state->sequence,
+				   tb->context_id, end);
+		state->last_included_context_id = tb->context_id;
 		return true;
 	}
 	if (end > tb->start && end <= tb->end) {
@@ -419,6 +642,8 @@ static void flush_discontinuity_range(unsigned int cpu_index,
 
 	state->pending = NULL;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
+	if (state->gap_open)
+		write_context_gap(cpu_index, state, 0);
 }
 #endif
 
@@ -437,6 +662,8 @@ static void flush_vcpu(unsigned int cpu_index)
 
 	state->pending = NULL;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
+	if (state->gap_open)
+		write_context_gap(cpu_index, state, 0);
 }
 
 #if QEMU_PLUGIN_VERSION >= 7
@@ -530,6 +757,17 @@ static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 	else
 		data->end = last_addr + last_size;
 	data->n_insns = n_insns;
+	data->included = true;
+#if QEMU_PLUGIN_VERSION >= 2
+	if (hypervisor_filter) {
+		int classification = classify_context_range(data->start, data->end);
+
+		data->included = classification > 0;
+		data->context_id = data->included ? 1 : 2;
+		if (classification < 0)
+			increment_status_counter(&producer_status.context_errors);
+	}
+#endif
 
 	pthread_mutex_lock(&lock);
 	data->next = translated_blocks;
@@ -600,12 +838,19 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 		else
 			data->insns[i].end = data->insns[i].start
 				+ qemu_plugin_insn_size(insn);
-		qemu_plugin_register_vcpu_insn_exec_inline_per_vcpu(
-			insn, QEMU_PLUGIN_INLINE_STORE_U64,
-			exec_progress,
-			tb_exec_output ? i + 1 : data->insns[i].end);
+		if (!hypervisor_filter || data->included) {
+			qemu_plugin_register_vcpu_insn_exec_inline_per_vcpu(
+				insn, QEMU_PLUGIN_INLINE_STORE_U64,
+				exec_progress,
+				tb_exec_output ? i + 1 : data->insns[i].end);
+		}
 	}
-	if (tb_exec_output)
+#if QEMU_PLUGIN_VERSION >= 5
+	if (exec_mapping && (!hypervisor_filter || data->included)
+	    && !collect_mappings(data))
+		increment_status_counter(&producer_status.mapping_errors);
+#endif
+	if (tb_exec_output && (!hypervisor_filter || data->included))
 		write_tb_definition(data);
 	qemu_plugin_register_vcpu_tb_exec_cb(
 		tb, vcpu_tb_exec, QEMU_PLUGIN_CB_NO_REGS, data);
@@ -622,6 +867,15 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 		.hdr = {
 			.type = TYPE_STATUS,
 			.len = sizeof(status_packet.data),
+		},
+	};
+	struct {
+		struct etrace_hdr hdr;
+		struct etrace_status_v1 data;
+	} __attribute__ ((packed)) status_packet_v1 = {
+		.hdr = {
+			.type = TYPE_STATUS,
+			.len = sizeof(status_packet_v1.data),
 		},
 	};
 	struct tb_data *tb;
@@ -659,7 +913,18 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 	status_packet.data.flags = ETRACE_STATUS_F_COMPLETE;
 	pthread_mutex_unlock(&lock);
 
-	write_packet(&status_packet, sizeof(status_packet));
+	if (tb_exec_output) {
+		status_packet_v1.data.base = status_packet.data;
+		status_packet_v1.data.filtered_execs =
+			producer_status.filtered_execs;
+		status_packet_v1.data.context_errors =
+			producer_status.context_errors;
+		status_packet_v1.data.mapping_errors =
+			producer_status.mapping_errors;
+		write_packet(&status_packet_v1, sizeof(status_packet_v1));
+	} else {
+		write_packet(&status_packet, sizeof(status_packet));
+	}
 
 	pthread_mutex_lock(&lock);
 	if (trace_gz) {
@@ -677,9 +942,13 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 	while (tb) {
 		struct tb_data *next = tb->next;
 
+		free(tb->mappings);
 		free(tb);
 		tb = next;
 	}
+	free(context_ranges);
+	context_ranges = NULL;
+	nr_context_ranges = 0;
 
 #if QEMU_PLUGIN_VERSION >= 2
 	if (exec_state) {
@@ -702,9 +971,14 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 
 	gzip_output = false;
 	tb_exec_output = false;
+	hypervisor_filter = false;
+	exec_mapping = false;
 	gzip_level = Z_BEST_SPEED;
 	trace_failed = false;
 	next_tb_id = 0;
+	free(context_ranges);
+	context_ranges = NULL;
+	nr_context_ranges = 0;
 	memset(&producer_status, 0, sizeof(producer_status));
 	for (i = 0; i < argc; i++) {
 		if (!strncmp(argv[i], "out=", 4) && argv[i][4]) {
@@ -734,11 +1008,51 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 				"plugin API 2 or newer\n");
 			return -1;
 #endif
+		} else if (!strcmp(argv[i], "context=hypervisor")) {
+			hypervisor_filter = true;
+		} else if (!strncmp(argv[i], "context-range=", 14)) {
+			if (!add_context_range(argv[i] + 14)) {
+				fprintf(stderr,
+					"qemu-etrace-plugin: invalid context range: %s\n",
+					argv[i] + 14);
+				return -1;
+			}
+		} else if (!strcmp(argv[i], "exec-mapping=on")) {
+#if QEMU_PLUGIN_VERSION >= 5
+			exec_mapping = true;
+#else
+			fprintf(stderr,
+				"qemu-etrace-plugin: execution mappings require QEMU "
+				"plugin API 5 or newer\n");
+			return -1;
+#endif
+		} else if (!strcmp(argv[i], "exec-mapping=off")) {
+			exec_mapping = false;
 		} else {
 			fprintf(stderr, "qemu-etrace-plugin: invalid option: %s\n",
 				argv[i]);
 			return -1;
 		}
+	}
+	if (hypervisor_filter && !tb_exec_output) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: context filtering requires format v1\n");
+		return -1;
+	}
+	if (hypervisor_filter && !nr_context_ranges) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: context=hypervisor requires a context range\n");
+		return -1;
+	}
+	if (nr_context_ranges && !hypervisor_filter) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: context ranges require context=hypervisor\n");
+		return -1;
+	}
+	if (exec_mapping && !tb_exec_output) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: execution mappings require format v1\n");
+		return -1;
 	}
 
 	fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0600);

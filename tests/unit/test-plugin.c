@@ -51,6 +51,12 @@ static qemu_plugin_vcpu_simple_cb_t vcpu_exit_cb;
 #endif
 #endif
 static void *exit_data;
+#if QEMU_PLUGIN_VERSION >= 5
+static uint64_t translate_offset;
+static uint64_t translate_split_vaddr = UINT64_MAX;
+static uint64_t translate_split_offset;
+static uint64_t translate_fail_vaddr = UINT64_MAX;
+#endif
 #ifdef HAVE_QEMU_PLUGIN_VCPU_DISCON_CB
 static qemu_plugin_vcpu_discon_cb_t discon_cb;
 static enum qemu_plugin_discon_type discon_types;
@@ -217,6 +223,17 @@ size_t qemu_plugin_insn_size(const struct qemu_plugin_insn *insn)
 {
 	return insn->size;
 }
+
+#if QEMU_PLUGIN_VERSION >= 5
+bool qemu_plugin_translate_vaddr(uint64_t vaddr, uint64_t *hwaddr)
+{
+	if (vaddr == translate_fail_vaddr)
+		return false;
+	*hwaddr = vaddr + (vaddr >= translate_split_vaddr
+		? translate_split_offset : translate_offset);
+	return true;
+}
+#endif
 
 static void translate_tb(struct qemu_plugin_tb *tb)
 {
@@ -481,9 +498,11 @@ static void assert_exec64(const uint8_t **cursor, unsigned int cpu_index,
 
 #if QEMU_PLUGIN_VERSION >= 2
 static void assert_tb_definition(const uint8_t **cursor, uint64_t tb_id,
-				 uint64_t vaddr,
+				 uint64_t vaddr, uint64_t context_id,
 				 const struct qemu_plugin_insn *expected,
-				 size_t n_insns)
+				 size_t n_insns,
+				 const struct etrace_tb_mapping *expected_mappings,
+				 size_t n_mappings)
 {
 	struct etrace_tb_def definition;
 	struct etrace_tb_insn insn;
@@ -494,26 +513,73 @@ static void assert_tb_definition(const uint8_t **cursor, uint64_t tb_id,
 	g_assert_cmpuint(hdr.type, ==, TYPE_TB_DEF);
 	g_assert_cmpuint(hdr.len, ==,
 			 offsetof(struct etrace_tb_def, data8)
-			 + n_insns * sizeof(insn));
+			 + n_insns * sizeof(insn)
+			 + n_mappings * sizeof(*expected_mappings));
 	read_data(cursor, &definition, offsetof(struct etrace_tb_def, data8));
 	g_assert_cmpuint(definition.tb_id, ==, tb_id);
 	g_assert_cmpuint(definition.vaddr, ==, vaddr);
+	g_assert_cmpuint(definition.context_id, ==, context_id);
 	g_assert_cmpuint(definition.size, ==,
 			 expected[n_insns - 1].vaddr + expected[n_insns - 1].size
 			 - vaddr);
 	g_assert_cmpuint(definition.insn_count, ==, n_insns);
-	g_assert_cmpuint(definition.mapping_count, ==, 0);
+	g_assert_cmpuint(definition.mapping_count, ==, n_mappings);
 	g_assert_cmpuint(definition.code_len, ==, 0);
 	for (i = 0; i < n_insns; i++) {
 		read_data(cursor, &insn, sizeof(insn));
 		g_assert_cmpuint(insn.offset, ==, expected[i].vaddr - vaddr);
 		g_assert_cmpuint(insn.size, ==, expected[i].size);
 	}
+	for (i = 0; i < n_mappings; i++) {
+		struct etrace_tb_mapping mapping;
+
+		read_data(cursor, &mapping, sizeof(mapping));
+		g_assert_cmpuint(mapping.offset, ==, expected_mappings[i].offset);
+		g_assert_cmpuint(mapping.len, ==, expected_mappings[i].len);
+		g_assert_cmpuint(mapping.paddr, ==, expected_mappings[i].paddr);
+	}
+}
+
+static void assert_context(const uint8_t **cursor, uint64_t context_id,
+			   uint32_t flags)
+{
+	struct etrace_context context;
+	struct etrace_hdr hdr;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_CONTEXT);
+	g_assert_cmpuint(hdr.len, ==, sizeof(context));
+	read_data(cursor, &context, sizeof(context));
+	g_assert_cmpuint(context.context_id, ==, context_id);
+	g_assert_cmpuint(context.flags, ==, flags);
+	g_assert_cmpuint(context.register_count, ==, 0);
+}
+
+static void assert_context_gap(const uint8_t **cursor,
+			       unsigned int cpu_index, uint64_t sequence,
+			       uint64_t from_context_id,
+			       uint64_t to_context_id,
+			       uint64_t filtered_execs)
+{
+	struct etrace_context_gap gap;
+	struct etrace_hdr hdr;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_CONTEXT_GAP);
+	g_assert_cmpuint(hdr.unit_id, ==, cpu_index);
+	g_assert_cmpuint(hdr.len, ==, sizeof(gap));
+	read_data(cursor, &gap, sizeof(gap));
+	g_assert_cmpuint(gap.sequence, ==, sequence);
+	g_assert_cmpuint(gap.from_context_id, ==, from_context_id);
+	g_assert_cmpuint(gap.to_context_id, ==, to_context_id);
+	g_assert_cmpuint(gap.filtered_execs, ==, filtered_execs);
+	g_assert_cmpuint(gap.reason, ==, ETRACE_CONTEXT_GAP_FILTERED);
 }
 
 static void assert_tb_execution(const uint8_t **cursor,
 				unsigned int cpu_index, uint64_t sequence,
-				uint64_t tb_id, uint16_t insn_count)
+				uint64_t tb_id, uint64_t context_id,
+				uint16_t insn_count)
 {
 	struct etrace_tb_exec execution;
 	struct etrace_hdr hdr;
@@ -525,7 +591,7 @@ static void assert_tb_execution(const uint8_t **cursor,
 	read_data(cursor, &execution, sizeof(execution));
 	g_assert_cmpuint(execution.sequence, ==, sequence);
 	g_assert_cmpuint(execution.tb_id, ==, tb_id);
-	g_assert_cmpuint(execution.context_id, ==, 0);
+	g_assert_cmpuint(execution.context_id, ==, context_id);
 	g_assert_cmpuint(execution.insn_count, ==, insn_count);
 }
 #endif
@@ -542,6 +608,20 @@ static struct etrace_status read_status(const uint8_t **cursor)
 	g_assert_cmpuint(status.flags, ==, ETRACE_STATUS_F_COMPLETE);
 	return status;
 }
+
+#if QEMU_PLUGIN_VERSION >= 2
+static struct etrace_status_v1 read_status_v1(const uint8_t **cursor)
+{
+	struct etrace_status_v1 status;
+	struct etrace_hdr hdr;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_STATUS);
+	g_assert_cmpuint(hdr.len, ==, sizeof(status));
+	read_data(cursor, &status, sizeof(status));
+	return status;
+}
+#endif
 
 static void assert_status(const uint8_t **cursor,
 			  uint64_t discontinuity_pc_mismatches)
@@ -1043,11 +1123,18 @@ static void test_tb_execution_trace(void)
 	g_assert_cmpuint(read_trace_headers_version(&cursor, &major), ==,
 			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC);
 	g_assert_cmpuint(major, ==, ETRACE_VERSION_TB_EXEC);
-	assert_tb_definition(&cursor, 1, 0x5000, insns,
-			     G_N_ELEMENTS(insns));
-	assert_tb_execution(&cursor, 2, 1, 1, 2);
-	assert_tb_execution(&cursor, 2, 2, 1, 3);
-	assert_status(&cursor, 0);
+	assert_tb_definition(&cursor, 1, 0x5000, 0, insns,
+			     G_N_ELEMENTS(insns), NULL, 0);
+	assert_tb_execution(&cursor, 2, 1, 1, 0, 2);
+	assert_tb_execution(&cursor, 2, 2, 1, 0, 3);
+	{
+		struct etrace_status_v1 status = read_status_v1(&cursor);
+
+		g_assert_cmpuint(status.base.flags, ==, ETRACE_STATUS_F_COMPLETE);
+		g_assert_cmpuint(status.filtered_execs, ==, 0);
+		g_assert_cmpuint(status.context_errors, ==, 0);
+		g_assert_cmpuint(status.mapping_errors, ==, 0);
+	}
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -1055,6 +1142,250 @@ static void test_tb_execution_trace(void)
 	g_free(args[0]);
 	g_free(path);
 }
+
+static void test_hypervisor_filter(void)
+{
+	struct qemu_plugin_insn first_insns[] = {
+		{ .vaddr = 0x1000, .size = 4 },
+		{ .vaddr = 0x1004, .size = 4 },
+	};
+	struct qemu_plugin_insn guest_insns[] = {
+		{ .vaddr = 0x2000, .size = 4 },
+		{ .vaddr = 0x2004, .size = 4 },
+	};
+	struct qemu_plugin_insn second_insns[] = {
+		{ .vaddr = 0x1080, .size = 4 },
+	};
+	struct qemu_plugin_tb first = {
+		.vaddr = 0x1000,
+		.insns = first_insns,
+		.n_insns = G_N_ELEMENTS(first_insns),
+	};
+	struct qemu_plugin_tb guest = {
+		.vaddr = 0x2000,
+		.insns = guest_insns,
+		.n_insns = G_N_ELEMENTS(guest_insns),
+	};
+	struct qemu_plugin_tb second = {
+		.vaddr = 0x1080,
+		.insns = second_insns,
+		.n_insns = G_N_ELEMENTS(second_insns),
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[4];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	uint16_t major;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+	args[2] = "context=hypervisor";
+	args[3] = "context-range=0x1000:0x100";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 4, args), ==, 0);
+	translate_tb(&first);
+	translate_tb(&guest);
+	translate_tb(&second);
+	execute_tb_prefix(&first, 3, first.n_insns);
+	execute_tb_prefix(&guest, 3, guest.n_insns);
+	execute_tb_prefix(&guest, 3, 1);
+	execute_tb_prefix(&second, 3, second.n_insns);
+	exit_vcpu(3);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	g_assert_cmpuint(read_trace_headers_version(&cursor, &major), ==,
+			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
+			 | ETRACE_INFO_F_CONTEXT | ETRACE_INFO_F_FILTERED);
+	g_assert_cmpuint(major, ==, ETRACE_VERSION_TB_EXEC);
+	assert_context(&cursor, 1, ETRACE_CONTEXT_F_HYPERVISOR
+				   | ETRACE_CONTEXT_F_INCOMPLETE);
+	assert_context(&cursor, 2, ETRACE_CONTEXT_F_INCOMPLETE);
+	assert_tb_definition(&cursor, 1, 0x1000, 1, first_insns,
+			     G_N_ELEMENTS(first_insns), NULL, 0);
+	assert_tb_definition(&cursor, 3, 0x1080, 1, second_insns,
+			     G_N_ELEMENTS(second_insns), NULL, 0);
+	assert_tb_execution(&cursor, 3, 1, 1, 1, 2);
+	assert_context_gap(&cursor, 3, 2, 1, 1, 2);
+	assert_tb_execution(&cursor, 3, 3, 3, 1, 1);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.base.flags, ==, ETRACE_STATUS_F_COMPLETE);
+	g_assert_cmpuint(status.filtered_execs, ==, 2);
+	g_assert_cmpuint(status.context_errors, ==, 0);
+	g_assert_cmpuint(status.mapping_errors, ==, 0);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
+static void test_context_filter_options(void)
+{
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *missing_format[] = {
+		"context=hypervisor", "context-range=0x1000:0x100",
+	};
+	char *missing_range[] = { "format=v1", "context=hypervisor" };
+	char *orphan_range[] = { "format=v1", "context-range=0x1000:0x100" };
+	char *invalid_range[] = {
+		"format=v1", "context=hypervisor", "context-range=broken",
+	};
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, missing_format), ==, -1);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, missing_range), ==, -1);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, orphan_range), ==, -1);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 3, invalid_range), ==, -1);
+}
+
+#if QEMU_PLUGIN_VERSION >= 5
+static void test_execution_mappings(void)
+{
+	struct qemu_plugin_insn insns[] = {
+		{ .vaddr = 0x6000, .size = 4 },
+		{ .vaddr = 0x6004, .size = 4 },
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x6000,
+		.insns = insns,
+		.n_insns = G_N_ELEMENTS(insns),
+	};
+	const struct etrace_tb_mapping mappings[] = {
+		{ .offset = 0, .len = 4, .paddr = 0x16000 },
+		{ .offset = 4, .len = 4, .paddr = 0x26004 },
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 5, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[3];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	int fd;
+
+	translate_offset = 0x10000;
+	translate_split_vaddr = 0x6004;
+	translate_split_offset = 0x20000;
+	translate_fail_vaddr = UINT64_MAX;
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+	args[2] = "exec-mapping=on";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 3, args), ==, 0);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 1, tb.n_insns);
+	exit_vcpu(1);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
+			 | ETRACE_INFO_F_EXEC_MAPPING);
+	assert_tb_definition(&cursor, 1, 0x6000, 0, insns,
+			     G_N_ELEMENTS(insns), mappings,
+			     G_N_ELEMENTS(mappings));
+	assert_tb_execution(&cursor, 1, 1, 1, 0, 2);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.mapping_errors, ==, 0);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	translate_offset = 0;
+	translate_split_vaddr = UINT64_MAX;
+	translate_split_offset = 0;
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
+static void test_execution_mapping_failure(void)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x7000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x7000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 5, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[3];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	int fd;
+
+	translate_fail_vaddr = 0x7000;
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+	args[2] = "exec-mapping=on";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 3, args), ==, 0);
+	translate_tb(&tb);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	read_trace_headers(&cursor);
+	assert_tb_definition(&cursor, 1, 0x7000, 0, &insn, 1, NULL, 0);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.mapping_errors, ==, 1);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	translate_fail_vaddr = UINT64_MAX;
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
+static void test_execution_mapping_requires_v1(void)
+{
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 5, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *arg = "exec-mapping=on";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, -1);
+}
+#endif
 #else
 static void test_tb_execution_requires_api_2(void)
 {
@@ -1370,6 +1701,16 @@ int main(int argc, char **argv)
 #if QEMU_PLUGIN_VERSION >= 2
 	g_test_add_func("/plugin/tb-execution-trace",
 			test_tb_execution_trace);
+	g_test_add_func("/plugin/hypervisor-filter", test_hypervisor_filter);
+	g_test_add_func("/plugin/context-filter-options",
+			test_context_filter_options);
+#if QEMU_PLUGIN_VERSION >= 5
+	g_test_add_func("/plugin/execution-mappings", test_execution_mappings);
+	g_test_add_func("/plugin/execution-mapping-failure",
+			test_execution_mapping_failure);
+	g_test_add_func("/plugin/execution-mapping-requires-v1",
+			test_execution_mapping_requires_v1);
+#endif
 #else
 	g_test_add_func("/plugin/tb-execution-requires-api-2",
 			test_tb_execution_requires_api_2);

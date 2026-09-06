@@ -52,6 +52,9 @@ struct etracer {
 	struct etrace_info_data info;
 	struct etrace_arch arch;
 	struct etrace_status status;
+	uint64_t filtered_execs;
+	uint64_t context_errors;
+	uint64_t mapping_errors;
 	GHashTable *tb_defs;
 	GHashTable *contexts;
 	struct etrace_pkg *pkg;
@@ -359,6 +362,12 @@ static bool etrace_validate_pkg(struct etracer *t)
 	case TYPE_STATUS:
 		if (pkg->hdr.len < sizeof(pkg->status))
 			return etrace_invalid_pkg(pkg, "short status payload");
+		if (t->info_seen
+		    && t->info.version.major >= ETRACE_VERSION_TB_EXEC
+		    && t->final_status_required
+		    && pkg->hdr.len < sizeof(struct etrace_status_v1))
+			return etrace_invalid_pkg(pkg,
+				"short version 1 status payload");
 		break;
 	case TYPE_TB_DEF:
 		if (!etrace_v1_record(t, pkg))
@@ -415,6 +424,9 @@ void etrace_process_info(struct etracer *t)
 static void etrace_process_status(struct etracer *t)
 {
 	struct etrace_status *status = &t->pkg->status;
+	const struct etrace_status_v1 *status_v1 =
+		(const void *)&t->pkg->status;
+	bool have_v1 = t->pkg->hdr.len >= sizeof(*status_v1);
 
 	t->status = *status;
 	t->final_status_seen = true;
@@ -423,6 +435,14 @@ static void etrace_process_status(struct etracer *t)
 		|| status->unresolved_discontinuities
 		|| status->unresolved_vcpu_exits
 		|| status->output_errors;
+	if (have_v1) {
+		t->filtered_execs = status_v1->filtered_execs;
+		t->context_errors = status_v1->context_errors;
+		t->mapping_errors = status_v1->mapping_errors;
+		t->producer_failed = t->producer_failed
+			|| status_v1->context_errors
+			|| status_v1->mapping_errors;
+	}
 
 	if (t->tr.fp_out) {
 		fprintf(t->tr.fp_out,
@@ -437,6 +457,15 @@ static void etrace_process_status(struct etracer *t)
 			status->unresolved_vcpu_exits,
 			status->output_errors,
 			status->discontinuity_pc_mismatches);
+		if (have_v1) {
+			fprintf(t->tr.fp_out,
+				"S1 filtered-exec=%" PRIu64
+				" context-errors=%" PRIu64
+				" mapping-errors=%" PRIu64 "\n",
+				status_v1->filtered_execs,
+				status_v1->context_errors,
+				status_v1->mapping_errors);
+		}
 	}
 }
 
@@ -1002,11 +1031,15 @@ void etrace_show(int fd, FILE *fp_out,
 			"unresolved-tb=%" PRIu64
 			" unresolved-discontinuity=%" PRIu64
 			" unresolved-vcpu=%" PRIu64
-			" write-errors=%" PRIu64 "\n",
+			" write-errors=%" PRIu64
+			" context-errors=%" PRIu64
+			" mapping-errors=%" PRIu64 "\n",
 			t.status.unresolved_tb_exits,
 			t.status.unresolved_discontinuities,
 			t.status.unresolved_vcpu_exits,
-			t.status.output_errors);
+			t.status.output_errors,
+			t.context_errors,
+			t.mapping_errors);
 		exit(EXIT_FAILURE);
 	}
 	fprintf(stderr, "done.\n");

@@ -14,6 +14,7 @@ from tests.trace_builder import (
     etrace_old_event,
     etrace_packet,
     etrace_status,
+    etrace_status_v1,
     etrace_tb,
     etrace_tb_def,
     etrace_tb_exec,
@@ -78,6 +79,34 @@ def test_etrace_rejects_incomplete_status(run_etrace, tmp_path):
 
     assert result.returncode != 0
     assert "producer reported invalid execution data" in result.stderr
+
+
+@pytest.mark.parametrize("counter", ["context_errors", "mapping_errors"])
+def test_etrace_rejects_v1_producer_failure(run_etrace, tmp_path, counter):
+    trace = tmp_path / f"v1-producer-failure-{counter}.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_FINAL_STATUS)
+        + etrace_status_v1(**{counter: 2})
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "producer reported invalid execution data" in result.stderr
+    assert f"{counter.replace('_', '-')}=2" in result.stderr
+
+
+def test_etrace_requires_extended_v1_status(run_etrace, tmp_path):
+    trace = tmp_path / "short-v1-status.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_FINAL_STATUS)
+        + etrace_status()
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "short version 1 status payload" in result.stderr
 
 
 def test_etrace_rejects_record_after_final_status(run_etrace, tmp_path):
