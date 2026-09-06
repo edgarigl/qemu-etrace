@@ -31,6 +31,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <unistd.h>
+#include <glib.h>
 #include <zlib.h>
 
 #include "util.h"
@@ -42,7 +43,7 @@
 #include "trace.h"
 #include "etrace.h"
 
-#define ETRACE_MIN_VERSION_MAJOR 0
+#define ETRACE_MAX_VERSION_MAJOR ETRACE_VERSION_TB_EXEC
 
 #define MAX_PKG (2 * 1024 * 1024)
 
@@ -51,12 +52,28 @@ struct etracer {
 	struct etrace_info_data info;
 	struct etrace_arch arch;
 	struct etrace_status status;
+	GHashTable *tb_defs;
 	struct etrace_pkg *pkg;
 	gzFile input;
+	bool info_seen;
 	bool final_status_required;
 	bool final_status_seen;
 	bool producer_failed;
 };
+
+struct etrace_tb_definition {
+	uint64_t tb_id;
+	uint64_t vaddr;
+	uint64_t context_id;
+	uint32_t size;
+	uint16_t insn_count;
+	struct etrace_tb_insn insns[];
+};
+
+static void etrace_output_exec(struct tracer *tr,
+			       const struct trace_exec *exec,
+			       const struct trace_exec_segment *segment,
+			       void *opaque);
 
 static ssize_t etrace_read(struct etracer *t, void *buf, size_t len)
 {
@@ -142,6 +159,86 @@ static bool etrace_names_valid(const uint8_t *names, size_t available,
 		&& names[names_len - 1] == '\0';
 }
 
+static bool etrace_v1_record(const struct etracer *t,
+			     const struct etrace_pkg *pkg)
+{
+	if (!t->info_seen || t->info.version.major < ETRACE_VERSION_TB_EXEC)
+		return etrace_invalid_pkg(pkg,
+			"version 1 record without a version 1 information record");
+	return true;
+}
+
+static bool etrace_validate_tb_def(const struct etrace_pkg *pkg)
+{
+	const struct etrace_tb_def *tb = &pkg->tb_def;
+	const struct etrace_tb_insn *insns;
+	const struct etrace_tb_mapping *mappings;
+	size_t fixed_len = offsetof(struct etrace_tb_def, data8);
+	size_t variable_len;
+	size_t insn_bytes;
+	size_t mapping_bytes;
+	uint64_t expected_offset;
+	uint16_t i;
+
+	if (pkg->hdr.len < fixed_len)
+		return etrace_invalid_pkg(pkg, "short TB definition payload");
+	if (!tb->tb_id)
+		return etrace_invalid_pkg(pkg, "zero TB ID");
+	if (!tb->size || !tb->insn_count)
+		return etrace_invalid_pkg(pkg, "empty TB definition");
+	if (tb->vaddr > UINT64_MAX - tb->size)
+		return etrace_invalid_pkg(pkg, "TB virtual range overflows");
+
+	variable_len = pkg->hdr.len - fixed_len;
+	insn_bytes = (size_t)tb->insn_count * sizeof(*insns);
+	mapping_bytes = (size_t)tb->mapping_count * sizeof(*mappings);
+	if (insn_bytes > variable_len
+	    || mapping_bytes > variable_len - insn_bytes
+	    || tb->code_len > variable_len - insn_bytes - mapping_bytes)
+		return etrace_invalid_pkg(pkg, "TB definition arrays exceed payload");
+	if (tb->code_len && tb->code_len != tb->size)
+		return etrace_invalid_pkg(pkg, "partial TB code image");
+
+	insns = (const void *)tb->data8;
+	expected_offset = 0;
+	for (i = 0; i < tb->insn_count; i++) {
+		uint64_t end;
+
+		if (!insns[i].size || insns[i].offset != expected_offset)
+			return etrace_invalid_pkg(pkg,
+				"non-contiguous TB instruction layout");
+		end = (uint64_t)insns[i].offset + insns[i].size;
+		if (end > tb->size)
+			return etrace_invalid_pkg(pkg,
+				"TB instruction exceeds virtual range");
+		expected_offset = end;
+	}
+	if (expected_offset != tb->size)
+		return etrace_invalid_pkg(pkg,
+			"TB instructions do not cover virtual range");
+
+	mappings = (const void *)(tb->data8 + insn_bytes);
+	expected_offset = 0;
+	for (i = 0; i < tb->mapping_count; i++) {
+		uint64_t end;
+
+		if (!mappings[i].len || mappings[i].offset != expected_offset)
+			return etrace_invalid_pkg(pkg,
+				"non-contiguous TB mapping layout");
+		end = (uint64_t)mappings[i].offset + mappings[i].len;
+		if (end > tb->size
+		    || mappings[i].paddr > UINT64_MAX - mappings[i].len)
+			return etrace_invalid_pkg(pkg,
+				"TB mapping exceeds address range");
+		expected_offset = end;
+	}
+	if (tb->mapping_count && expected_offset != tb->size)
+		return etrace_invalid_pkg(pkg,
+			"TB mappings do not cover virtual range");
+
+	return true;
+}
+
 static bool etrace_validate_pkg(struct etracer *t)
 {
 	struct etrace_pkg *pkg = t->pkg;
@@ -223,6 +320,16 @@ static bool etrace_validate_pkg(struct etracer *t)
 		if (pkg->hdr.len < sizeof(pkg->status))
 			return etrace_invalid_pkg(pkg, "short status payload");
 		break;
+	case TYPE_TB_DEF:
+		if (!etrace_v1_record(t, pkg))
+			return false;
+		return etrace_validate_tb_def(pkg);
+	case TYPE_TB_EXEC:
+		if (!etrace_v1_record(t, pkg))
+			return false;
+		if (pkg->hdr.len < sizeof(pkg->tb_exec))
+			return etrace_invalid_pkg(pkg, "short TB execution payload");
+		break;
 	default:
 		break;
 	}
@@ -233,19 +340,21 @@ static void bad_version(struct etracer *t)
 {
 	fprintf(stderr,
 		"Trace-file has version %u.%u but qemu-etrace only supports "
-		"%u.x\n", t->info.version.major, t->info.version.minor,
-		ETRACE_MIN_VERSION_MAJOR);
+		"versions through %u.x\n", t->info.version.major,
+		t->info.version.minor,
+		ETRACE_MAX_VERSION_MAJOR);
 	exit(1);
 }
 
 void etrace_process_info(struct etracer *t)
 {
 	t->info = t->pkg->info;
+	t->info_seen = true;
 	if (t->info.attr & ETRACE_INFO_F_FINAL_STATUS)
 		t->final_status_required = true;
 
 	/* Validate version.  */
-	if (t->info.version.major > ETRACE_MIN_VERSION_MAJOR)
+	if (t->info.version.major > ETRACE_MAX_VERSION_MAJOR)
 		bad_version(t);
 }
 
@@ -316,6 +425,76 @@ void etrace_process_tb(struct etracer *t)
 			pkg->tb.host_code_len);
 		fputc('\n', t->tr.fp_out);
 	}
+}
+
+static bool etrace_process_tb_def(struct etracer *t)
+{
+	const struct etrace_tb_def *tb = &t->pkg->tb_def;
+	struct etrace_tb_definition *definition;
+	const struct etrace_tb_insn *insns = (const void *)tb->data8;
+	size_t alloc_size = sizeof(*definition)
+		+ (size_t)tb->insn_count * sizeof(definition->insns[0]);
+
+	if (g_hash_table_contains(t->tb_defs, &tb->tb_id))
+		return etrace_invalid_pkg(t->pkg, "duplicate TB ID");
+
+	definition = safe_malloc(alloc_size);
+	definition->tb_id = tb->tb_id;
+	definition->vaddr = tb->vaddr;
+	definition->context_id = tb->context_id;
+	definition->size = tb->size;
+	definition->insn_count = tb->insn_count;
+	memcpy(definition->insns, insns,
+	       (size_t)tb->insn_count * sizeof(definition->insns[0]));
+	g_hash_table_insert(t->tb_defs, &definition->tb_id, definition);
+
+	if (t->tr.fp_out) {
+		const struct etrace_tb_mapping *mappings = (const void *)(
+			tb->data8 + (size_t)tb->insn_count * sizeof(*insns));
+
+		fprintf(t->tr.fp_out,
+			"T id=%" PRIx64 " virt=%" PRIx64 "-%" PRIx64
+			" context=%" PRIx64 " insns=%u mappings=%u",
+			tb->tb_id, tb->vaddr, tb->vaddr + tb->size,
+			tb->context_id, tb->insn_count, tb->mapping_count);
+		if (tb->mapping_count)
+			fprintf(t->tr.fp_out, " phys=%" PRIx64,
+				mappings[0].paddr);
+		fputc('\n', t->tr.fp_out);
+	}
+
+	return true;
+}
+
+static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
+{
+	const struct etrace_tb_exec *tb_exec = &t->pkg->tb_exec;
+	struct etrace_tb_definition *definition;
+	struct trace_exec exec;
+	uint16_t last;
+
+	definition = g_hash_table_lookup(t->tb_defs, &tb_exec->tb_id);
+	if (!definition)
+		return etrace_invalid_pkg(t->pkg, "undefined TB ID");
+	if (!tb_exec->insn_count
+	    || tb_exec->insn_count > definition->insn_count)
+		return etrace_invalid_pkg(t->pkg,
+			"invalid dispatched instruction count");
+
+	last = tb_exec->insn_count - 1;
+	exec = (struct trace_exec) {
+		.time = tb_exec->time,
+		.start = definition->vaddr,
+		.end = definition->vaddr + definition->insns[last].offset
+			+ definition->insns[last].size,
+		.tb_id = tb_exec->tb_id,
+		.context_id = tb_exec->context_id,
+		.duration = tb_exec->duration,
+		.unit_id = t->pkg->hdr.unit_id,
+		.flags = tb_exec->flags,
+	};
+	trace_process_exec(&t->tr, cov_fmt, &exec, etrace_output_exec, NULL);
+	return true;
 }
 
 static inline int hexchar(unsigned int val)
@@ -578,6 +757,7 @@ void etrace_show(int fd, FILE *fp_out,
 	}
 
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
+	t.tb_defs = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, free);
 
 	/* Short path for passthrough.  */
 	if (trace_out_fmt == trace_in_fmt) {
@@ -635,6 +815,20 @@ void etrace_show(int fd, FILE *fp_out,
 		case TYPE_STATUS:
 			etrace_process_status(&t);
 			break;
+		case TYPE_TB_DEF:
+			if (!etrace_process_tb_def(&t)) {
+				g_hash_table_destroy(t.tb_defs);
+				free(t.pkg);
+				exit(EXIT_FAILURE);
+			}
+			break;
+		case TYPE_TB_EXEC:
+			if (!etrace_process_tb_exec(&t, cov_fmt)) {
+				g_hash_table_destroy(t.tb_defs);
+				free(t.pkg);
+				exit(EXIT_FAILURE);
+			}
+			break;
 		default:
 			/* Show a warning once. We trust the version handling
 			   to abort when the format is truly incompatible.  */
@@ -668,6 +862,7 @@ void etrace_show(int fd, FILE *fp_out,
 			}
 		}
 	}
+	g_hash_table_destroy(t.tb_defs);
 	free(t.pkg);
 	if (gzclose(t.input) != Z_OK) {
 		fprintf(stderr, "Unable to finish ETrace input\n");

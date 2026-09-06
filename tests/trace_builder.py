@@ -8,6 +8,8 @@ ETRACE_TYPE_TB = 2
 ETRACE_TYPE_OLD_EVENT_U64 = 7
 ETRACE_TYPE_DISCONTINUITY = 9
 ETRACE_TYPE_STATUS = 10
+ETRACE_TYPE_TB_DEF = 11
+ETRACE_TYPE_TB_EXEC = 12
 ETRACE_INFO_F_FINAL_STATUS = 1 << 1
 QEMU_SIMPLE_HEADER_EVENT_ID = (1 << 64) - 1
 QEMU_SIMPLE_DROPPED_EVENT_ID = (1 << 64) - 2
@@ -79,6 +81,56 @@ def etrace_tb(*, guest_code=b"", host_code=b""):
         len(host_code),
     )
     return etrace_packet(ETRACE_TYPE_TB, payload + guest_code + host_code)
+
+
+def etrace_tb_def(*, tb_id=1, vaddr=0x1000, context_id=0,
+                  code_hash=0, size=None, insns=((0, 4),), mappings=(),
+                  code=b"", flags=0, reserved=0, extension=b""):
+    if size is None:
+        size = max((offset + insn_size for offset, insn_size in insns),
+                   default=0)
+    payload = struct.pack(
+        "=QQQQIIHHII",
+        tb_id,
+        vaddr,
+        context_id,
+        code_hash,
+        size,
+        len(code),
+        len(insns),
+        len(mappings),
+        flags,
+        reserved,
+    )
+    payload += b"".join(
+        struct.pack("=IHH", offset, insn_size, 0)
+        for offset, insn_size in insns
+    )
+    payload += b"".join(
+        struct.pack("=IIQ", offset, length, paddr)
+        for offset, length, paddr in mappings
+    )
+    return etrace_packet(ETRACE_TYPE_TB_DEF, payload + code + extension)
+
+
+def etrace_tb_exec(*, tb_id=1, sequence=0, time=0, context_id=0,
+                   duration=0, insn_count=1, flags=0, extension=b"",
+                   unit_id=0):
+    payload = struct.pack(
+        "=QQQQIHH",
+        sequence,
+        time,
+        tb_id,
+        context_id,
+        duration,
+        insn_count,
+        flags,
+    )
+    return etrace_packet(
+        ETRACE_TYPE_TB_EXEC,
+        payload + extension,
+        unit_id=unit_id,
+    )
 
 
 def etrace_exec32(*, start_time=0, duration=0, start, end):

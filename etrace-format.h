@@ -32,8 +32,15 @@ enum {
 	TYPE_EVENT_U64 = 8,
 	TYPE_DISCONTINUITY = 9,
 	TYPE_STATUS = 10,
+	TYPE_TB_DEF = 11,
+	TYPE_TB_EXEC = 12,
 	TYPE_INFO = 0x4554,
 } __attribute__ ((packed));
+
+enum {
+	ETRACE_VERSION_LEGACY = 0,
+	ETRACE_VERSION_TB_EXEC = 1,
+};
 
 struct etrace_hdr {
 	uint16_t type;
@@ -111,6 +118,47 @@ struct etrace_tb {
 	uint8_t data8[0];
 } __attribute__ ((packed));
 
+/*
+ * Version 1 translation-block definition. Variable data is laid out as
+ * insn_count instruction records, mapping_count mapping records, and
+ * code_len bytes of guest code.
+ */
+struct etrace_tb_def {
+	uint64_t tb_id;
+	uint64_t vaddr;
+	uint64_t context_id;
+	uint64_t code_hash;
+	uint32_t size;
+	uint32_t code_len;
+	uint16_t insn_count;
+	uint16_t mapping_count;
+	uint32_t flags;
+	uint32_t reserved;
+	uint8_t data8[0];
+} __attribute__ ((packed));
+
+struct etrace_tb_insn {
+	uint32_t offset;
+	uint16_t size;
+	uint16_t flags;
+} __attribute__ ((packed));
+
+struct etrace_tb_mapping {
+	uint32_t offset;
+	uint32_t len;
+	uint64_t paddr;
+} __attribute__ ((packed));
+
+struct etrace_tb_exec {
+	uint64_t sequence;
+	uint64_t time;
+	uint64_t tb_id;
+	uint64_t context_id;
+	uint32_t duration;
+	uint16_t insn_count;
+	uint16_t flags;
+} __attribute__ ((packed));
+
 struct etrace_old_event_u64 {
 	uint64_t time;
 	uint64_t val;
@@ -167,6 +215,8 @@ struct etrace_pkg {
 		struct etrace_arch arch;
 		struct etrace_exec ex;
 		struct etrace_tb tb;
+		struct etrace_tb_def tb_def;
+		struct etrace_tb_exec tb_exec;
 		struct etrace_note note;
 		struct etrace_mem mem;
 		struct etrace_old_event_u64 old_event_u64;

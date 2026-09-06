@@ -11,6 +11,8 @@ from tests.trace_builder import (
     etrace_packet,
     etrace_status,
     etrace_tb,
+    etrace_tb_def,
+    etrace_tb_exec,
 )
 
 
@@ -178,3 +180,110 @@ def test_etrace_rejects_truncated_payload(run_etrace, tmp_path):
 
     assert result.returncode != 0
     assert "Unexpected end of ETrace payload" in result.stderr
+
+
+def test_etrace_expands_v1_tb_execution(run_etrace, tmp_path):
+    trace = tmp_path / "tb-exec.etrace"
+    output = tmp_path / "tb-exec.txt"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=7,
+            vaddr=0x1000,
+            context_id=3,
+            insns=((0, 2), (2, 5), (7, 3)),
+        )
+        + etrace_tb_exec(
+            tb_id=7,
+            sequence=11,
+            context_id=3,
+            insn_count=2,
+            unit_id=4,
+        )
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", output)
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="ascii").splitlines() == [
+        "T id=7 virt=1000-100a context=3 insns=3 mappings=0",
+        "E4 1000 1007",
+    ]
+
+
+def test_etrace_reuses_v1_tb_definition(run_etrace, tmp_path):
+    trace = tmp_path / "repeated-tb-exec.etrace"
+    output = tmp_path / "repeated-tb-exec.txt"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(tb_id=9, vaddr=0x2000, insns=((0, 4), (4, 4)))
+        + etrace_tb_exec(tb_id=9, sequence=1, insn_count=1)
+        + etrace_tb_exec(tb_id=9, sequence=2, insn_count=2)
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", output)
+
+    assert result.returncode == 0
+    assert output.read_text(encoding="ascii").splitlines()[-2:] == [
+        "E0 2000 2004",
+        "E0 2000 2008",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("records", "diagnostic"),
+    [
+        (etrace_tb_def(), "version 1 record without"),
+        (
+            etrace_info(major=1) + etrace_tb_exec(tb_id=99),
+            "undefined TB ID",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(tb_id=2)
+            + etrace_tb_def(tb_id=2),
+            "duplicate TB ID",
+        ),
+        (
+            etrace_info(major=1) + etrace_tb_def(tb_id=0),
+            "zero TB ID",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(insns=((0, 4), (5, 3)), size=8),
+            "non-contiguous TB instruction layout",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(insns=((0, 4),), size=8),
+            "TB instructions do not cover virtual range",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(size=4, mappings=((0, 2, 0x8000),)),
+            "TB mappings do not cover virtual range",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(tb_id=5, insns=((0, 4),))
+            + etrace_tb_exec(tb_id=5, insn_count=0),
+            "invalid dispatched instruction count",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(tb_id=5, insns=((0, 4),))
+            + etrace_tb_exec(tb_id=5, insn_count=2),
+            "invalid dispatched instruction count",
+        ),
+    ],
+)
+def test_etrace_rejects_invalid_v1_tb_stream(
+    run_etrace, tmp_path, records, diagnostic
+):
+    trace = tmp_path / "invalid-tb-stream.etrace"
+    trace.write_bytes(records)
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert diagnostic in result.stderr
