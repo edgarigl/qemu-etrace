@@ -478,3 +478,34 @@ def test_etrace_rejects_unknown_major_version(run_etrace, tmp_path):
 
     assert result.returncode != 0
     assert "only supports versions through 1.x" in result.stderr
+
+
+def test_etrace_rejects_nonconsecutive_vcpu_sequence(run_etrace, tmp_path):
+    trace = tmp_path / "sequence-gap.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(tb_id=1)
+        + etrace_tb_exec(tb_id=1, sequence=5, unit_id=2)
+        + etrace_tb_exec(tb_id=1, sequence=7, unit_id=2)
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode != 0
+    assert "non-consecutive per-vCPU sequence" in result.stderr
+
+
+def test_etrace_tracks_sequences_independently_per_vcpu(run_etrace, tmp_path):
+    trace = tmp_path / "per-vcpu-sequence.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(tb_id=1)
+        + etrace_tb_exec(tb_id=1, sequence=5, unit_id=1)
+        + etrace_tb_exec(tb_id=1, sequence=9, unit_id=2)
+        + etrace_tb_exec(tb_id=1, sequence=6, unit_id=1)
+        + etrace_tb_exec(tb_id=1, sequence=10, unit_id=2)
+    )
+
+    result = run_etrace("--trace", trace, "--trace-output", "none")
+
+    assert result.returncode == 0

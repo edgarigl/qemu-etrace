@@ -57,6 +57,8 @@ struct etracer {
 	uint64_t mapping_errors;
 	GHashTable *tb_defs;
 	GHashTable *contexts;
+	uint64_t *last_sequence;
+	bool *sequence_seen;
 	struct etrace_pkg *pkg;
 	gzFile input;
 	bool info_seen;
@@ -566,6 +568,13 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 	    || tb_exec->insn_count > definition->insn_count)
 		return etrace_invalid_pkg(t->pkg,
 			"invalid dispatched instruction count");
+	if (t->sequence_seen[t->pkg->hdr.unit_id]
+	    && tb_exec->sequence
+		!= t->last_sequence[t->pkg->hdr.unit_id] + 1)
+		return etrace_invalid_pkg(t->pkg,
+			"non-consecutive per-vCPU sequence");
+	t->sequence_seen[t->pkg->hdr.unit_id] = true;
+	t->last_sequence[t->pkg->hdr.unit_id] = tb_exec->sequence;
 
 	last = tb_exec->insn_count - 1;
 	exec = (struct trace_exec) {
@@ -620,6 +629,12 @@ static bool etrace_process_context_gap(struct etracer *t)
 	    && !g_hash_table_contains(t->contexts, &gap->to_context_id))
 		return etrace_invalid_pkg(t->pkg,
 			"undefined destination context ID");
+	if (t->sequence_seen[t->pkg->hdr.unit_id]
+	    && gap->sequence != t->last_sequence[t->pkg->hdr.unit_id] + 1)
+		return etrace_invalid_pkg(t->pkg,
+			"non-consecutive per-vCPU sequence");
+	t->sequence_seen[t->pkg->hdr.unit_id] = true;
+	t->last_sequence[t->pkg->hdr.unit_id] = gap->sequence;
 
 	if (t->tr.fp_out) {
 		fprintf(t->tr.fp_out,
@@ -894,6 +909,12 @@ void etrace_show(int fd, FILE *fp_out,
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
 	t.tb_defs = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, free);
 	t.contexts = g_hash_table_new_full(g_int64_hash, g_int64_equal, free, NULL);
+	t.last_sequence = calloc(UINT16_MAX + 1, sizeof(*t.last_sequence));
+	t.sequence_seen = calloc(UINT16_MAX + 1, sizeof(*t.sequence_seen));
+	if (!t.last_sequence || !t.sequence_seen) {
+		fprintf(stderr, "Unable to allocate ETrace sequence state\n");
+		exit(EXIT_FAILURE);
+	}
 
 	/* Short path for passthrough.  */
 	if (trace_out_fmt == trace_in_fmt) {
@@ -1016,6 +1037,8 @@ void etrace_show(int fd, FILE *fp_out,
 	}
 	g_hash_table_destroy(t.contexts);
 	g_hash_table_destroy(t.tb_defs);
+	free(t.sequence_seen);
+	free(t.last_sequence);
 	free(t.pkg);
 	if (gzclose(t.input) != Z_OK) {
 		fprintf(stderr, "Unable to finish ETrace input\n");
