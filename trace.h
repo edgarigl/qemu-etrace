@@ -20,10 +20,34 @@
 #define _TRACE_H
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdint.h>
+
+#include "coverage.h"
 
 struct sym;
 struct address_map;
+
+struct trace_exec {
+	uint64_t time;
+	uint64_t start;
+	uint64_t end;
+	uint64_t tb_id;
+	uint64_t context_id;
+	uint32_t duration;
+	uint32_t unit_id;
+	uint32_t flags;
+};
+
+struct trace_exec_segment {
+	uint64_t runtime_start;
+	uint64_t runtime_end;
+	uint64_t linked_start;
+	uint64_t linked_end;
+	uint32_t duration;
+	bool mapped;
+	struct sym *sym;
+};
 
 enum trace_format {
 	TRACE_NONE = 0,
@@ -57,5 +81,14 @@ struct trace_backend {
 	void (*exec)(char *unitname, uint64_t start, uint64_t end,
 			struct sym *sym);
 };
+
+typedef void (*trace_exec_output_fn)(struct tracer *tr,
+				     const struct trace_exec *exec,
+				     const struct trace_exec_segment *segment,
+				     void *opaque);
+
+void trace_process_exec(struct tracer *tr, enum cov_format cov_fmt,
+			const struct trace_exec *exec,
+			trace_exec_output_fn output, void *opaque);
 
 #endif

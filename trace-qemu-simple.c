@@ -170,8 +170,11 @@ static ssize_t read_trace_buf(qemu_simple_tracer *t, void *data, size_t len)
 static bool handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r,
 				 size_t nr_args)
 {
-	uint64_t pc_start, pc_end, duration;
-	uint64_t cursor;
+	struct trace_exec exec = {
+		.time = r->timestamp_ns,
+		.duration = 0,
+		.unit_id = r->pid,
+	};
 
 	if (nr_args < 3) {
 		PRINT_ERR("tb_enter_exec requires 3 arguments, got %zu\n",
@@ -179,50 +182,14 @@ static bool handle_tb_enter_exec(qemu_simple_tracer *t, const TraceRecord *r,
 		return false;
 	}
 
-	duration = 0;
-	pc_start = t->args_buf[1];
-	pc_end = t->args_buf[2];
+	exec.start = t->args_buf[1];
+	exec.end = t->args_buf[2];
 
 	PRINT_DBG("trace tb_enter_exec: timestamp: %"PRIu64
 			" pc_start: %08"PRIx64", pc_end: %08"PRIx64"\n",
-			r->timestamp_ns, pc_start, pc_end);
+			r->timestamp_ns, exec.start, exec.end);
 
-	cursor = pc_start;
-	while (cursor < pc_end) {
-		struct address_map_segment segment;
-		struct sym *sym = NULL;
-
-		if (!address_map_next_segment(t->tr.address_map, &cursor, pc_end,
-						      &segment))
-			break;
-		if (t->tr.sym_tree && *t->tr.sym_tree)
-			sym = sym_lookup_by_addr(t->tr.sym_tree,
-						 segment.linked_start);
-		else
-			sym = sym_get_unknown(t->tr.sym_tree);
-
-		if (t->cov_fmt != NONE) {
-			if (t->tr.sym_tree && *t->tr.sym_tree)
-				sym_update_image_cov(t->tr.sym_tree,
-					segment.linked_start, segment.linked_end);
-			if (sym) {
-				uint64_t addr = segment.linked_start;
-				while (sym && addr < segment.linked_end) {
-					uint64_t tend = segment.linked_end;
-
-					if (tend > (sym->addr + sym->size)) {
-						tend = sym->addr + sym->size;
-						PRINT_ERR("WARNING: fixup sym %s has spans "
-						"over to another symbol\n", sym->name);
-					}
-
-					sym_update_cov(sym, addr, tend, duration);
-					addr = tend;
-					sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
-				}
-			}
-		}
-	}
+	trace_process_exec(&t->tr, t->cov_fmt, &exec, NULL, NULL);
 	return true;
 }
 

@@ -371,6 +371,48 @@ unsigned int u64todec(char *out, uint64_t v)
 	return len;
 }
 
+static void etrace_output_exec(struct tracer *tr,
+			       const struct trace_exec *exec,
+			       const struct trace_exec_segment *segment,
+			       void *opaque)
+{
+	struct sym *sym = segment->sym;
+
+	(void) opaque;
+	if (!tr->fp_out)
+		return;
+
+	if (segment->mapped
+	    && segment->runtime_start != segment->linked_start) {
+		fprintf(tr->fp_out,
+			"E%" PRIx32 " runtime=%" PRIx64 "-%" PRIx64
+			" linked=%" PRIx64 "-%" PRIx64 "%s%s\n",
+			exec->unit_id, segment->runtime_start,
+			segment->runtime_end, segment->linked_start,
+			segment->linked_end, sym ? " " : "", sym ? sym->name : "");
+	} else {
+		char out[80] = "E";
+		unsigned int pos = 1;
+
+		pos += u64tohex(out + pos, exec->unit_id);
+		out[pos++] = ' ';
+		pos += u64tohex(out + pos, segment->linked_start);
+		out[pos++] = ' ';
+		pos += u64tohex(out + pos, segment->linked_end);
+		if (sym) {
+			unsigned int namelen = sym->namelen;
+
+			out[pos++] = ' ';
+			if (namelen + pos + 1 > sizeof(out))
+				namelen = sizeof(out) - pos - 1;
+			memcpy(&out[pos], sym->name, namelen);
+			pos += namelen;
+		}
+		out[pos++] = '\n';
+		fwrite(out, 1, pos, tr->fp_out);
+	}
+}
+
 void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 {
 	unsigned int len;
@@ -392,126 +434,37 @@ void etrace_process_exec(struct etracer *t, enum cov_format cov_fmt)
 	len /= ent_size;
 
 	for (i = 0; i < len; i++) {
-		uint64_t start, end;
-		uint32_t duration;
-		uint64_t cursor;
-		uint64_t accounted = 0;
-		uint64_t total_len;
+		struct trace_exec exec = {
+			.time = now,
+			.unit_id = t->pkg->hdr.unit_id,
+		};
 
 		switch (t->arch.guest.arch_bits) {
 		case 32:
-			start = ex->t32[i].start;
-			end = ex->t32[i].end;
-			duration = ex->t32[i].duration;
+			exec.start = ex->t32[i].start;
+			exec.end = ex->t32[i].end;
+			exec.duration = ex->t32[i].duration;
 			break;
 		case 64:
-			start = ex->t64[i].start;
-			end = ex->t64[i].end;
-			duration = ex->t64[i].duration;
+			exec.start = ex->t64[i].start;
+			exec.end = ex->t64[i].end;
+			exec.duration = ex->t64[i].duration;
 			break;
 		default:
 			assert(0);
 			break;
 		}
 
-		cursor = start;
-		total_len = end >= start ? end - start : 0;
-		while (cursor < end) {
-			struct address_map_segment segment;
-			struct sym *sym = NULL;
-			uint32_t segment_duration;
-			uint64_t segment_len;
-
-			if (!address_map_next_segment(t->tr.address_map, &cursor, end,
-						      &segment))
-				break;
-			segment_len = segment.runtime_end - segment.runtime_start;
-			if (segment.runtime_end == end) {
-				segment_duration = duration - accounted;
-			} else {
-				segment_duration = total_len
-					? (uint32_t)(((__uint128_t)duration * segment_len)
-						     / total_len) : 0;
-				accounted += segment_duration;
-			}
-
-			if (t->tr.sym_tree && *t->tr.sym_tree)
-				sym = sym_lookup_by_addr(t->tr.sym_tree,
-							 segment.linked_start);
-
-			if (t->tr.fp_out && segment.mapped
-			    && segment.runtime_start != segment.linked_start) {
-				fprintf(t->tr.fp_out,
-					"E%" PRIx16 " runtime=%" PRIx64 "-%" PRIx64
-					" linked=%" PRIx64 "-%" PRIx64 "%s%s\n",
-					(unsigned int)t->pkg->hdr.unit_id,
-					segment.runtime_start, segment.runtime_end,
-					segment.linked_start, segment.linked_end,
-					sym ? " " : "", sym ? sym->name : "");
-			} else if (t->tr.fp_out) {
-#if 0
-			printf("Trace %"PRIx64  " %" PRIx64 " - %" PRIx64 " ",
-				now, segment.linked_start, segment.linked_end);
-#else
-			char out[80] = "E";
-			unsigned int pos = 1;
-
-			pos += u64tohex(out + pos, t->pkg->hdr.unit_id);
-			out[pos++] = ' ';
-
-			/* time stamp.  */
-#if 0
-			pos += u64todec(out + pos, now);
-			out[pos++] = ' ';
-#endif
-			pos += u64tohex(out + pos, segment.linked_start);
-			out[pos++] = ' ';
-			pos += u64tohex(out + pos, segment.linked_end);
-			if (sym) {
-				unsigned int namelen = sym->namelen;
-				out[pos++] = ' ';
-
-				if ((namelen + pos + 1) > sizeof out)
-					namelen = sizeof out - pos - 1;
-				memcpy(&out[pos], sym->name, namelen);
-				pos += namelen;
-			}
-			out[pos++] = '\n';
-			fwrite(&out, 1, pos, t->tr.fp_out);
-#endif
-			}
-
-			if (cov_fmt == NONE)
-				continue;
-                        if (t->info.attr & ETRACE_INFO_F_TB_CHAINING) {
-				fprintf(stderr,
-					"Cannot do coverage on a trace with "
-					"TB chaining.\n"
-					"Rerun QEMU with -no-tb-chain.\n");
-					exit(EXIT_FAILURE);
-			        }
-			if (t->tr.sym_tree && *t->tr.sym_tree)
-				sym_update_image_cov(t->tr.sym_tree,
-					segment.linked_start, segment.linked_end);
-			if (!sym)
-				sym = sym_get_unknown(t->tr.sym_tree);
-
-			if (sym) {
-				uint64_t addr = segment.linked_start;
-				while (sym && addr < segment.linked_end) {
-					uint64_t tend = segment.linked_end;
-
-					if (tend > (sym->addr + sym->size)) {
-						tend = sym->addr + sym->size;
-						printf("WARNING: fixup sym %s has spans over to another symbol\n", sym->name);
-					}
-					sym_update_cov(sym, addr, tend, segment_duration);
-					addr = tend;
-					sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
-				}
-			}
+		if (cov_fmt != NONE
+		    && t->info.attr & ETRACE_INFO_F_TB_CHAINING) {
+			fprintf(stderr,
+				"Cannot do coverage on a trace with TB chaining.\n"
+				"Rerun QEMU with -no-tb-chain.\n");
+			exit(EXIT_FAILURE);
 		}
-		now += duration;
+		trace_process_exec(&t->tr, cov_fmt, &exec, etrace_output_exec,
+				   NULL);
+		now += exec.duration;
 	}
 }
 

@@ -74,6 +74,7 @@ BINUTILS_MODE_STAMP = .binutils-mode-$(BINUTILS_MODE)
 
 OBJS += qemu-etrace.o
 OBJS += address-map.o
+OBJS += trace.o
 OBJS += trace-open.o
 OBJS += filename.o
 OBJS += util.o

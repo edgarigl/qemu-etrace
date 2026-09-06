@@ -73,75 +73,29 @@ struct hextracer {
 	struct tracer tr;
 };
 
-static void ht_process_exec(struct hextracer *t,
-			    uint64_t start,
-			    uint64_t end,
-			    enum cov_format cov_fmt)
+static void hextrace_output_exec(struct tracer *tr,
+				 const struct trace_exec *exec,
+				 const struct trace_exec_segment *segment,
+				 void *opaque)
 {
-	uint64_t cursor = start;
-	uint32_t duration = 1;
-	uint32_t accounted = 0;
-	uint64_t total_len = end >= start ? end - start : 0;
+	struct sym *sym = segment->sym;
 
-	while (cursor < end) {
-		struct address_map_segment segment;
-		struct sym *sym = NULL;
-		uint32_t segment_duration;
-		uint64_t segment_len;
-
-		if (!address_map_next_segment(t->tr.address_map, &cursor, end,
-						      &segment))
-			break;
-		segment_len = segment.runtime_end - segment.runtime_start;
-		if (segment.runtime_end == end) {
-			segment_duration = duration - accounted;
-		} else {
-			segment_duration = total_len
-				? (uint32_t)(((__uint128_t)duration * segment_len)
-					     / total_len) : 0;
-			accounted += segment_duration;
-		}
-
-		if (t->tr.sym_tree && *t->tr.sym_tree)
-			sym = sym_lookup_by_addr(t->tr.sym_tree,
-						 segment.linked_start);
-
-		if (t->tr.fp_out && segment.mapped
-		    && segment.runtime_start != segment.linked_start) {
-			fprintf(t->tr.fp_out,
-				"Trace 0 runtime=%" PRIx64 "-%" PRIx64
-				" linked=%" PRIx64 "-%" PRIx64 " %s\n",
-				segment.runtime_start, segment.runtime_end,
-				segment.linked_start, segment.linked_end,
-				sym ? sym->name : "");
-		} else if (t->tr.fp_out) {
-			fprintf(t->tr.fp_out,
-				"Trace 0 %" PRIx64 " - %" PRIx64 " %s\n",
-				segment.linked_start, segment.linked_end,
-				sym ? sym->name : "");
-		}
-		if (cov_fmt == NONE)
-			continue;
-		if (t->tr.sym_tree && *t->tr.sym_tree)
-			sym_update_image_cov(t->tr.sym_tree,
-				segment.linked_start, segment.linked_end);
-		if (!sym)
-			sym = sym_get_unknown(t->tr.sym_tree);
-
-		if (sym) {
-			uint64_t addr = segment.linked_start;
-			while (sym && addr < segment.linked_end) {
-				uint64_t tend = segment.linked_end;
-
-				if (tend > (sym->addr + sym->size)) {
-					tend = sym->addr + sym->size;
-					printf("WARNING: fixup sym %s has spans over to another symbol\n", sym->name);
-				}
-				sym_update_cov(sym, addr, tend, segment_duration);
-				addr = tend;
-				sym = sym_lookup_by_addr(t->tr.sym_tree, addr);
-			}
-		}
+	(void) exec;
+	(void) opaque;
+	if (!tr->fp_out)
+		return;
+	if (segment->mapped
+	    && segment->runtime_start != segment->linked_start) {
+		fprintf(tr->fp_out,
+			"Trace 0 runtime=%" PRIx64 "-%" PRIx64
+			" linked=%" PRIx64 "-%" PRIx64 " %s\n",
+			segment->runtime_start, segment->runtime_end,
+			segment->linked_start, segment->linked_end,
+			sym ? sym->name : "");
+	} else {
+		fprintf(tr->fp_out, "Trace 0 %" PRIx64 " - %" PRIx64 " %s\n",
+			segment->linked_start, segment->linked_end,
+			sym ? sym->name : "");
 	}
 }
 
@@ -178,6 +132,9 @@ void hextrace_show(int fd, FILE *fp_out,
 
 	while ((ret = getline(&line, &len, fp_in)) != -1) {
 		uint64_t start;
+		struct trace_exec exec = {
+			.duration = 1,
+		};
 
 		start = strtoull(line, NULL, 16);
 		switch (trace_in_fmt) {
@@ -203,7 +160,10 @@ void hextrace_show(int fd, FILE *fp_out,
 		default:
 			break;
 		}
-		ht_process_exec(&t, start, start + 4, cov_fmt);
+		exec.start = start;
+		exec.end = start + 4;
+		trace_process_exec(&t.tr, cov_fmt, &exec,
+				   hextrace_output_exec, NULL);
 	}
 	free(line);
 	fclose(fp_in);
