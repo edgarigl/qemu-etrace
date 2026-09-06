@@ -18,3 +18,4 @@ Current scenarios:
 - [Partial translation-block execution](partial-tb-execution.md)
 - [Variable-length instructions](variable-length-instructions.md)
 - [DWARF line aliasing](dwarf-line-aliasing.md)
+- [Runtime-patched code](runtime-patched-code.md)

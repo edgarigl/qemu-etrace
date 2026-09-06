@@ -208,6 +208,11 @@ translations at one virtual address remain distinct when their bytes differ.
 The existing `TYPE_TB` packet can inform the design, but it lacks a stable
 translation ID and explicit instruction boundaries.
 
+Xen runtime alternatives are a concrete requirement: an ELF NOP interval can
+execute as a patched loop while retaining the preceding source line's DWARF
+attribution. See
+[Runtime-patched code](../docs/coverage-scenarios/runtime-patched-code.md).
+
 ## Phase 1: Add normal-transition records
 
 Add the format definition, validation, human-readable output, and Python

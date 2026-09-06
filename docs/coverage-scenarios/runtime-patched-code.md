@@ -1,0 +1,131 @@
+# Runtime-patched code and line counts
+
+## Symptom
+
+A source line can have a much larger execution count than the apparently
+adjacent straight-line assembly, even when the producer reports no unresolved
+execution ranges.
+
+The Xen `svm_asm_do_resume` path provides a concrete example. One QEMU 11 MCE
+qtest produced:
+
+```text
+DA:108,22      # vmrun
+DA:110,22      # SAVE_ALL
+DA:112,352     # GET_CURRENT and runtime alternative region
+DA:161,22      # stgi
+```
+
+The factor is exact:
+
+```text
+352 = 16 * 22
+```
+
+## Static and runtime code differ
+
+The linked ELF shows `GET_CURRENT` followed by a large NOP-filled alternatives
+area:
+
+```text
+ffff82d0402a4b20  GET_CURRENT instructions
+ffff82d0402a4b2c  static NOP padding begins
+ffff82d0402a4b97  STGI
+```
+
+At runtime Xen enables an alternative in this interval:
+
+```asm
+ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_HVM
+```
+
+`DO_OVERWRITE_RSB` contains a 16-iteration loop with two calls per iteration:
+
+```asm
+mov $16, %ecx
+...
+sub $1, %ecx
+jnz ...fill_rsb_loop
+```
+
+The static ELF therefore describes NOPs at addresses where QEMU executes
+runtime-patched branch and call instructions.
+
+## Trace evidence
+
+The exact `TYPE_EXEC` ranges around the patched loop were:
+
+| Range | Count | Interpretation |
+|---|---:|---|
+| `0xffff82d0402a4aa8-0xffff82d0402a4aab` | 22 | `VMRUN` |
+| `0xffff82d0402a4aab-0xffff82d0402a4b4f` | 22 | Initial path into the alternative |
+| `0xffff82d0402a4b4a-0xffff82d0402a4b4f` | 330 | Fifteen loop-back executions per VM exit |
+| `0xffff82d0402a4b50-0xffff82d0402a4b55` | 352 | Sixteen executions per VM exit |
+| `0xffff82d0402a4b56-0xffff82d0402a4b5b` | 352 | Sixteen executions per VM exit |
+| `0xffff82d0402a4b5b-0xffff82d0402a4b6c` | 22 | Loop completion path |
+| `0xffff82d0402a4b75-0xffff82d0402a4b9a` | 22 | Path through `STGI` |
+
+The first loop range executes once as part of the initial range and fifteen
+more times through its loop-back TB:
+
+```text
+22 + 330 = 352
+```
+
+The trace therefore represents the expected runtime control flow rather than
+duplicated execution evidence.
+
+## DWARF attribution
+
+The ELF line table has no new row between the `GET_CURRENT` row at line 112
+and the `STGI` row at line 161. All runtime alternative addresses consequently
+inherit line 112.
+
+qemu-etrace reports the maximum observed byte count for each source line. A
+byte in the patched loop executes 352 times, so `DA:112,352` follows the
+documented aggregation policy. It is not an invocation count for the
+three-instruction `GET_CURRENT` macro alone.
+
+## Expected handling
+
+- Treat the line as covered.
+- Preserve the observed count; do not force it to match surrounding lines.
+- Do not use a static straight-line invariant across an alternatives region.
+- For this SVM configuration, validate `line 108 == line 110 == line 161`.
+- Require `line 112 >= line 110` generally.
+- When `X86_FEATURE_SC_RSB_HVM` selects the shown replacement and no other path
+  changes the interval, expect `line 112 == 16 * line 110`.
+
+Changing global LCOV aggregation to hide the loop would under-report genuine
+multi-path and repeated execution elsewhere.
+
+## Branch-coverage consequence
+
+Static ELF bytes are insufficient for branch classification in a patched
+alternatives region. Object branch coverage must either:
+
+- use translated instruction bytes and a runtime code identity supplied by
+  the QEMU plugin;
+- consume explicit alternative metadata; or
+- mark the affected branch observations unresolved.
+
+It must not decode the static NOP bytes and claim that the runtime interval has
+no branches.
+
+## Safety interpretation
+
+The result is valid dispatched-instruction evidence with imprecise source
+attribution. The line-hit result is reliable, while its numeric execution
+count includes the runtime mitigation loop attributed to the same DWARF line.
+Reviews that depend on execution frequency should retain the trace evidence
+and the active alternative configuration.
+
+The qemu-etrace producer status for the validating run was complete with zero
+unresolved TB, discontinuity, vCPU, and output-error counters.
+
+## Regression coverage
+
+The validating 156 MB compressed trace is retained outside the repository.
+The raw range counts above provide the audit record. A future compact fixture
+should combine static NOP bytes and DWARF attribution with synthetic execution
+ranges matching the patched loop, without checking in the full trace.

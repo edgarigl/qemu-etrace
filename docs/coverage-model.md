@@ -105,5 +105,8 @@ when QEMU has not invoked its vCPU-exit callback.
   records keep that attempted instruction distinct from the completed prefix.
 - Several source locations can share one address, particularly around inline
   call sites, macros, and adjacent line-table sequences.
+- Runtime alternatives can replace ELF NOPs with loops or branches while DWARF
+  continues to attribute the addresses to the preceding source line. See
+  [Runtime-patched code](coverage-scenarios/runtime-patched-code.md).
 
 See `docs/coverage-scenarios/` for worked examples and regression references.
