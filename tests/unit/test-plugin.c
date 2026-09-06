@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <elf.h>
 #include <glib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,11 +23,24 @@ struct qemu_plugin_insn {
 #endif
 };
 
+#if QEMU_PLUGIN_VERSION >= 2
+struct qemu_plugin_register {
+	const char *name;
+	uint8_t value[16];
+	size_t size;
+	bool readable;
+};
+
+static struct qemu_plugin_register fake_registers[32];
+static size_t nr_fake_registers;
+#endif
+
 struct qemu_plugin_tb {
 	uint64_t vaddr;
 	struct qemu_plugin_insn *insns;
 	size_t n_insns;
 	qemu_plugin_vcpu_udata_cb_t exec_cb;
+	enum qemu_plugin_cb_flags exec_flags;
 	void *exec_data;
 };
 
@@ -39,14 +53,18 @@ struct qemu_plugin_scoreboard {
 
 static qemu_plugin_vcpu_tb_trans_cb_t trans_cb;
 static qemu_plugin_udata_cb_t exit_cb;
+static enum qemu_plugin_cb_flags current_callback_flags;
 #if QEMU_PLUGIN_VERSION >= 7
 static void *trans_data;
 #endif
 #if QEMU_PLUGIN_VERSION >= 2
 #if QEMU_PLUGIN_VERSION >= 7
+static qemu_plugin_vcpu_udata_cb_t vcpu_init_cb;
+static void *vcpu_init_data;
 static qemu_plugin_vcpu_udata_cb_t vcpu_exit_cb;
 static void *vcpu_exit_data;
 #else
+static qemu_plugin_vcpu_simple_cb_t vcpu_init_cb;
 static qemu_plugin_vcpu_simple_cb_t vcpu_exit_cb;
 #endif
 #endif
@@ -67,6 +85,14 @@ static void *discon_data;
 
 #if QEMU_PLUGIN_VERSION >= 2
 #if QEMU_PLUGIN_VERSION >= 7
+void qemu_plugin_register_vcpu_init_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_udata_cb_t cb,
+				       void *userdata)
+{
+	vcpu_init_cb = cb;
+	vcpu_init_data = userdata;
+}
+
 void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
 				       qemu_plugin_vcpu_udata_cb_t cb,
 				       void *userdata)
@@ -75,6 +101,12 @@ void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
 	vcpu_exit_data = userdata;
 }
 #else
+void qemu_plugin_register_vcpu_init_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_simple_cb_t cb)
+{
+	vcpu_init_cb = cb;
+}
+
 void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
 				       qemu_plugin_vcpu_simple_cb_t cb)
 {
@@ -127,6 +159,7 @@ void qemu_plugin_register_vcpu_tb_exec_cb(
 	enum qemu_plugin_cb_flags flags, void *userdata)
 {
 	tb->exec_cb = cb;
+	tb->exec_flags = flags;
 	tb->exec_data = userdata;
 }
 
@@ -224,6 +257,78 @@ size_t qemu_plugin_insn_size(const struct qemu_plugin_insn *insn)
 	return insn->size;
 }
 
+#if QEMU_PLUGIN_VERSION >= 2
+GArray *qemu_plugin_get_registers(void)
+{
+	GArray *descriptors = g_array_new(false, true,
+					  sizeof(qemu_plugin_reg_descriptor));
+	size_t i;
+
+	for (i = 0; i < nr_fake_registers; i++) {
+		qemu_plugin_reg_descriptor descriptor = {
+			.handle = &fake_registers[i],
+			.name = fake_registers[i].name,
+			.feature = "test",
+		};
+
+		g_array_append_val(descriptors, descriptor);
+	}
+	return descriptors;
+}
+
+#if QEMU_PLUGIN_VERSION >= 6
+bool qemu_plugin_read_register(struct qemu_plugin_register *handle,
+			       GByteArray *buf)
+#else
+int qemu_plugin_read_register(struct qemu_plugin_register *handle,
+			      GByteArray *buf)
+#endif
+{
+	if (!handle->readable || current_callback_flags == QEMU_PLUGIN_CB_NO_REGS)
+		return false;
+	g_byte_array_append(buf, handle->value, handle->size);
+#if QEMU_PLUGIN_VERSION >= 6
+	return true;
+#else
+	return handle->size;
+#endif
+}
+
+static void clear_fake_registers(void)
+{
+	memset(fake_registers, 0, sizeof(fake_registers));
+	nr_fake_registers = 0;
+}
+
+static struct qemu_plugin_register *add_fake_register(const char *name,
+						      uint64_t value,
+						      size_t size)
+{
+	struct qemu_plugin_register *reg;
+	size_t i;
+
+	g_assert_cmpuint(nr_fake_registers, <, G_N_ELEMENTS(fake_registers));
+	g_assert_cmpuint(size, <=, sizeof(reg->value));
+	reg = &fake_registers[nr_fake_registers++];
+	reg->name = name;
+	reg->size = size;
+	reg->readable = true;
+	for (i = 0; i < size; i++)
+		reg->value[i] = i < sizeof(value) ? value >> (i * 8) : 0;
+	return reg;
+}
+
+static void initialize_vcpu(unsigned int cpu_index)
+{
+	g_assert_nonnull(vcpu_init_cb);
+#if QEMU_PLUGIN_VERSION >= 7
+	vcpu_init_cb(cpu_index, vcpu_init_data);
+#else
+	vcpu_init_cb(1, cpu_index);
+#endif
+}
+#endif
+
 #if QEMU_PLUGIN_VERSION >= 5
 bool qemu_plugin_translate_vaddr(uint64_t vaddr, uint64_t *hwaddr)
 {
@@ -250,8 +355,11 @@ static void execute_tb_prefix(struct qemu_plugin_tb *tb,
 	size_t i;
 
 	g_assert_cmpuint(n_insns, <=, tb->n_insns);
-	if (tb->exec_cb)
+	if (tb->exec_cb) {
+		current_callback_flags = tb->exec_flags;
 		tb->exec_cb(cpu_index, tb->exec_data);
+		current_callback_flags = QEMU_PLUGIN_CB_NO_REGS;
+	}
 	for (i = 0; i < n_insns; i++) {
 		struct qemu_plugin_insn *insn = &tb->insns[i];
 
@@ -260,9 +368,11 @@ static void execute_tb_prefix(struct qemu_plugin_tb *tb,
 			uint64_t value = qemu_plugin_u64_get(insn->inline_entry,
 							 cpu_index);
 
+#if QEMU_PLUGIN_VERSION >= 3
 			if (insn->inline_op == QEMU_PLUGIN_INLINE_STORE_U64)
 				value = insn->inline_imm;
 			else
+#endif
 				value += insn->inline_imm;
 			qemu_plugin_u64_set(insn->inline_entry, cpu_index, value);
 		}
@@ -412,7 +522,7 @@ static void test_instruction_callback_model(void)
 	g_assert_cmpuint(observations[2].calls, ==, 0);
 }
 
-#if QEMU_PLUGIN_VERSION >= 2
+#if QEMU_PLUGIN_VERSION >= 3
 struct scoreboard_entry {
 	uint64_t reached_last;
 };
@@ -540,19 +650,70 @@ static void assert_tb_definition(const uint8_t **cursor, uint64_t tb_id,
 	}
 }
 
-static void assert_context(const uint8_t **cursor, uint64_t context_id,
-			   uint32_t flags)
+static void assert_context(const uint8_t **cursor, unsigned int cpu_index,
+			   uint64_t context_id, uint32_t flags)
 {
 	struct etrace_context context;
 	struct etrace_hdr hdr;
 
 	read_data(cursor, &hdr, sizeof(hdr));
 	g_assert_cmpuint(hdr.type, ==, TYPE_CONTEXT);
+	g_assert_cmpuint(hdr.unit_id, ==, cpu_index);
 	g_assert_cmpuint(hdr.len, ==, sizeof(context));
 	read_data(cursor, &context, sizeof(context));
 	g_assert_cmpuint(context.context_id, ==, context_id);
 	g_assert_cmpuint(context.flags, ==, flags);
 	g_assert_cmpuint(context.register_count, ==, 0);
+}
+
+struct expected_context_register {
+	const char *name;
+	uint64_t value;
+	size_t size;
+};
+
+static void assert_context_registers(
+	const uint8_t **cursor, unsigned int cpu_index, uint64_t context_id,
+	uint64_t address_space_id, uint8_t privilege, uint32_t flags,
+	const struct expected_context_register *expected, size_t n_registers)
+{
+	struct etrace_context context;
+	struct etrace_hdr hdr;
+	const uint8_t *payload;
+	size_t i;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_CONTEXT);
+	g_assert_cmpuint(hdr.unit_id, ==, cpu_index);
+	payload = *cursor;
+	read_data(cursor, &context, sizeof(context));
+	g_assert_cmpuint(context.context_id, ==, context_id);
+	g_assert_cmpuint(context.address_space_id, ==, address_space_id);
+	g_assert_cmpuint(context.privilege, ==, privilege);
+	g_assert_cmpuint(context.flags, ==, flags);
+	g_assert_cmpuint(context.architecture, ==, EM_X86_64);
+	g_assert_cmpuint(context.register_count, ==, n_registers);
+	g_assert_cmpuint(context.state_hash, !=, 0);
+	for (i = 0; i < n_registers; i++) {
+		struct etrace_context_register reg;
+		uint8_t *value;
+		uint64_t decoded = 0;
+		size_t j;
+
+		read_data(cursor, &reg, sizeof(reg));
+		g_assert_cmpuint(reg.name_len, ==, strlen(expected[i].name));
+		g_assert_cmpuint(reg.size, ==, expected[i].size);
+		g_assert_cmpmem(*cursor, reg.name_len,
+				expected[i].name, strlen(expected[i].name));
+		*cursor += reg.name_len;
+		value = g_malloc(reg.size);
+		read_data(cursor, value, reg.size);
+		for (j = 0; j < reg.size && j < sizeof(decoded); j++)
+			decoded |= (uint64_t)value[j] << (j * 8);
+		g_assert_cmpuint(decoded, ==, expected[i].value);
+		g_free(value);
+	}
+	g_assert_cmpuint(hdr.len, ==, (size_t)(*cursor - payload));
 }
 
 static void assert_context_gap(const uint8_t **cursor,
@@ -1211,16 +1372,16 @@ static void test_hypervisor_filter(void)
 			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
 			 | ETRACE_INFO_F_CONTEXT | ETRACE_INFO_F_FILTERED);
 	g_assert_cmpuint(major, ==, ETRACE_VERSION_TB_EXEC);
-	assert_context(&cursor, 1, ETRACE_CONTEXT_F_HYPERVISOR
-				   | ETRACE_CONTEXT_F_INCOMPLETE);
-	assert_context(&cursor, 2, ETRACE_CONTEXT_F_INCOMPLETE);
-	assert_tb_definition(&cursor, 1, 0x1000, 1, first_insns,
+	assert_tb_definition(&cursor, 1, 0x1000, 0, first_insns,
 			     G_N_ELEMENTS(first_insns), NULL, 0);
-	assert_tb_definition(&cursor, 3, 0x1080, 1, second_insns,
+	assert_tb_definition(&cursor, 3, 0x1080, 0, second_insns,
 			     G_N_ELEMENTS(second_insns), NULL, 0);
+	assert_context(&cursor, 3, 1, ETRACE_CONTEXT_F_HYPERVISOR);
+	assert_context(&cursor, 3, 2, 0);
 	assert_tb_execution(&cursor, 3, 1, 1, 1, 2);
-	assert_context_gap(&cursor, 3, 2, 1, 1, 2);
-	assert_tb_execution(&cursor, 3, 3, 3, 1, 1);
+	assert_context(&cursor, 3, 3, ETRACE_CONTEXT_F_HYPERVISOR);
+	assert_context_gap(&cursor, 3, 2, 1, 3, 2);
+	assert_tb_execution(&cursor, 3, 3, 3, 3, 1);
 	status = read_status_v1(&cursor);
 	g_assert_cmpuint(status.base.flags, ==, ETRACE_STATUS_F_COMPLETE);
 	g_assert_cmpuint(status.filtered_execs, ==, 2);
@@ -1254,6 +1415,178 @@ static void test_context_filter_options(void)
 	g_assert_cmpint(qemu_plugin_install(1, &info, 2, missing_range), ==, -1);
 	g_assert_cmpint(qemu_plugin_install(1, &info, 2, orphan_range), ==, -1);
 	g_assert_cmpint(qemu_plugin_install(1, &info, 3, invalid_range), ==, -1);
+}
+
+static void test_register_context_changes(void)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x8000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x8000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	struct qemu_plugin_register *cr3;
+	struct expected_context_register first[] = {
+		{ "cs", 3, 4 },
+		{ "eflags", 2, 4 },
+		{ "cr0", UINT64_C(1) << 31, 8 },
+		{ "cr3", 0x123000, 8 },
+		{ "cr4", 0x20, 8 },
+		{ "efer", UINT64_C(1) << 10, 8 },
+	};
+	struct expected_context_register second[G_N_ELEMENTS(first)];
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[3];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	int fd;
+
+	clear_fake_registers();
+	add_fake_register("cs", 3, 4);
+	add_fake_register("eflags", 2, 4);
+	add_fake_register("cr0", UINT64_C(1) << 31, 8);
+	cr3 = add_fake_register("cr3", 0x123000, 8);
+	add_fake_register("cr4", 0x20, 8);
+	add_fake_register("efer", UINT64_C(1) << 10, 8);
+	memcpy(second, first, sizeof(second));
+	second[3].value = 0x456000;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+	args[2] = "context-registers=basic";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 3, args), ==, 0);
+	initialize_vcpu(1);
+	translate_tb(&tb);
+	g_assert_cmpint(tb.exec_flags, ==, QEMU_PLUGIN_CB_R_REGS);
+	execute_tb_prefix(&tb, 1, 1);
+	execute_tb_prefix(&tb, 1, 1);
+	cr3->value[1] = 0x60;
+	cr3->value[2] = 0x45;
+	execute_tb_prefix(&tb, 1, 1);
+	exit_vcpu(1);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
+			 | ETRACE_INFO_F_CONTEXT);
+	assert_tb_definition(&cursor, 1, 0x8000, 0, &insn, 1, NULL, 0);
+	assert_context_registers(
+		&cursor, 1, 1, 0x123000, 3,
+		ETRACE_CONTEXT_F_PRIVILEGE_VALID
+			| ETRACE_CONTEXT_F_ADDRESS_SPACE_VALID
+			| ETRACE_CONTEXT_F_PAGING | ETRACE_CONTEXT_F_LONG_MODE,
+		first, G_N_ELEMENTS(first));
+	assert_tb_execution(&cursor, 1, 1, 1, 1, 1);
+	assert_context_registers(
+		&cursor, 1, 2, 0x456000, 3,
+		ETRACE_CONTEXT_F_PRIVILEGE_VALID
+			| ETRACE_CONTEXT_F_ADDRESS_SPACE_VALID
+			| ETRACE_CONTEXT_F_PAGING | ETRACE_CONTEXT_F_LONG_MODE,
+		second, G_N_ELEMENTS(second));
+	assert_tb_execution(&cursor, 1, 2, 1, 1, 1);
+	assert_tb_execution(&cursor, 1, 3, 1, 2, 1);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.context_errors, ==, 0);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
+static void test_context_register_options(void)
+{
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *missing_format[] = { "context-registers=cr3" };
+	char *duplicate[] = {
+		"format=v1", "context-register=cr3", "context-register=cr3",
+	};
+	char *empty[] = { "format=v1", "context-register=" };
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, missing_format), ==, -1);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 3, duplicate), ==, -1);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, empty), ==, -1);
+}
+
+static void test_missing_context_register(void)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x9000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x9000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	const struct expected_context_register expected[] = {
+		{ "cr3", 0xabc000, 8 },
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[4];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	int fd;
+
+	clear_fake_registers();
+	add_fake_register("cr3", 0xabc000, 8);
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+	args[2] = "context-register=cr3";
+	args[3] = "context-register=missing";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 4, args), ==, 0);
+	initialize_vcpu(2);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 2, 1);
+	exit_vcpu(2);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	read_trace_headers(&cursor);
+	assert_tb_definition(&cursor, 1, 0x9000, 0, &insn, 1, NULL, 0);
+	assert_context_registers(
+		&cursor, 2, 1, 0xabc000, UINT8_MAX,
+		ETRACE_CONTEXT_F_ADDRESS_SPACE_VALID
+			| ETRACE_CONTEXT_F_INCOMPLETE,
+		expected, G_N_ELEMENTS(expected));
+	assert_tb_execution(&cursor, 2, 1, 1, 1, 1);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.context_errors, ==, 1);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
 }
 
 #if QEMU_PLUGIN_VERSION >= 5
@@ -1384,6 +1717,18 @@ static void test_execution_mapping_requires_v1(void)
 	char *arg = "exec-mapping=on";
 
 	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, -1);
+}
+#elif QEMU_PLUGIN_VERSION >= 2
+static void test_execution_mapping_requires_api_5(void)
+{
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[] = { "format=v1", "exec-mapping=on" };
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, args), ==, -1);
 }
 #endif
 #else
@@ -1669,7 +2014,7 @@ int main(int argc, char **argv)
 	g_test_init(&argc, &argv, NULL);
 	g_test_add_func("/plugin/instruction-callback-model",
 			test_instruction_callback_model);
-#if QEMU_PLUGIN_VERSION >= 2
+#if QEMU_PLUGIN_VERSION >= 3
 	g_test_add_func("/plugin/scoreboard-inline-store-model",
 			test_scoreboard_inline_store_model);
 #endif
@@ -1704,12 +2049,21 @@ int main(int argc, char **argv)
 	g_test_add_func("/plugin/hypervisor-filter", test_hypervisor_filter);
 	g_test_add_func("/plugin/context-filter-options",
 			test_context_filter_options);
+	g_test_add_func("/plugin/register-context-changes",
+			test_register_context_changes);
+	g_test_add_func("/plugin/context-register-options",
+			test_context_register_options);
+	g_test_add_func("/plugin/missing-context-register",
+			test_missing_context_register);
 #if QEMU_PLUGIN_VERSION >= 5
 	g_test_add_func("/plugin/execution-mappings", test_execution_mappings);
 	g_test_add_func("/plugin/execution-mapping-failure",
 			test_execution_mapping_failure);
 	g_test_add_func("/plugin/execution-mapping-requires-v1",
 			test_execution_mapping_requires_v1);
+#else
+	g_test_add_func("/plugin/execution-mapping-requires-api-5",
+			test_execution_mapping_requires_api_5);
 #endif
 #else
 	g_test_add_func("/plugin/tb-execution-requires-api-2",

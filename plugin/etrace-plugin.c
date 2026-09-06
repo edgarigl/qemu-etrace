@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -15,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <glib.h>
 #include <zlib.h>
 
 #include <qemu-plugin.h>
@@ -28,7 +30,6 @@ struct tb_data {
 	uint64_t id;
 	uint64_t start;
 	uint64_t end;
-	uint64_t context_id;
 	size_t n_insns;
 	struct etrace_tb_mapping *mappings;
 	size_t n_mappings;
@@ -42,13 +43,29 @@ struct tb_data {
 #if QEMU_PLUGIN_VERSION >= 2
 struct vcpu_exec_state {
 	struct tb_data *pending;
+	uint64_t pending_context_id;
 	uint64_t progress;
 	uint64_t sequence;
 	uint64_t last_included_context_id;
 	uint64_t gap_from_context_id;
 	uint64_t filtered_execs;
+	GArray *context_registers;
+	GByteArray *context_sample;
+	GByteArray *last_context_sample;
+	uint64_t current_context_id;
+	uint64_t address_space_id;
+	uint64_t virtual_machine_id;
+	uint32_t context_flags;
+	uint8_t privilege;
+	bool context_incomplete;
 	bool gap_open;
 	bool seen;
+};
+
+struct context_register {
+	struct qemu_plugin_register *handle;
+	char *name;
+	GByteArray *value;
 };
 #endif
 
@@ -111,7 +128,13 @@ static bool gzip_output;
 static bool tb_exec_output;
 static bool hypervisor_filter;
 static bool exec_mapping;
+static bool context_enabled;
+static bool context_register_all;
+static bool context_register_basic;
+static char **context_register_names;
+static uint16_t target_architecture;
 static uint64_t next_tb_id;
+static uint64_t next_context_id;
 static struct context_range *context_ranges;
 static size_t nr_context_ranges;
 static struct producer_status producer_status;
@@ -201,8 +224,8 @@ static bool write_headers(void)
 		.data = {
 			.attr = ETRACE_INFO_F_FINAL_STATUS
 				| (tb_exec_output ? ETRACE_INFO_F_TB_EXEC : 0)
-				| (hypervisor_filter ? ETRACE_INFO_F_CONTEXT
-					| ETRACE_INFO_F_FILTERED : 0)
+				| (context_enabled ? ETRACE_INFO_F_CONTEXT : 0)
+				| (hypervisor_filter ? ETRACE_INFO_F_FILTERED : 0)
 				| (exec_mapping ? ETRACE_INFO_F_EXEC_MAPPING : 0),
 			.version = {
 				.major = tb_exec_output ? ETRACE_VERSION_TB_EXEC
@@ -233,32 +256,6 @@ static bool write_headers(void)
 	if (!write_output(&info_packet, sizeof(info_packet))
 	    || !write_output(&arch_packet, sizeof(arch_packet)))
 		return false;
-	if (hypervisor_filter) {
-		struct {
-			struct etrace_hdr hdr;
-			struct etrace_context data;
-		} __attribute__ ((packed)) context = {
-			.hdr = {
-				.type = TYPE_CONTEXT,
-				.len = sizeof(context.data),
-			},
-			.data = {
-				.context_id = 1,
-				.pc = context_ranges[0].start,
-				.flags = ETRACE_CONTEXT_F_HYPERVISOR
-					| ETRACE_CONTEXT_F_INCOMPLETE,
-				.privilege = UINT8_MAX,
-			},
-		};
-
-		if (!write_output(&context, sizeof(context)))
-			return false;
-		context.data.context_id = 2;
-		context.data.pc = 0;
-		context.data.flags = ETRACE_CONTEXT_F_INCOMPLETE;
-		if (!write_output(&context, sizeof(context)))
-			return false;
-	}
 	return true;
 }
 
@@ -307,6 +304,115 @@ static int classify_context_range(uint64_t start, uint64_t end)
 	return overlaps ? -1 : 0;
 }
 #endif
+
+static void clear_context_register_names(void)
+{
+	g_strfreev(context_register_names);
+	context_register_names = NULL;
+	context_register_all = false;
+	context_register_basic = false;
+}
+
+static bool set_context_register_names(const char *names)
+{
+	size_t i;
+	size_t j;
+
+	clear_context_register_names();
+	if (!strcmp(names, "none"))
+		return true;
+	if (!strcmp(names, "all")) {
+		context_register_all = true;
+		return true;
+	}
+	if (!strcmp(names, "basic")) {
+		context_register_basic = true;
+		return true;
+	}
+	context_register_names = g_strsplit(names, ",", -1);
+	for (i = 0; context_register_names[i]; i++) {
+		if (!context_register_names[i][0] || i == UINT8_MAX)
+			goto invalid;
+		for (j = 0; j < i; j++) {
+			if (!strcmp(context_register_names[i],
+				    context_register_names[j]))
+				goto invalid;
+		}
+	}
+	return i != 0;
+
+invalid:
+	clear_context_register_names();
+	return false;
+}
+
+static bool add_context_register_name(const char *name)
+{
+	char **names;
+	size_t count = 0;
+	size_t i;
+
+	if (!name[0] || strchr(name, ',') || context_register_all
+	    || context_register_basic)
+		return false;
+	if (context_register_names) {
+		while (context_register_names[count])
+			count++;
+	}
+	if (count == UINT8_MAX)
+		return false;
+	for (i = 0; i < count; i++) {
+		if (!strcmp(context_register_names[i], name))
+			return false;
+	}
+	names = g_realloc_n(context_register_names, count + 2, sizeof(*names));
+	context_register_names = names;
+	context_register_names[count] = g_strdup(name);
+	context_register_names[count + 1] = NULL;
+	return true;
+}
+
+static bool configure_basic_context(const char *target_name)
+{
+	const char *names;
+
+	if (!target_name)
+		return false;
+	if (!strcmp(target_name, "x86_64") || !strcmp(target_name, "i386")) {
+		names = "cs,eflags,cr0,cr3,cr4,efer";
+	} else if (!strcmp(target_name, "aarch64")) {
+		names = "cpsr,ttbr0_el1,ttbr1_el1,tcr_el1,sctlr_el1,hcr_el2,"
+			"vttbr_el2,vtcr_el2,scr_el3";
+	} else if (!strcmp(target_name, "riscv32")
+		   || !strcmp(target_name, "riscv64")) {
+		names = "priv,mstatus,sstatus,satp,hstatus,hgatp";
+	} else {
+		return false;
+	}
+	context_register_basic = false;
+	return set_context_register_names(names);
+}
+
+static void configure_target_architecture(const char *target_name)
+{
+	if (!target_name) {
+		target_architecture = EM_NONE;
+		return;
+	}
+	if (!strcmp(target_name, "x86_64"))
+		target_architecture = EM_X86_64;
+	else if (!strcmp(target_name, "i386"))
+		target_architecture = EM_386;
+	else if (!strcmp(target_name, "aarch64"))
+		target_architecture = EM_AARCH64;
+	else if (!strcmp(target_name, "arm"))
+		target_architecture = EM_ARM;
+	else if (!strcmp(target_name, "riscv32")
+		 || !strcmp(target_name, "riscv64"))
+		target_architecture = EM_RISCV;
+	else
+		target_architecture = EM_NONE;
+}
 
 #if QEMU_PLUGIN_VERSION >= 5
 static bool append_mapping(struct tb_data *tb, uint64_t vaddr,
@@ -414,7 +520,7 @@ static void write_tb_definition(const struct tb_data *tb)
 	hdr->len = payload_len;
 	definition->tb_id = tb->id;
 	definition->vaddr = tb->start;
-	definition->context_id = tb->context_id;
+	definition->context_id = 0;
 	definition->size = tb->end - tb->start;
 	definition->insn_count = tb->n_insns;
 	definition->mapping_count = tb->n_mappings;
@@ -554,6 +660,276 @@ static void record_vcpu(struct vcpu_exec_state *state,
 	pthread_mutex_unlock(&lock);
 }
 
+static bool context_register_requested(const char *name)
+{
+	size_t i;
+
+	if (context_register_all)
+		return true;
+	if (!context_register_names)
+		return false;
+	for (i = 0; context_register_names[i]; i++) {
+		if (!strcmp(name, context_register_names[i]))
+			return true;
+	}
+	return false;
+}
+
+static void report_context_error(struct vcpu_exec_state *state)
+{
+	if (state->context_incomplete)
+		return;
+	state->context_incomplete = true;
+	increment_status_counter(&producer_status.context_errors);
+}
+
+static void initialize_context_registers(unsigned int cpu_index)
+{
+	struct vcpu_exec_state *state;
+	GArray *available;
+	size_t selected = 0;
+	size_t requested = 0;
+	unsigned int i;
+
+	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
+	record_vcpu(state, cpu_index);
+	state->context_registers = g_array_new(false, true,
+					       sizeof(struct context_register));
+	state->context_sample = g_byte_array_new();
+	state->last_context_sample = g_byte_array_new();
+	available = qemu_plugin_get_registers();
+	if (context_register_names) {
+		while (context_register_names[requested])
+			requested++;
+	}
+
+	for (i = 0; i < available->len; i++) {
+		qemu_plugin_reg_descriptor *descriptor =
+			&g_array_index(available, qemu_plugin_reg_descriptor, i);
+		struct context_register reg;
+
+		if (!context_register_requested(descriptor->name))
+			continue;
+		if (selected == UINT8_MAX
+		    || strlen(descriptor->name) > UINT16_MAX) {
+			report_context_error(state);
+			break;
+		}
+		reg.handle = descriptor->handle;
+		reg.name = g_strdup(descriptor->name);
+		reg.value = g_byte_array_new();
+		g_array_append_val(state->context_registers, reg);
+		selected++;
+	}
+	if ((!context_register_all && selected != requested)
+	    || (context_register_all && !selected))
+		report_context_error(state);
+	g_array_free(available, true);
+}
+
+#if QEMU_PLUGIN_VERSION >= 7
+static void vcpu_init(unsigned int cpu_index, void *userdata)
+#else
+static void vcpu_init(qemu_plugin_id_t id, unsigned int cpu_index)
+#endif
+{
+#if QEMU_PLUGIN_VERSION >= 7
+	(void) userdata;
+#else
+	(void) id;
+#endif
+	initialize_context_registers(cpu_index);
+}
+
+static uint64_t read_register_u64(const GByteArray *value)
+{
+	uint64_t result = 0;
+	size_t len = value->len < sizeof(result) ? value->len : sizeof(result);
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		result |= (uint64_t)value->data[i] << (i * 8);
+	return result;
+}
+
+static uint64_t hash_context(uint32_t flags, uint64_t address_space_id,
+			     uint64_t virtual_machine_id, uint8_t privilege,
+			     const GByteArray *sample)
+{
+	const uint64_t prime = UINT64_C(1099511628211);
+	uint64_t hash = UINT64_C(14695981039346656037);
+	const uint8_t *fields[] = {
+		(const uint8_t *)&flags,
+		(const uint8_t *)&address_space_id,
+		(const uint8_t *)&virtual_machine_id,
+		&privilege,
+		sample->data,
+	};
+	const size_t sizes[] = {
+		sizeof(flags), sizeof(address_space_id),
+		sizeof(virtual_machine_id), sizeof(privilege), sample->len,
+	};
+	size_t i;
+	size_t j;
+
+	for (i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+		for (j = 0; j < sizes[i]; j++) {
+			hash ^= fields[i][j];
+			hash *= prime;
+		}
+	}
+	return hash;
+}
+
+static void write_context(unsigned int cpu_index, uint64_t pc,
+			  uint64_t context_id, uint64_t address_space_id,
+			  uint64_t virtual_machine_id, uint64_t state_hash,
+			  uint32_t flags, uint8_t privilege,
+			  uint8_t register_count, const GByteArray *sample)
+{
+	struct etrace_context *context;
+	struct etrace_hdr *hdr;
+	uint8_t *packet;
+	size_t payload_len = offsetof(struct etrace_context, data8) + sample->len;
+	size_t packet_len = sizeof(*hdr) + payload_len;
+
+	packet = calloc(1, packet_len);
+	if (!packet) {
+		increment_status_counter(&producer_status.output_errors);
+		return;
+	}
+	hdr = (void *)packet;
+	context = (void *)(packet + sizeof(*hdr));
+	hdr->type = TYPE_CONTEXT;
+	hdr->unit_id = (uint16_t)cpu_index;
+	hdr->len = payload_len;
+	context->context_id = context_id;
+	context->pc = pc;
+	context->address_space_id = address_space_id;
+	context->virtual_machine_id = virtual_machine_id;
+	context->state_hash = state_hash;
+	context->flags = flags;
+	context->architecture = target_architecture;
+	context->privilege = privilege;
+	context->register_count = register_count;
+	if (sample->len)
+		memcpy(context->data8, sample->data, sample->len);
+	write_packet(packet, packet_len);
+	free(packet);
+}
+
+static uint64_t sample_context(struct vcpu_exec_state *state,
+			       unsigned int cpu_index,
+			       const struct tb_data *tb)
+{
+	uint64_t address_space_id = 0;
+	uint64_t virtual_machine_id = 0;
+	uint64_t state_hash;
+	uint32_t flags = 0;
+	uint8_t privilege = UINT8_MAX;
+	uint8_t register_count = 0;
+	unsigned int i;
+
+	if (!context_enabled)
+		return 0;
+	if (hypervisor_filter && tb->included)
+		flags |= ETRACE_CONTEXT_F_HYPERVISOR;
+	if (!state->context_sample) {
+		state->context_sample = g_byte_array_new();
+		state->last_context_sample = g_byte_array_new();
+	}
+	g_byte_array_set_size(state->context_sample, 0);
+	if ((context_register_all || context_register_names)
+	    && !state->context_registers)
+		report_context_error(state);
+	if (state->context_incomplete)
+		flags |= ETRACE_CONTEXT_F_INCOMPLETE;
+
+	if (state->context_registers) {
+		for (i = 0; i < state->context_registers->len; i++) {
+			struct context_register *reg = &g_array_index(
+				state->context_registers, struct context_register, i);
+			struct etrace_context_register wire = {
+				.name_len = strlen(reg->name),
+			};
+			uint64_t value;
+
+			g_byte_array_set_size(reg->value, 0);
+			if (qemu_plugin_read_register(reg->handle, reg->value) <= 0
+			    || reg->value->len > UINT16_MAX) {
+				report_context_error(state);
+				flags |= ETRACE_CONTEXT_F_INCOMPLETE;
+				continue;
+			}
+			wire.size = reg->value->len;
+			g_byte_array_append(state->context_sample,
+					    (const uint8_t *)&wire, sizeof(wire));
+			g_byte_array_append(state->context_sample,
+					    (const uint8_t *)reg->name,
+					    wire.name_len);
+			g_byte_array_append(state->context_sample,
+					    reg->value->data, reg->value->len);
+			register_count++;
+			value = read_register_u64(reg->value);
+			if (!strcmp(reg->name, "cs")) {
+				privilege = value & 3;
+				flags |= ETRACE_CONTEXT_F_PRIVILEGE_VALID;
+			} else if (!strcmp(reg->name, "cr3")
+				   || !strcmp(reg->name, "ttbr0_el1")
+				   || !strcmp(reg->name, "satp")) {
+				address_space_id = value;
+				flags |= ETRACE_CONTEXT_F_ADDRESS_SPACE_VALID;
+			} else if (!strcmp(reg->name, "priv")) {
+				privilege = value;
+				flags |= ETRACE_CONTEXT_F_PRIVILEGE_VALID;
+			} else if (!strcmp(reg->name, "cpsr")) {
+				privilege = (value >> 2) & 3;
+				flags |= ETRACE_CONTEXT_F_PRIVILEGE_VALID;
+			} else if (!strcmp(reg->name, "vttbr_el2")
+				   || !strcmp(reg->name, "hgatp")) {
+				virtual_machine_id = value;
+				flags |= ETRACE_CONTEXT_F_VM_VALID;
+			} else if (!strcmp(reg->name, "cr0")
+				   && value & (UINT64_C(1) << 31)) {
+				flags |= ETRACE_CONTEXT_F_PAGING;
+			} else if (!strcmp(reg->name, "efer")
+				   && value & (UINT64_C(1) << 10)) {
+				flags |= ETRACE_CONTEXT_F_LONG_MODE;
+			}
+		}
+	}
+	state_hash = hash_context(flags, address_space_id, virtual_machine_id,
+				  privilege, state->context_sample);
+	if (state->current_context_id
+	    && state->address_space_id == address_space_id
+	    && state->virtual_machine_id == virtual_machine_id
+	    && state->context_flags == flags
+	    && state->privilege == privilege
+	    && state->last_context_sample->len == state->context_sample->len
+	    && (!state->context_sample->len
+		|| !memcmp(state->last_context_sample->data,
+			   state->context_sample->data,
+			   state->context_sample->len)))
+		return state->current_context_id;
+
+	state->current_context_id = __atomic_add_fetch(&next_context_id, 1,
+						       __ATOMIC_RELAXED);
+	state->address_space_id = address_space_id;
+	state->virtual_machine_id = virtual_machine_id;
+	state->context_flags = flags;
+	state->privilege = privilege;
+	g_byte_array_set_size(state->last_context_sample,
+			      state->context_sample->len);
+	if (state->context_sample->len) {
+		memcpy(state->last_context_sample->data, state->context_sample->data,
+		       state->context_sample->len);
+	}
+	write_context(cpu_index, tb->start, state->current_context_id,
+		      address_space_id, virtual_machine_id, state_hash, flags,
+		      privilege, register_count, state->context_sample);
+	return state->current_context_id;
+}
+
 static bool write_exec_prefix(unsigned int cpu_index,
 			      const struct tb_data *tb, uint64_t end)
 {
@@ -575,13 +951,17 @@ static bool write_exec_prefix(unsigned int cpu_index,
 			return true;
 		if (end > tb->n_insns)
 			return false;
-		if (state->gap_open)
-			write_context_gap(cpu_index, state, tb->context_id);
 		write_tb_execution(cpu_index, tb, ++state->sequence,
-				   tb->context_id, end);
-		state->last_included_context_id = tb->context_id;
+				   state->pending_context_id, end);
+		state->last_included_context_id = state->pending_context_id;
 		return true;
 	}
+#if QEMU_PLUGIN_VERSION == 2
+	if (end > tb->n_insns)
+		return false;
+	if (end)
+		end = tb->insns[end - 1].end;
+#endif
 	if (end > tb->start && end <= tb->end) {
 		write_exec_range(cpu_index, tb->start, end);
 		return true;
@@ -593,15 +973,20 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
 {
 	struct vcpu_exec_state *state;
 	struct tb_data *current = userdata;
+	uint64_t current_context_id;
 	uint64_t progress;
 
 	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
 	record_vcpu(state, cpu_index);
+	current_context_id = sample_context(state, cpu_index, current);
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
 	if (state->pending
 	    && !write_exec_prefix(cpu_index, state->pending, progress))
 		increment_status_counter(&producer_status.unresolved_tb_exits);
+	if (current->included && state->gap_open)
+		write_context_gap(cpu_index, state, current_context_id);
 	state->pending = current;
+	state->pending_context_id = current_context_id;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
 }
 
@@ -763,7 +1148,6 @@ static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 		int classification = classify_context_range(data->start, data->end);
 
 		data->included = classification > 0;
-		data->context_id = data->included ? 1 : 2;
 		if (classification < 0)
 			increment_status_counter(&producer_status.context_errors);
 	}
@@ -839,10 +1223,16 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 			data->insns[i].end = data->insns[i].start
 				+ qemu_plugin_insn_size(insn);
 		if (!hypervisor_filter || data->included) {
+#if QEMU_PLUGIN_VERSION == 2
+			qemu_plugin_register_vcpu_insn_exec_inline_per_vcpu(
+				insn, QEMU_PLUGIN_INLINE_ADD_U64,
+				exec_progress, 1);
+#else
 			qemu_plugin_register_vcpu_insn_exec_inline_per_vcpu(
 				insn, QEMU_PLUGIN_INLINE_STORE_U64,
 				exec_progress,
 				tb_exec_output ? i + 1 : data->insns[i].end);
+#endif
 		}
 	}
 #if QEMU_PLUGIN_VERSION >= 5
@@ -853,7 +1243,10 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 	if (tb_exec_output && (!hypervisor_filter || data->included))
 		write_tb_definition(data);
 	qemu_plugin_register_vcpu_tb_exec_cb(
-		tb, vcpu_tb_exec, QEMU_PLUGIN_CB_NO_REGS, data);
+		tb, vcpu_tb_exec,
+		context_register_all || context_register_names
+			? QEMU_PLUGIN_CB_R_REGS : QEMU_PLUGIN_CB_NO_REGS,
+		data);
 #endif
 }
 
@@ -952,10 +1345,40 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 
 #if QEMU_PLUGIN_VERSION >= 2
 	if (exec_state) {
+		if (have_vcpu) {
+			for (cpu_index = 0; cpu_index <= max_vcpu_index;
+			     cpu_index++) {
+				struct vcpu_exec_state *state =
+					qemu_plugin_scoreboard_find(exec_state,
+								    cpu_index);
+				unsigned int i;
+
+				if (!state->seen)
+					continue;
+				if (state->context_registers) {
+					for (i = 0;
+					     i < state->context_registers->len; i++) {
+						struct context_register *reg =
+							&g_array_index(
+								state->context_registers,
+								struct context_register, i);
+
+						g_free(reg->name);
+						g_byte_array_unref(reg->value);
+					}
+					g_array_free(state->context_registers, true);
+				}
+				if (state->context_sample)
+					g_byte_array_unref(state->context_sample);
+				if (state->last_context_sample)
+					g_byte_array_unref(state->last_context_sample);
+			}
+		}
 		qemu_plugin_scoreboard_free(exec_state);
 		exec_state = NULL;
 	}
 #endif
+	clear_context_register_names();
 }
 
 QEMU_PLUGIN_EXPORT
@@ -973,9 +1396,13 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	tb_exec_output = false;
 	hypervisor_filter = false;
 	exec_mapping = false;
+	context_enabled = false;
+	clear_context_register_names();
+	configure_target_architecture(info->target_name);
 	gzip_level = Z_BEST_SPEED;
 	trace_failed = false;
 	next_tb_id = 0;
+	next_context_id = 0;
 	free(context_ranges);
 	context_ranges = NULL;
 	nr_context_ranges = 0;
@@ -1028,6 +1455,20 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 #endif
 		} else if (!strcmp(argv[i], "exec-mapping=off")) {
 			exec_mapping = false;
+		} else if (!strncmp(argv[i], "context-registers=", 18)) {
+			if (!set_context_register_names(argv[i] + 18)) {
+				fprintf(stderr,
+					"qemu-etrace-plugin: invalid context register list: %s\n",
+					argv[i] + 18);
+				return -1;
+			}
+		} else if (!strncmp(argv[i], "context-register=", 17)) {
+			if (!add_context_register_name(argv[i] + 17)) {
+				fprintf(stderr,
+					"qemu-etrace-plugin: invalid context register: %s\n",
+					argv[i] + 17);
+				return -1;
+			}
 		} else {
 			fprintf(stderr, "qemu-etrace-plugin: invalid option: %s\n",
 				argv[i]);
@@ -1054,6 +1495,28 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 			"qemu-etrace-plugin: execution mappings require format v1\n");
 		return -1;
 	}
+	if (context_register_basic
+	    && !configure_basic_context(info->target_name)) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: no basic context register set for %s\n",
+			info->target_name);
+		return -1;
+	}
+	context_enabled = hypervisor_filter || context_register_all
+		|| context_register_names;
+	if (context_enabled && !tb_exec_output) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: context capture requires format v1\n");
+		return -1;
+	}
+#if QEMU_PLUGIN_VERSION < 2
+	if (context_register_all || context_register_names) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: context registers require QEMU plugin "
+			"API 2 or newer\n");
+		return -1;
+	}
+#endif
 
 	fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0) {
@@ -1106,6 +1569,13 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	}
 	exec_progress = qemu_plugin_scoreboard_u64_in_struct(
 		exec_state, struct vcpu_exec_state, progress);
+	if (context_register_all || context_register_names) {
+#if QEMU_PLUGIN_VERSION >= 7
+		qemu_plugin_register_vcpu_init_cb(id, vcpu_init, NULL);
+#else
+		qemu_plugin_register_vcpu_init_cb(id, vcpu_init);
+#endif
+	}
 #if QEMU_PLUGIN_VERSION >= 7
 	qemu_plugin_register_vcpu_exit_cb(id, vcpu_exit, NULL);
 #else

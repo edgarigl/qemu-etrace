@@ -29,6 +29,7 @@ typedef struct qemu_info_t {
 
 struct qemu_plugin_tb;
 struct qemu_plugin_insn;
+struct qemu_plugin_register;
 #if QEMU_PLUGIN_VERSION >= 2
 struct qemu_plugin_scoreboard;
 
@@ -74,12 +75,16 @@ typedef void (*qemu_plugin_vcpu_tb_trans_cb_t)(qemu_plugin_id_t id,
 
 enum qemu_plugin_cb_flags {
 	QEMU_PLUGIN_CB_NO_REGS,
+	QEMU_PLUGIN_CB_R_REGS,
+	QEMU_PLUGIN_CB_RW_REGS,
 };
 
 #if QEMU_PLUGIN_VERSION >= 2
 enum qemu_plugin_op {
 	QEMU_PLUGIN_INLINE_ADD_U64,
+#if QEMU_PLUGIN_VERSION >= 3
 	QEMU_PLUGIN_INLINE_STORE_U64,
+#endif
 };
 #endif
 
@@ -102,10 +107,15 @@ void qemu_plugin_register_vcpu_discon_cb(
 #endif
 #endif
 #if QEMU_PLUGIN_VERSION >= 7
+void qemu_plugin_register_vcpu_init_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_udata_cb_t cb,
+				       void *userdata);
 void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
 				       qemu_plugin_vcpu_udata_cb_t cb,
 				       void *userdata);
 #else
+void qemu_plugin_register_vcpu_init_cb(qemu_plugin_id_t id,
+				       qemu_plugin_vcpu_simple_cb_t cb);
 void qemu_plugin_register_vcpu_exit_cb(qemu_plugin_id_t id,
 				       qemu_plugin_vcpu_simple_cb_t cb);
 #endif
@@ -130,6 +140,22 @@ struct qemu_plugin_insn *
 qemu_plugin_tb_get_insn(const struct qemu_plugin_tb *tb, size_t index);
 uint64_t qemu_plugin_insn_vaddr(const struct qemu_plugin_insn *insn);
 size_t qemu_plugin_insn_size(const struct qemu_plugin_insn *insn);
+#if QEMU_PLUGIN_VERSION >= 2
+typedef struct {
+	struct qemu_plugin_register *handle;
+	const char *name;
+	const char *feature;
+} qemu_plugin_reg_descriptor;
+
+GArray *qemu_plugin_get_registers(void);
+#if QEMU_PLUGIN_VERSION >= 6
+bool qemu_plugin_read_register(struct qemu_plugin_register *handle,
+			       GByteArray *buf);
+#else
+int qemu_plugin_read_register(struct qemu_plugin_register *handle,
+			      GByteArray *buf);
+#endif
+#endif
 #if QEMU_PLUGIN_VERSION >= 5
 bool qemu_plugin_translate_vaddr(uint64_t vaddr, uint64_t *hwaddr);
 #endif

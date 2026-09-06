@@ -18,12 +18,14 @@ the inline-function fixture with each distinct compiler. It verifies both
 inline-entry attribution and rejection of execution that starts in a later
 inline-attributed block.
 
-The plugin unit tests use local API stubs for QEMU plugin API versions 1, 5,
-6, and 7. API version 5 is built both with and without the discontinuity
-callback to cover QEMU 10.1 and 10.2, version 6 covers QEMU 11.0, and version 7
-covers the callback ABI used by current upstream QEMU. The tests verify raw
-and gzip-compressed output, repeated virtualization-style transitions, and
-final producer status without requiring a QEMU source tree or emulator binary.
+The plugin unit tests use local API stubs for QEMU plugin API versions 1, 2, 4,
+5, 6, and 7. API versions 2 and 4 cover register-aware releases before the
+virtual-address translation API, API version 5 is built both with and without
+the discontinuity callback to cover QEMU 10.1 and 10.2, version 6 covers QEMU
+11.0, and version 7 covers the callback ABI used by current upstream QEMU. The
+tests verify raw and gzip-compressed output, repeated virtualization-style
+transitions, context changes, and final producer status without requiring a
+QEMU source tree or emulator binary.
 
 Build tests verify that system Binutils is the default, local Binutils adds its
 own include and library paths, and external programs are found through `PATH`.
