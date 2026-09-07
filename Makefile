@@ -165,7 +165,8 @@ endif
 
 plugin: $(PLUGIN)
 
-$(PLUGIN): plugin/etrace-plugin.c etrace-format.h $(QEMU_PLUGIN_HEADER)
+$(PLUGIN): plugin/etrace-plugin.c etrace-format.h etrace-hash.h \
+		$(QEMU_PLUGIN_HEADER)
 	@test -n "$(QEMU_PLUGIN_HEADER)" || { \
 		echo "Set QEMU_SRC or QEMU_PLUGIN_HEADER to a QEMU source tree" >&2; \
 		exit 1; \
@@ -212,27 +213,31 @@ $(TEST_BUILD_DIR)/test-dwarf-lines: tests/unit/test-dwarf-lines.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
 $(TEST_BUILD_DIR)/test-plugin: tests/unit/test-plugin.c plugin/etrace-plugin.c \
-		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+		tests/plugin/qemu-plugin.h etrace-format.h etrace-hash.h \
+		| $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -I. -Itests/plugin \
 		tests/unit/test-plugin.c plugin/etrace-plugin.c -pthread \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
 $(TEST_BUILD_DIR)/test-plugin-v1: tests/unit/test-plugin.c plugin/etrace-plugin.c \
-		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+		tests/plugin/qemu-plugin.h etrace-format.h etrace-hash.h \
+		| $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=1 \
 		-I. -Itests/plugin tests/unit/test-plugin.c \
 		plugin/etrace-plugin.c -pthread \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
 $(TEST_BUILD_DIR)/test-plugin-v2: tests/unit/test-plugin.c plugin/etrace-plugin.c \
-		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+		tests/plugin/qemu-plugin.h etrace-format.h etrace-hash.h \
+		| $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=2 \
 		-I. -Itests/plugin tests/unit/test-plugin.c \
 		plugin/etrace-plugin.c -pthread \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
 $(TEST_BUILD_DIR)/test-plugin-v4: tests/unit/test-plugin.c plugin/etrace-plugin.c \
-		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+		tests/plugin/qemu-plugin.h etrace-format.h etrace-hash.h \
+		| $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=4 \
 		-I. -Itests/plugin tests/unit/test-plugin.c \
 		plugin/etrace-plugin.c -pthread \
@@ -240,7 +245,7 @@ $(TEST_BUILD_DIR)/test-plugin-v4: tests/unit/test-plugin.c plugin/etrace-plugin.
 
 $(TEST_BUILD_DIR)/test-plugin-v5-discon: tests/unit/test-plugin.c \
 		plugin/etrace-plugin.c tests/plugin/qemu-plugin.h etrace-format.h \
-		| $(TEST_BUILD_DIR)
+		etrace-hash.h | $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=5 \
 		-DHAVE_QEMU_PLUGIN_VCPU_DISCON_CB -I. -Itests/plugin \
 		tests/unit/test-plugin.c plugin/etrace-plugin.c -pthread \
@@ -248,14 +253,15 @@ $(TEST_BUILD_DIR)/test-plugin-v5-discon: tests/unit/test-plugin.c \
 
 $(TEST_BUILD_DIR)/test-plugin-v6-discon: tests/unit/test-plugin.c \
 		plugin/etrace-plugin.c tests/plugin/qemu-plugin.h etrace-format.h \
-		| $(TEST_BUILD_DIR)
+		etrace-hash.h | $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=6 \
 		-DHAVE_QEMU_PLUGIN_VCPU_DISCON_CB -I. -Itests/plugin \
 		tests/unit/test-plugin.c plugin/etrace-plugin.c -pthread \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
 
 $(TEST_BUILD_DIR)/test-plugin-v7: tests/unit/test-plugin.c plugin/etrace-plugin.c \
-		tests/plugin/qemu-plugin.h etrace-format.h | $(TEST_BUILD_DIR)
+		tests/plugin/qemu-plugin.h etrace-format.h etrace-hash.h \
+		| $(TEST_BUILD_DIR)
 	$(CC) $(filter-out -MMD,$(CFLAGS)) -DQEMU_PLUGIN_VERSION=7 \
 		-DHAVE_QEMU_PLUGIN_VCPU_DISCON_CB \
 		-I. -Itests/plugin tests/unit/test-plugin.c \

@@ -84,7 +84,9 @@ def test_etrace_rejects_incomplete_status(run_etrace, tmp_path):
     assert "producer reported invalid execution data" in result.stderr
 
 
-@pytest.mark.parametrize("counter", ["context_errors", "mapping_errors"])
+@pytest.mark.parametrize(
+    "counter", ["context_errors", "mapping_errors", "code_errors"]
+)
 def test_etrace_rejects_v1_producer_failure(run_etrace, tmp_path, counter):
     trace = tmp_path / f"v1-producer-failure-{counter}.etrace"
     trace.write_bytes(
@@ -123,8 +125,9 @@ def test_etrace_reports_v1_status_counters(run_etrace, tmp_path):
     result = run_etrace("--trace", trace, "--trace-output", output)
 
     assert result.returncode == 0
-    assert "S1 filtered-exec=7 context-errors=0 mapping-errors=0" in (
-        output.read_text(encoding="ascii")
+    assert (
+        "S1 filtered-exec=7 context-errors=0 mapping-errors=0 code-errors=0"
+        in output.read_text(encoding="ascii")
     )
 
 
@@ -245,6 +248,7 @@ def test_etrace_expands_v1_tb_execution(run_etrace, tmp_path):
             vaddr=0x1000,
             context_id=3,
             insns=((0, 2), (2, 5), (7, 3)),
+            code=b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a",
         )
         + etrace_tb_exec(
             tb_id=7,
@@ -343,6 +347,16 @@ def test_etrace_reuses_v1_tb_definition(run_etrace, tmp_path):
             etrace_info(major=1)
             + etrace_tb_def(size=4, code=b"\x00"),
             "partial TB code image",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(code=b"\x00\x01\x02\x03", code_hash=1),
+            "TB code hash mismatch",
+        ),
+        (
+            etrace_info(major=1)
+            + etrace_tb_def(code_hash=1),
+            "TB hash without code image",
         ),
         (
             etrace_info(major=1)

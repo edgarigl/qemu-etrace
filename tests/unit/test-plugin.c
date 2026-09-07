@@ -8,11 +8,14 @@
 #include <zlib.h>
 
 #include "etrace-format.h"
+#include "etrace-hash.h"
 #include "qemu-plugin.h"
 
 struct qemu_plugin_insn {
 	uint64_t vaddr;
 	size_t size;
+	uint8_t data[16];
+	bool data_unavailable;
 	qemu_plugin_vcpu_udata_cb_t exec_cb;
 	void *exec_data;
 #if QEMU_PLUGIN_VERSION >= 2
@@ -251,6 +254,23 @@ uint64_t qemu_plugin_insn_vaddr(const struct qemu_plugin_insn *insn)
 {
 	return insn->vaddr;
 }
+
+#if QEMU_PLUGIN_VERSION >= 3
+size_t qemu_plugin_insn_data(const struct qemu_plugin_insn *insn,
+			     void *dest, size_t len)
+{
+	if (insn->data_unavailable)
+		return 0;
+	len = len < insn->size ? len : insn->size;
+	memcpy(dest, insn->data, len);
+	return len;
+}
+#else
+const void *qemu_plugin_insn_data(const struct qemu_plugin_insn *insn)
+{
+	return insn->data_unavailable ? NULL : insn->data;
+}
+#endif
 
 size_t qemu_plugin_insn_size(const struct qemu_plugin_insn *insn)
 {
@@ -617,14 +637,18 @@ static void assert_tb_definition(const uint8_t **cursor, uint64_t tb_id,
 	struct etrace_tb_def definition;
 	struct etrace_tb_insn insn;
 	struct etrace_hdr hdr;
+	GByteArray *code;
 	size_t i;
+	size_t code_len = expected[n_insns - 1].vaddr
+		+ expected[n_insns - 1].size - vaddr;
 
 	read_data(cursor, &hdr, sizeof(hdr));
 	g_assert_cmpuint(hdr.type, ==, TYPE_TB_DEF);
 	g_assert_cmpuint(hdr.len, ==,
 			 offsetof(struct etrace_tb_def, data8)
 			 + n_insns * sizeof(insn)
-			 + n_mappings * sizeof(*expected_mappings));
+			 + n_mappings * sizeof(*expected_mappings)
+			 + code_len);
 	read_data(cursor, &definition, offsetof(struct etrace_tb_def, data8));
 	g_assert_cmpuint(definition.tb_id, ==, tb_id);
 	g_assert_cmpuint(definition.vaddr, ==, vaddr);
@@ -634,7 +658,7 @@ static void assert_tb_definition(const uint8_t **cursor, uint64_t tb_id,
 			 - vaddr);
 	g_assert_cmpuint(definition.insn_count, ==, n_insns);
 	g_assert_cmpuint(definition.mapping_count, ==, n_mappings);
-	g_assert_cmpuint(definition.code_len, ==, 0);
+	g_assert_cmpuint(definition.code_len, ==, code_len);
 	for (i = 0; i < n_insns; i++) {
 		read_data(cursor, &insn, sizeof(insn));
 		g_assert_cmpuint(insn.offset, ==, expected[i].vaddr - vaddr);
@@ -648,6 +672,34 @@ static void assert_tb_definition(const uint8_t **cursor, uint64_t tb_id,
 		g_assert_cmpuint(mapping.len, ==, expected_mappings[i].len);
 		g_assert_cmpuint(mapping.paddr, ==, expected_mappings[i].paddr);
 	}
+	code = g_byte_array_sized_new(code_len);
+	for (i = 0; i < n_insns; i++)
+		g_byte_array_append(code, expected[i].data, expected[i].size);
+	g_assert_cmpuint(definition.code_hash, ==,
+			 etrace_code_hash(code->data, code->len));
+	g_assert_cmpmem(*cursor, definition.code_len, code->data, code->len);
+	*cursor += definition.code_len;
+	g_byte_array_unref(code);
+}
+
+static void assert_tb_definition_without_code(const uint8_t **cursor,
+					      uint64_t tb_id,
+					      const struct qemu_plugin_insn *insn)
+{
+	struct etrace_tb_def definition;
+	struct etrace_tb_insn wire_insn;
+	struct etrace_hdr hdr;
+
+	read_data(cursor, &hdr, sizeof(hdr));
+	g_assert_cmpuint(hdr.type, ==, TYPE_TB_DEF);
+	g_assert_cmpuint(hdr.len, ==,
+			 offsetof(struct etrace_tb_def, data8) + sizeof(wire_insn));
+	read_data(cursor, &definition, offsetof(struct etrace_tb_def, data8));
+	read_data(cursor, &wire_insn, sizeof(wire_insn));
+	g_assert_cmpuint(definition.tb_id, ==, tb_id);
+	g_assert_cmpuint(definition.code_len, ==, 0);
+	g_assert_cmpuint(definition.code_hash, ==, 0);
+	g_assert_cmpuint(wire_insn.size, ==, insn->size);
 }
 
 static void assert_context(const uint8_t **cursor, unsigned int cpu_index,
@@ -1243,9 +1295,10 @@ static void test_accurate_internal_restart(void)
 static void test_tb_execution_trace(void)
 {
 	struct qemu_plugin_insn insns[] = {
-		{ .vaddr = 0x5000, .size = 2 },
-		{ .vaddr = 0x5002, .size = 5 },
-		{ .vaddr = 0x5007, .size = 3 },
+		{ .vaddr = 0x5000, .size = 2, .data = { 0xaa, 0xbb } },
+		{ .vaddr = 0x5002, .size = 5,
+		  .data = { 0x01, 0x02, 0x03, 0x04, 0x05 } },
+		{ .vaddr = 0x5007, .size = 3, .data = { 0xcc, 0xdd, 0xee } },
 	};
 	struct qemu_plugin_tb tb = {
 		.vaddr = 0x5000,
@@ -1282,7 +1335,8 @@ static void test_tb_execution_trace(void)
 	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
 	cursor = (const uint8_t *)contents;
 	g_assert_cmpuint(read_trace_headers_version(&cursor, &major), ==,
-			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC);
+			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
+			 | ETRACE_INFO_F_TB_CODE);
 	g_assert_cmpuint(major, ==, ETRACE_VERSION_TB_EXEC);
 	assert_tb_definition(&cursor, 1, 0x5000, 0, insns,
 			     G_N_ELEMENTS(insns), NULL, 0);
@@ -1295,6 +1349,7 @@ static void test_tb_execution_trace(void)
 		g_assert_cmpuint(status.filtered_execs, ==, 0);
 		g_assert_cmpuint(status.context_errors, ==, 0);
 		g_assert_cmpuint(status.mapping_errors, ==, 0);
+		g_assert_cmpuint(status.code_errors, ==, 0);
 	}
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
@@ -1370,7 +1425,8 @@ static void test_hypervisor_filter(void)
 	cursor = (const uint8_t *)contents;
 	g_assert_cmpuint(read_trace_headers_version(&cursor, &major), ==,
 			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
-			 | ETRACE_INFO_F_CONTEXT | ETRACE_INFO_F_FILTERED);
+			 | ETRACE_INFO_F_CONTEXT | ETRACE_INFO_F_FILTERED
+			 | ETRACE_INFO_F_TB_CODE);
 	g_assert_cmpuint(major, ==, ETRACE_VERSION_TB_EXEC);
 	assert_tb_definition(&cursor, 1, 0x1000, 0, first_insns,
 			     G_N_ELEMENTS(first_insns), NULL, 0);
@@ -1387,6 +1443,7 @@ static void test_hypervisor_filter(void)
 	g_assert_cmpuint(status.filtered_execs, ==, 2);
 	g_assert_cmpuint(status.context_errors, ==, 0);
 	g_assert_cmpuint(status.mapping_errors, ==, 0);
+	g_assert_cmpuint(status.code_errors, ==, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -1537,7 +1594,7 @@ static void test_register_context_changes(void)
 	cursor = (const uint8_t *)contents;
 	g_assert_cmpuint(read_trace_headers(&cursor), ==,
 			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
-			 | ETRACE_INFO_F_CONTEXT);
+			 | ETRACE_INFO_F_CONTEXT | ETRACE_INFO_F_TB_CODE);
 	assert_tb_definition(&cursor, 1, 0x8000, 0, &insn, 1, NULL, 0);
 	assert_context_registers(
 		&cursor, 1, 1, 0x123000, 3,
@@ -1644,6 +1701,59 @@ static void test_missing_context_register(void)
 	g_free(path);
 }
 
+static void test_instruction_code_failure(void)
+{
+	struct qemu_plugin_insn insn = {
+		.vaddr = 0xa000,
+		.size = 4,
+		.data_unavailable = true,
+	};
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0xa000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[2];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, args), ==, 0);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 1, 1);
+	exit_vcpu(1);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	read_trace_headers(&cursor);
+	assert_tb_definition_without_code(&cursor, 1, &insn);
+	assert_tb_execution(&cursor, 1, 1, 1, 0, 1);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.code_errors, ==, 1);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
 #if QEMU_PLUGIN_VERSION >= 5
 static void test_execution_mappings(void)
 {
@@ -1695,7 +1805,7 @@ static void test_execution_mappings(void)
 	cursor = (const uint8_t *)contents;
 	g_assert_cmpuint(read_trace_headers(&cursor), ==,
 			 ETRACE_INFO_F_FINAL_STATUS | ETRACE_INFO_F_TB_EXEC
-			 | ETRACE_INFO_F_EXEC_MAPPING);
+			 | ETRACE_INFO_F_EXEC_MAPPING | ETRACE_INFO_F_TB_CODE);
 	assert_tb_definition(&cursor, 1, 0x6000, 0, insns,
 			     G_N_ELEMENTS(insns), mappings,
 			     G_N_ELEMENTS(mappings));
@@ -2127,6 +2237,8 @@ int main(int argc, char **argv)
 			test_context_register_options);
 	g_test_add_func("/plugin/missing-context-register",
 			test_missing_context_register);
+	g_test_add_func("/plugin/instruction-code-failure",
+			test_instruction_code_failure);
 #if QEMU_PLUGIN_VERSION >= 5
 	g_test_add_func("/plugin/execution-mappings", test_execution_mappings);
 	g_test_add_func("/plugin/execution-mapping-failure",

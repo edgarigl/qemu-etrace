@@ -22,6 +22,7 @@
 #include <qemu-plugin.h>
 
 #include "etrace-format.h"
+#include "etrace-hash.h"
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
@@ -33,9 +34,12 @@ struct tb_data {
 	size_t n_insns;
 	struct etrace_tb_mapping *mappings;
 	size_t n_mappings;
+	uint8_t *code;
+	uint64_t code_hash;
 	bool included;
 	bool context_unknown;
 	bool mapping_valid;
+	bool code_valid;
 	struct {
 		uint64_t start;
 		uint64_t end;
@@ -112,6 +116,7 @@ struct producer_status {
 	uint64_t filtered_execs;
 	uint64_t context_errors;
 	uint64_t mapping_errors;
+	uint64_t code_errors;
 };
 
 struct context_range {
@@ -228,7 +233,8 @@ static bool write_headers(void)
 				| (tb_exec_output ? ETRACE_INFO_F_TB_EXEC : 0)
 				| (context_enabled ? ETRACE_INFO_F_CONTEXT : 0)
 				| (hypervisor_filter ? ETRACE_INFO_F_FILTERED : 0)
-				| (exec_mapping ? ETRACE_INFO_F_EXEC_MAPPING : 0),
+				| (exec_mapping ? ETRACE_INFO_F_EXEC_MAPPING : 0)
+				| (tb_exec_output ? ETRACE_INFO_F_TB_CODE : 0),
 			.version = {
 				.major = tb_exec_output ? ETRACE_VERSION_TB_EXEC
 					: ETRACE_VERSION_LEGACY,
@@ -492,6 +498,52 @@ fail:
 #endif
 
 #if QEMU_PLUGIN_VERSION >= 2
+static bool collect_tb_code(struct tb_data *data, struct qemu_plugin_tb *tb)
+{
+	uint64_t code_len = data->end - data->start;
+	uint64_t expected = data->start;
+	size_t i;
+
+	if (!code_len || code_len > UINT32_MAX || code_len > SIZE_MAX)
+		return false;
+	data->code = malloc(code_len);
+	if (!data->code)
+		return false;
+	for (i = 0; i < data->n_insns; i++) {
+		struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
+		size_t size = qemu_plugin_insn_size(insn);
+		uint64_t start = qemu_plugin_insn_vaddr(insn);
+		uint64_t offset;
+
+		if (start != expected || start < data->start
+		    || size > data->end - start)
+			goto fail;
+		offset = start - data->start;
+#if QEMU_PLUGIN_VERSION >= 3
+		if (qemu_plugin_insn_data(insn, data->code + offset, size) != size)
+			goto fail;
+#else
+		{
+			const void *bytes = qemu_plugin_insn_data(insn);
+
+			if (!bytes)
+				goto fail;
+			memcpy(data->code + offset, bytes, size);
+		}
+#endif
+		expected = start + size;
+	}
+	if (expected != data->end)
+		goto fail;
+	data->code_hash = etrace_code_hash(data->code, code_len);
+	return true;
+
+fail:
+	free(data->code);
+	data->code = NULL;
+	return false;
+}
+
 static void write_tb_definition(const struct tb_data *tb)
 {
 	struct etrace_tb_def *definition;
@@ -504,7 +556,8 @@ static void write_tb_definition(const struct tb_data *tb)
 
 	payload_len = offsetof(struct etrace_tb_def, data8)
 		+ tb->n_insns * sizeof(*insns)
-		+ tb->n_mappings * sizeof(*tb->mappings);
+		+ tb->n_mappings * sizeof(*tb->mappings)
+		+ (tb->code_valid ? tb->end - tb->start : 0);
 	packet_len = sizeof(*hdr) + payload_len;
 	packet = calloc(1, packet_len);
 	if (!packet) {
@@ -523,7 +576,9 @@ static void write_tb_definition(const struct tb_data *tb)
 	definition->tb_id = tb->id;
 	definition->vaddr = tb->start;
 	definition->context_id = 0;
+	definition->code_hash = tb->code_valid ? tb->code_hash : 0;
 	definition->size = tb->end - tb->start;
+	definition->code_len = tb->code_valid ? definition->size : 0;
 	definition->insn_count = tb->n_insns;
 	definition->mapping_count = tb->n_mappings;
 	for (i = 0; i < tb->n_insns; i++) {
@@ -533,6 +588,12 @@ static void write_tb_definition(const struct tb_data *tb)
 	if (tb->n_mappings) {
 		memcpy(&insns[tb->n_insns], tb->mappings,
 		       tb->n_mappings * sizeof(*tb->mappings));
+	}
+	if (tb->code_valid) {
+		uint8_t *code = (uint8_t *)&insns[tb->n_insns]
+			+ tb->n_mappings * sizeof(*tb->mappings);
+
+		memcpy(code, tb->code, definition->code_len);
 	}
 	write_packet(packet, packet_len);
 	free(packet);
@@ -956,6 +1017,8 @@ static bool write_exec_prefix(unsigned int cpu_index,
 			return true;
 		if (end > tb->n_insns)
 			return false;
+		if (!tb->code_valid)
+			increment_status_counter(&producer_status.code_errors);
 		if (exec_mapping && !tb->mapping_valid)
 			increment_status_counter(&producer_status.mapping_errors);
 		write_tb_execution(cpu_index, tb, ++state->sequence,
@@ -1151,6 +1214,7 @@ static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 	data->n_insns = n_insns;
 	data->included = true;
 	data->mapping_valid = true;
+	data->code_valid = !tb_exec_output;
 #if QEMU_PLUGIN_VERSION >= 2
 	if (hypervisor_filter) {
 		int classification = classify_context_range(data->start, data->end);
@@ -1242,6 +1306,8 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 #endif
 		}
 	}
+	if (tb_exec_output && (!hypervisor_filter || data->included))
+		data->code_valid = collect_tb_code(data, tb);
 #if QEMU_PLUGIN_VERSION >= 5
 	if (exec_mapping && (!hypervisor_filter || data->included))
 		data->mapping_valid = collect_mappings(data);
@@ -1320,6 +1386,7 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 			producer_status.context_errors;
 		status_packet_v1.data.mapping_errors =
 			producer_status.mapping_errors;
+		status_packet_v1.data.code_errors = producer_status.code_errors;
 		write_packet(&status_packet_v1, sizeof(status_packet_v1));
 	} else {
 		write_packet(&status_packet, sizeof(status_packet));
@@ -1342,6 +1409,7 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 		struct tb_data *next = tb->next;
 
 		free(tb->mappings);
+		free(tb->code);
 		free(tb);
 		tb = next;
 	}

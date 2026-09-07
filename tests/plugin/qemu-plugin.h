@@ -139,6 +139,12 @@ uint64_t qemu_plugin_tb_vaddr(const struct qemu_plugin_tb *tb);
 struct qemu_plugin_insn *
 qemu_plugin_tb_get_insn(const struct qemu_plugin_tb *tb, size_t index);
 uint64_t qemu_plugin_insn_vaddr(const struct qemu_plugin_insn *insn);
+#if QEMU_PLUGIN_VERSION >= 3
+size_t qemu_plugin_insn_data(const struct qemu_plugin_insn *insn,
+			     void *dest, size_t len);
+#else
+const void *qemu_plugin_insn_data(const struct qemu_plugin_insn *insn);
+#endif
 size_t qemu_plugin_insn_size(const struct qemu_plugin_insn *insn);
 #if QEMU_PLUGIN_VERSION >= 2
 typedef struct {

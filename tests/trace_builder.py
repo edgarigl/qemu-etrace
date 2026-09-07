@@ -15,6 +15,7 @@ ETRACE_TYPE_CONTEXT_GAP = 14
 ETRACE_INFO_F_FINAL_STATUS = 1 << 1
 ETRACE_INFO_F_CONTEXT = 1 << 3
 ETRACE_INFO_F_FILTERED = 1 << 4
+ETRACE_INFO_F_TB_CODE = 1 << 6
 QEMU_SIMPLE_HEADER_EVENT_ID = (1 << 64) - 1
 QEMU_SIMPLE_DROPPED_EVENT_ID = (1 << 64) - 2
 QEMU_SIMPLE_HEADER_MAGIC = 0xF2B177CB0AA429B4
@@ -76,9 +77,9 @@ def etrace_status(*, unresolved_tb_exits=0, unresolved_discontinuities=0,
 
 
 def etrace_status_v1(*, filtered_execs=0, context_errors=0,
-                     mapping_errors=0, **kwargs):
+                     mapping_errors=0, code_errors=0, **kwargs):
     extension = struct.pack(
-        "=QQQ", filtered_execs, context_errors, mapping_errors
+        "=QQQQ", filtered_execs, context_errors, mapping_errors, code_errors
     )
     return etrace_status(extension=extension, **kwargs)
 
@@ -95,12 +96,22 @@ def etrace_tb(*, guest_code=b"", host_code=b""):
     return etrace_packet(ETRACE_TYPE_TB, payload + guest_code + host_code)
 
 
+def etrace_code_hash(code):
+    value = 14695981039346656037
+    for byte in code:
+        value ^= byte
+        value = (value * 1099511628211) & ((1 << 64) - 1)
+    return value
+
+
 def etrace_tb_def(*, tb_id=1, vaddr=0x1000, context_id=0,
-                  code_hash=0, size=None, insns=((0, 4),), mappings=(),
+                  code_hash=None, size=None, insns=((0, 4),), mappings=(),
                   code=b"", flags=0, reserved=0, extension=b""):
     if size is None:
         size = max((offset + insn_size for offset, insn_size in insns),
                    default=0)
+    if code_hash is None:
+        code_hash = etrace_code_hash(code) if code else 0
     payload = struct.pack(
         "=QQQQIIHHII",
         tb_id,

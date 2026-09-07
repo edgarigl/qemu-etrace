@@ -42,6 +42,7 @@
 #include "coverage.h"
 #include "trace.h"
 #include "etrace.h"
+#include "etrace-hash.h"
 
 #define ETRACE_MAX_VERSION_MAJOR ETRACE_VERSION_TB_EXEC
 
@@ -55,6 +56,7 @@ struct etracer {
 	uint64_t filtered_execs;
 	uint64_t context_errors;
 	uint64_t mapping_errors;
+	uint64_t code_errors;
 	GHashTable *tb_defs;
 	GHashTable *contexts;
 	uint64_t *last_sequence;
@@ -204,6 +206,14 @@ static bool etrace_validate_tb_def(const struct etrace_pkg *pkg)
 		return etrace_invalid_pkg(pkg, "TB definition arrays exceed payload");
 	if (tb->code_len && tb->code_len != tb->size)
 		return etrace_invalid_pkg(pkg, "partial TB code image");
+	if (!tb->code_len && tb->code_hash)
+		return etrace_invalid_pkg(pkg, "TB hash without code image");
+	if (tb->code_len) {
+		const uint8_t *code = tb->data8 + insn_bytes + mapping_bytes;
+
+		if (etrace_code_hash(code, tb->code_len) != tb->code_hash)
+			return etrace_invalid_pkg(pkg, "TB code hash mismatch");
+	}
 
 	insns = (const void *)tb->data8;
 	expected_offset = 0;
@@ -441,9 +451,11 @@ static void etrace_process_status(struct etracer *t)
 		t->filtered_execs = status_v1->filtered_execs;
 		t->context_errors = status_v1->context_errors;
 		t->mapping_errors = status_v1->mapping_errors;
+		t->code_errors = status_v1->code_errors;
 		t->producer_failed = t->producer_failed
 			|| status_v1->context_errors
-			|| status_v1->mapping_errors;
+			|| status_v1->mapping_errors
+			|| status_v1->code_errors;
 	}
 
 	if (t->tr.fp_out) {
@@ -463,10 +475,12 @@ static void etrace_process_status(struct etracer *t)
 			fprintf(t->tr.fp_out,
 				"S1 filtered-exec=%" PRIu64
 				" context-errors=%" PRIu64
-				" mapping-errors=%" PRIu64 "\n",
+				" mapping-errors=%" PRIu64
+				" code-errors=%" PRIu64 "\n",
 				status_v1->filtered_execs,
 				status_v1->context_errors,
-				status_v1->mapping_errors);
+				status_v1->mapping_errors,
+				status_v1->code_errors);
 		}
 	}
 }
@@ -1083,13 +1097,15 @@ void etrace_show(int fd, FILE *fp_out,
 			" unresolved-vcpu=%" PRIu64
 			" write-errors=%" PRIu64
 			" context-errors=%" PRIu64
-			" mapping-errors=%" PRIu64 "\n",
+			" mapping-errors=%" PRIu64
+			" code-errors=%" PRIu64 "\n",
 			t.status.unresolved_tb_exits,
 			t.status.unresolved_discontinuities,
 			t.status.unresolved_vcpu_exits,
 			t.status.output_errors,
 			t.context_errors,
-			t.mapping_errors);
+			t.mapping_errors,
+			t.code_errors);
 		exit(EXIT_FAILURE);
 	}
 	fprintf(stderr, "done.\n");
