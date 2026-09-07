@@ -1,14 +1,23 @@
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from tests.trace_builder import (
+    ETRACE_INFO_F_FILTERED,
+    ETRACE_INFO_F_FINAL_STATUS,
+    ETRACE_TYPE_CONTEXT_GAP,
+    ETRACE_TYPE_DISCONTINUITY,
+    ETRACE_TYPE_TB_EXEC,
     etrace_arch,
+    etrace_context_gap,
+    etrace_discontinuity,
     etrace_exec64,
     etrace_info,
+    etrace_status_v1,
     etrace_tb_def,
     etrace_tb_exec,
 )
@@ -322,6 +331,17 @@ def test_v1_auto_map_replays_early_physical_execution(
     assert "unresolved aggregates" not in result.stderr
     assert actual == expected
 
+    ordered_result, ordered = run_v1_lcov(
+        run_etrace,
+        tmp_path,
+        x86_fixture,
+        trace,
+        "--auto-map",
+        "--preserve-order",
+    )
+    assert ordered_result.returncode == 0, ordered_result.stderr
+    assert ordered == expected
+
 
 def test_v1_auto_map_uses_unique_code_match(run_etrace, tmp_path, x86_fixture):
     linked = x86_fixture.start
@@ -412,6 +432,222 @@ def test_v1_auto_map_keeps_ambiguous_code_unresolved(
     assert result.returncode == 0, result.stderr
     assert "1 ambiguous TBs" in result.stderr
     assert functions["x86_coverage_fixture"] == 0
+
+    output = tmp_path / "ambiguous-ordered.txt"
+    ordered = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        output,
+        "--elf",
+        x86_fixture.binary,
+        "--auto-map",
+        "--preserve-order",
+    )
+    assert ordered.returncode == 0, ordered.stderr
+    assert "Ordered replay retained 1 unresolved execution boundaries" in (
+        ordered.stderr
+    )
+    assert any(
+        line.startswith("U0 sequence=1 tb=1")
+        for line in output.read_text(encoding="ascii").splitlines()
+    )
+
+
+def test_v1_ordered_replay_preserves_dynamic_events(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked = x86_fixture.start
+    physical = 0x600000
+    early_insns = tuple(x86_fixture.instructions[:3])
+    early_len = sum(size for _, size in early_insns)
+    tail_insns = ((0, 2), (2, 1))
+    trace = tmp_path / "ordered-events.etrace"
+    output = tmp_path / "ordered-events.txt"
+    spool = tmp_path / "ordered-events.bin"
+    trace.write_bytes(
+        etrace_info(
+            major=1,
+            attributes=ETRACE_INFO_F_FILTERED | ETRACE_INFO_F_FINAL_STATUS,
+        )
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=physical,
+            insns=early_insns,
+            mappings=((0, early_len, physical),),
+            code=x86_fixture.code[:early_len],
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, insn_count=len(early_insns), unit_id=1
+        )
+        + etrace_discontinuity(
+            from_pc=physical + early_len,
+            to_pc=linked,
+            kind=1,
+            unit_id=1,
+        )
+        + etrace_context_gap(sequence=2, filtered_execs=1, unit_id=1)
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=linked,
+            insns=early_insns,
+            mappings=((0, early_len, physical),),
+            code=x86_fixture.code[:early_len],
+        )
+        + etrace_tb_def(
+            tb_id=3,
+            vaddr=linked + 8,
+            insns=tail_insns,
+            code=x86_fixture.code[8:11],
+        )
+        + etrace_tb_exec(
+            tb_id=3, sequence=3, insn_count=2, unit_id=1
+        )
+        + etrace_status_v1()
+    )
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        output,
+        "--elf",
+        x86_fixture.binary,
+        "--auto-map",
+        "--preserve-order",
+        "--event-spool",
+        spool,
+    )
+
+    assert result.returncode == 0, result.stderr
+    dynamic = [
+        line.split()[0][0]
+        for line in output.read_text(encoding="ascii").splitlines()
+        if line and line[0] in "EDGU"
+    ]
+    assert dynamic == ["E", "D", "G", "E"]
+    assert spool.stat().st_size > 0
+    records = []
+    data = spool.read_bytes()
+    offset = 0
+    while offset < len(data):
+        record_type, _, payload_len = struct.unpack_from("=HHI", data, offset)
+        records.append(record_type)
+        offset += 8 + payload_len
+    assert records == [
+        ETRACE_TYPE_TB_EXEC,
+        ETRACE_TYPE_DISCONTINUITY,
+        ETRACE_TYPE_CONTEXT_GAP,
+        ETRACE_TYPE_TB_EXEC,
+    ]
+    assert output.read_text(encoding="ascii").splitlines()[-1].startswith(
+        "S1 filtered-exec="
+    )
+
+
+def test_v1_ordered_replay_preserves_vcpu_interleaving(
+    run_etrace, tmp_path, x86_fixture
+):
+    trace = tmp_path / "ordered-vcpus.etrace"
+    output = tmp_path / "ordered-vcpus.txt"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=x86_fixture.start,
+            insns=tuple(x86_fixture.instructions),
+            code=x86_fixture.code,
+        )
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=1, unit_id=1)
+        + etrace_tb_exec(tb_id=1, sequence=9, insn_count=2, unit_id=2)
+        + etrace_tb_exec(tb_id=1, sequence=2, insn_count=3, unit_id=1)
+    )
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        output,
+        "--elf",
+        x86_fixture.binary,
+        "--auto-map",
+        "--preserve-order",
+    )
+
+    assert result.returncode == 0, result.stderr
+    units = [
+        line.split()[0]
+        for line in output.read_text(encoding="ascii").splitlines()
+        if line.startswith("E")
+    ]
+    assert units == ["E1", "E2", "E1"]
+
+
+def test_v1_ordered_replay_enforces_spool_limit(
+    run_etrace, tmp_path, x86_fixture
+):
+    trace = tmp_path / "ordered-limit.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=x86_fixture.start,
+            insns=((0, 1),),
+            code=x86_fixture.code[:1],
+        )
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=1)
+    )
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        x86_fixture.binary,
+        "--auto-map",
+        "--preserve-order",
+        "--event-spool-limit",
+        "1",
+    )
+
+    assert result.returncode != 0
+    assert "event spool limit exceeded" in result.stderr
+
+
+def test_v1_ordered_replay_reports_spool_io_failure(
+    run_etrace, tmp_path, x86_fixture
+):
+    full = Path("/dev/full")
+    if not full.exists():
+        pytest.skip("event spool I/O failure test requires /dev/full")
+    trace = tmp_path / "ordered-io-error.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=x86_fixture.start,
+            insns=((0, 1),),
+            code=x86_fixture.code[:1],
+        )
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=1)
+    )
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        x86_fixture.binary,
+        "--auto-map",
+        "--preserve-order",
+        "--event-spool",
+        full,
+    )
+
+    assert result.returncode != 0
+    assert "ordered event spool" in result.stderr.lower()
 
 
 def test_x86_fixture_has_variable_length_instructions(x86_fixture):
