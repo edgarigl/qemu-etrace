@@ -1464,6 +1464,7 @@ static void test_context_filter_options(void)
 	};
 	char *missing_range[] = { "format=v1", "context=hypervisor" };
 	char *orphan_range[] = { "format=v1", "context-range=0x1000:0x100" };
+	char *orphan_unmatched[] = { "format=v1", "context-unmatched=keep" };
 	char *invalid_range[] = {
 		"format=v1", "context=hypervisor", "context-range=broken",
 	};
@@ -1471,6 +1472,7 @@ static void test_context_filter_options(void)
 	g_assert_cmpint(qemu_plugin_install(1, &info, 2, missing_format), ==, -1);
 	g_assert_cmpint(qemu_plugin_install(1, &info, 2, missing_range), ==, -1);
 	g_assert_cmpint(qemu_plugin_install(1, &info, 2, orphan_range), ==, -1);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 2, orphan_unmatched), ==, -1);
 	g_assert_cmpint(qemu_plugin_install(1, &info, 3, invalid_range), ==, -1);
 }
 
@@ -1521,6 +1523,73 @@ static void test_hypervisor_filter_rejects_partial_tb(void)
 	status = read_status_v1(&cursor);
 	g_assert_cmpuint(status.context_errors, ==, 1);
 	g_assert_cmpuint(status.filtered_execs, ==, 1);
+	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
+
+	unlink(path);
+	g_free(contents);
+	g_free(args[0]);
+	g_free(path);
+}
+
+static void test_hypervisor_filter_keeps_unmatched(void)
+{
+	struct qemu_plugin_insn hypervisor_insn = {
+		.vaddr = 0x1000, .size = 4,
+	};
+	struct qemu_plugin_insn unmatched_insn = {
+		.vaddr = 0x2000, .size = 4,
+	};
+	struct qemu_plugin_tb hypervisor = {
+		.vaddr = 0x1000, .insns = &hypervisor_insn, .n_insns = 1,
+	};
+	struct qemu_plugin_tb unmatched = {
+		.vaddr = 0x2000, .insns = &unmatched_insn, .n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "x86_64",
+		.version = { .min = 2, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *args[5];
+	char *contents;
+	char *path = NULL;
+	const uint8_t *cursor;
+	struct etrace_status_v1 status;
+	gsize length;
+	int fd;
+
+	fd = g_file_open_tmp("qemu-etrace-plugin-XXXXXX", &path, NULL);
+	g_assert_cmpint(fd, >=, 0);
+	close(fd);
+	unlink(path);
+	args[0] = g_strdup_printf("out=%s", path);
+	args[1] = "format=v1";
+	args[2] = "context=hypervisor";
+	args[3] = "context-range=0x1000:0x100";
+	args[4] = "context-unmatched=keep";
+
+	g_assert_cmpint(qemu_plugin_install(1, &info, 5, args), ==, 0);
+	translate_tb(&hypervisor);
+	translate_tb(&unmatched);
+	execute_tb_prefix(&hypervisor, 1, 1);
+	execute_tb_prefix(&unmatched, 1, 1);
+	exit_vcpu(1);
+	finish_plugin();
+
+	g_assert_true(g_file_get_contents(path, &contents, &length, NULL));
+	cursor = (const uint8_t *)contents;
+	read_trace_headers(&cursor);
+	assert_tb_definition(&cursor, 1, 0x1000, 0,
+			     &hypervisor_insn, 1, NULL, 0);
+	assert_tb_definition(&cursor, 2, 0x2000, 0,
+			     &unmatched_insn, 1, NULL, 0);
+	assert_context(&cursor, 1, 1, ETRACE_CONTEXT_F_HYPERVISOR);
+	assert_context(&cursor, 1, 2, ETRACE_CONTEXT_F_INCOMPLETE);
+	assert_tb_execution(&cursor, 1, 1, 1, 1, 1);
+	assert_tb_execution(&cursor, 1, 2, 2, 2, 1);
+	status = read_status_v1(&cursor);
+	g_assert_cmpuint(status.filtered_execs, ==, 0);
+	g_assert_cmpuint(status.context_errors, ==, 0);
 	g_assert_cmpuint(cursor - (const uint8_t *)contents, ==, length);
 
 	unlink(path);
@@ -2231,6 +2300,8 @@ int main(int argc, char **argv)
 			test_context_filter_options);
 	g_test_add_func("/plugin/hypervisor-filter-partial-tb",
 			test_hypervisor_filter_rejects_partial_tb);
+	g_test_add_func("/plugin/hypervisor-filter-keep-unmatched",
+			test_hypervisor_filter_keeps_unmatched);
 	g_test_add_func("/plugin/register-context-changes",
 			test_register_context_changes);
 	g_test_add_func("/plugin/context-register-options",

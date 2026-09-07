@@ -37,7 +37,9 @@ struct tb_data {
 	uint8_t *code;
 	uint64_t code_hash;
 	bool included;
+	bool hypervisor;
 	bool context_unknown;
+	bool context_error;
 	bool mapping_valid;
 	bool code_valid;
 	struct {
@@ -134,6 +136,8 @@ static int gzip_level = Z_BEST_SPEED;
 static bool gzip_output;
 static bool tb_exec_output;
 static bool hypervisor_filter;
+static bool keep_unmatched_context;
+static bool context_unmatched_set;
 static bool exec_mapping;
 static bool context_enabled;
 static bool context_register_all;
@@ -895,8 +899,10 @@ static uint64_t sample_context(struct vcpu_exec_state *state,
 
 	if (!context_enabled)
 		return 0;
-	if (hypervisor_filter && tb->included)
+	if (hypervisor_filter && tb->hypervisor)
 		flags |= ETRACE_CONTEXT_F_HYPERVISOR;
+	if (tb->context_unknown)
+		flags |= ETRACE_CONTEXT_F_INCOMPLETE;
 	if (!state->context_sample) {
 		state->context_sample = g_byte_array_new();
 		state->last_context_sample = g_byte_array_new();
@@ -1001,7 +1007,7 @@ static bool write_exec_prefix(unsigned int cpu_index,
 
 		state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
 		if (!tb->included) {
-			if (tb->context_unknown)
+			if (tb->context_error)
 				increment_status_counter(
 					&producer_status.context_errors);
 			if (!state->gap_open) {
@@ -1219,8 +1225,12 @@ static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 	if (hypervisor_filter) {
 		int classification = classify_context_range(data->start, data->end);
 
-		data->included = classification > 0;
-		data->context_unknown = classification < 0;
+		data->hypervisor = classification > 0;
+		data->included = data->hypervisor || keep_unmatched_context;
+		data->context_unknown = classification <= 0
+			&& keep_unmatched_context;
+		data->context_error = classification < 0
+			&& !keep_unmatched_context;
 	}
 #endif
 
@@ -1469,6 +1479,8 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	gzip_output = false;
 	tb_exec_output = false;
 	hypervisor_filter = false;
+	keep_unmatched_context = false;
+	context_unmatched_set = false;
 	exec_mapping = false;
 	context_enabled = false;
 	clear_context_register_names();
@@ -1518,6 +1530,12 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 					argv[i] + 14);
 				return -1;
 			}
+		} else if (!strcmp(argv[i], "context-unmatched=keep")) {
+			keep_unmatched_context = true;
+			context_unmatched_set = true;
+		} else if (!strcmp(argv[i], "context-unmatched=drop")) {
+			keep_unmatched_context = false;
+			context_unmatched_set = true;
 		} else if (!strcmp(argv[i], "exec-mapping=on")) {
 #if QEMU_PLUGIN_VERSION >= 5
 			exec_mapping = true;
@@ -1562,6 +1580,12 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	if (nr_context_ranges && !hypervisor_filter) {
 		fprintf(stderr,
 			"qemu-etrace-plugin: context ranges require context=hypervisor\n");
+		return -1;
+	}
+	if (context_unmatched_set && !hypervisor_filter) {
+		fprintf(stderr,
+			"qemu-etrace-plugin: context-unmatched requires "
+			"context=hypervisor\n");
 		return -1;
 	}
 	if (exec_mapping && !tb_exec_output) {
