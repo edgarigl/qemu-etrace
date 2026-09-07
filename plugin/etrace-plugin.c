@@ -19,6 +19,9 @@
 #include <glib.h>
 #include <zlib.h>
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include <qemu-plugin.h>
 
 #include "etrace-format.h"
@@ -130,6 +133,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct tb_data *translated_blocks;
 static int trace_fd = -1;
 static gzFile trace_gz;
+static bool trace_socket;
 static bool trace_failed;
 static uint8_t guest_address_bits;
 static int gzip_level = Z_BEST_SPEED;
@@ -156,12 +160,65 @@ static bool have_vcpu;
 static unsigned int max_vcpu_index;
 #endif
 
+#define UNIX_PREFIX "unix:"
+
+static int connect_unix_socket(const char *path)
+{
+	struct sockaddr_un addr;
+	socklen_t addr_len;
+	size_t path_len = strlen(path);
+	int fd;
+
+	if (!path_len || path_len >= sizeof(addr.sun_path)) {
+		errno = path_len ? ENAMETOOLONG : EINVAL;
+		return -1;
+	}
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		return -1;
+#ifdef SO_NOSIGPIPE
+	{
+		int enabled = 1;
+
+		if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
+			       &enabled, sizeof(enabled)) < 0)
+			goto fail;
+	}
+#endif
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	memcpy(addr.sun_path, path, path_len + 1);
+	addr_len = offsetof(struct sockaddr_un, sun_path) + path_len + 1;
+	if (connect(fd, (struct sockaddr *)&addr, addr_len) < 0)
+		goto fail;
+	return fd;
+
+fail:
+	{
+		int error = errno;
+
+		close(fd);
+		errno = error;
+		return -1;
+	}
+}
+
 static bool write_raw(const void *buf, size_t len)
 {
 	const uint8_t *p = buf;
 
 	while (len) {
-		ssize_t ret = write(trace_fd, p, len);
+		ssize_t ret;
+
+		if (trace_socket) {
+#ifdef MSG_NOSIGNAL
+			ret = send(trace_fd, p, len, MSG_NOSIGNAL);
+#else
+			ret = send(trace_fd, p, len, 0);
+#endif
+		} else {
+			ret = write(trace_fd, p, len);
+		}
 
 		if (ret < 0) {
 			if (errno == EINTR)
@@ -1411,6 +1468,7 @@ static void plugin_exit(qemu_plugin_id_t id, void *userdata)
 		close(trace_fd);
 		trace_fd = -1;
 	}
+	trace_socket = false;
 	tb = translated_blocks;
 	translated_blocks = NULL;
 	pthread_mutex_unlock(&lock);
@@ -1477,6 +1535,7 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	int i;
 
 	gzip_output = false;
+	trace_socket = false;
 	tb_exec_output = false;
 	hypervisor_filter = false;
 	keep_unmatched_context = false;
@@ -1621,7 +1680,12 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	}
 #endif
 
-	fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (!strncmp(output, UNIX_PREFIX, strlen(UNIX_PREFIX))) {
+		fd = connect_unix_socket(output + strlen(UNIX_PREFIX));
+		trace_socket = fd >= 0;
+	} else {
+		fd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	}
 	if (fd < 0) {
 		fprintf(stderr, "qemu-etrace-plugin: %s: %s\n",
 			output, strerror(errno));
@@ -1634,6 +1698,7 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 			fprintf(stderr, "qemu-etrace-plugin: %s: %s\n",
 				output, strerror(errno));
 			close(fd);
+			trace_socket = false;
 			return -1;
 		}
 		if (gzbuffer(trace_gz, 128 * 1024) != 0) {
@@ -1641,6 +1706,7 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 				"qemu-etrace-plugin: unable to allocate gzip buffer\n");
 			gzclose(trace_gz);
 			trace_gz = NULL;
+			trace_socket = false;
 			return -1;
 		}
 	} else {
@@ -1657,6 +1723,7 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 			close(trace_fd);
 			trace_fd = -1;
 		}
+		trace_socket = false;
 		return -1;
 	}
 

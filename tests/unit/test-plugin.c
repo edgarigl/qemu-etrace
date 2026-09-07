@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <zlib.h>
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include "etrace-format.h"
 #include "etrace-hash.h"
 #include "qemu-plugin.h"
@@ -1022,6 +1025,172 @@ static void write_execution_trace(const char *path, bool gzip)
 #endif
 	finish_plugin();
 	g_free(args[0]);
+}
+
+static int create_unix_listener(char **path)
+{
+	struct sockaddr_un addr = { 0 };
+	socklen_t addr_len;
+	size_t path_len;
+	int temporary;
+	int listener;
+
+	temporary = g_file_open_tmp("qemu-etrace-plugin-XXXXXX.sock", path, NULL);
+	g_assert_cmpint(temporary, >=, 0);
+	close(temporary);
+	unlink(*path);
+	path_len = strlen(*path);
+	g_assert_cmpuint(path_len, <, sizeof(addr.sun_path));
+	listener = socket(AF_UNIX, SOCK_STREAM, 0);
+	g_assert_cmpint(listener, >=, 0);
+	addr.sun_family = AF_UNIX;
+	memcpy(addr.sun_path, *path, path_len + 1);
+	addr_len = offsetof(struct sockaddr_un, sun_path) + path_len + 1;
+	g_assert_cmpint(bind(listener, (struct sockaddr *)&addr, addr_len), ==, 0);
+	g_assert_cmpint(listen(listener, 1), ==, 0);
+	return listener;
+}
+
+static GByteArray *write_socket_execution_trace(bool gzip)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x4000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x4000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	GByteArray *contents = g_byte_array_new();
+	char *args[2];
+	char *path = NULL;
+	int listener;
+	int connection;
+	int argc = 1;
+
+	listener = create_unix_listener(&path);
+	args[0] = g_strdup_printf("out=unix:%s", path);
+	if (gzip) {
+		args[1] = "compress=gzip";
+		argc++;
+	}
+	g_assert_cmpint(qemu_plugin_install(1, &info, argc, args), ==, 0);
+	connection = accept(listener, NULL, NULL);
+	g_assert_cmpint(connection, >=, 0);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 1, 1);
+#if QEMU_PLUGIN_VERSION >= 2
+	exit_vcpu(1);
+#endif
+	finish_plugin();
+	if (gzip) {
+		uint8_t buffer[256];
+		gzFile input = gzdopen(connection, "rb");
+		int length;
+
+		g_assert_nonnull(input);
+		while ((length = gzread(input, buffer, sizeof(buffer))) > 0)
+			g_byte_array_append(contents, buffer, length);
+		g_assert_cmpint(length, ==, 0);
+		g_assert_cmpint(gzclose(input), ==, Z_OK);
+	} else {
+		uint8_t buffer[256];
+		ssize_t length;
+
+		while ((length = read(connection, buffer, sizeof(buffer))) > 0)
+			g_byte_array_append(contents, buffer, length);
+		g_assert_cmpint(length, ==, 0);
+		close(connection);
+	}
+	close(listener);
+	unlink(path);
+	g_free(args[0]);
+	g_free(path);
+	return contents;
+}
+
+static void test_unix_socket_output(void)
+{
+	GByteArray *raw = write_socket_execution_trace(false);
+	GByteArray *gzip = write_socket_execution_trace(true);
+	const uint8_t *cursor = raw->data;
+
+	g_assert_cmpmem(raw->data, raw->len, gzip->data, gzip->len);
+	g_assert_cmpuint(read_trace_headers(&cursor), ==,
+			 ETRACE_INFO_F_FINAL_STATUS);
+	assert_exec64(&cursor, 1, 0x4000, 0x4004);
+	assert_status(&cursor, 0);
+	g_assert_cmpuint(cursor - raw->data, ==, raw->len);
+	g_byte_array_unref(gzip);
+	g_byte_array_unref(raw);
+}
+
+static void test_unix_socket_connection_errors(void)
+{
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char long_path[sizeof(((struct sockaddr_un *)0)->sun_path) + 2];
+	char *args[1];
+	char *path = NULL;
+	int temporary;
+
+	temporary = g_file_open_tmp("qemu-etrace-plugin-XXXXXX.sock", &path, NULL);
+	g_assert_cmpint(temporary, >=, 0);
+	close(temporary);
+	unlink(path);
+	args[0] = g_strdup_printf("out=unix:%s", path);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, args), ==, -1);
+	g_free(args[0]);
+	g_free(path);
+	memset(long_path, 'x', sizeof(long_path) - 1);
+	long_path[sizeof(long_path) - 1] = '\0';
+	args[0] = g_strdup_printf("out=unix:%s", long_path);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, args), ==, -1);
+	g_free(args[0]);
+	args[0] = "out=unix:";
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, args), ==, -1);
+}
+
+static void test_unix_socket_peer_disconnect(void)
+{
+	struct qemu_plugin_insn insn = { .vaddr = 0x4000, .size = 4 };
+	struct qemu_plugin_tb tb = {
+		.vaddr = 0x4000,
+		.insns = &insn,
+		.n_insns = 1,
+	};
+	qemu_info_t info = {
+		.target_name = "aarch64",
+		.version = { .min = 1, .cur = QEMU_PLUGIN_VERSION },
+		.system_emulation = true,
+	};
+	char *arg;
+	char *path = NULL;
+	int listener = create_unix_listener(&path);
+	int connection;
+
+	arg = g_strdup_printf("out=unix:%s", path);
+	g_assert_cmpint(qemu_plugin_install(1, &info, 1, &arg), ==, 0);
+	connection = accept(listener, NULL, NULL);
+	g_assert_cmpint(connection, >=, 0);
+	shutdown(connection, SHUT_RDWR);
+	close(connection);
+	translate_tb(&tb);
+	execute_tb_prefix(&tb, 1, 1);
+#if QEMU_PLUGIN_VERSION >= 2
+	exit_vcpu(1);
+#endif
+	finish_plugin();
+	close(listener);
+	unlink(path);
+	g_free(arg);
+	g_free(path);
 }
 
 static void test_gzip_equivalence(void)
@@ -2278,6 +2447,11 @@ int main(int argc, char **argv)
 			test_instruction_execution_trace);
 #endif
 	g_test_add_func("/plugin/gzip-equivalence", test_gzip_equivalence);
+	g_test_add_func("/plugin/unix-socket-output", test_unix_socket_output);
+	g_test_add_func("/plugin/unix-socket-errors",
+			test_unix_socket_connection_errors);
+	g_test_add_func("/plugin/unix-socket-peer-disconnect",
+			test_unix_socket_peer_disconnect);
 	g_test_add_func("/plugin/invalid-option", test_invalid_option);
 #if QEMU_PLUGIN_VERSION >= 2
 	g_test_add_func("/plugin/accurate-execution-trace",
