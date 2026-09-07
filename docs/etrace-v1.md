@@ -141,9 +141,31 @@ This preserves line and function coverage, but not the original ordering of
 unresolved TBs; chronological branch reconstruction will need an ordered spill
 or event log rather than this aggregate mode.
 
+Add `--preserve-order` to use that disk-backed event log. The first pass learns
+all available image bindings while appending TB executions, context gaps, and
+discontinuities to an ordered journal. A second pass replays those records in
+their original stream order:
+
 ```sh
-qemu-etrace --trace xen.etrace --elf xen-syms.debug --auto-map ...
+qemu-etrace --trace xen.etrace --elf xen-syms.debug \
+    --auto-map --preserve-order ...
 ```
+
+The default journal uses an automatically removed temporary file. Select a
+retained file with `--event-spool=PATH` and bound journal growth with
+`--event-spool-limit=BYTES`; the default limit is 1 GiB. Limit or I/O failures
+abort conversion without producing coverage.
+
+Resolved executions retain their original per-vCPU sequence and stream
+interleaving. An execution which remains unresolved is emitted as a `U`
+boundary, so future branch analysis can reset predecessor state instead of
+connecting control flow across missing code. The ordering is the producer's
+serialized observation order; it does not invent a global guest-causal order
+for MTTCG.
+
+Ordered mode preserves chronology and individual executions. Aggregate mode
+remains preferable when only line/function coverage is needed because it uses
+less disk I/O.
 
 `--unresolved-limit=N` bounds the number of distinct pending execution
 aggregates; the default is 65536. Exceeding it fails conversion rather than

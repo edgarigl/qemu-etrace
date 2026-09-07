@@ -99,6 +99,11 @@ aggregates through the same range processor. Ambiguous or unrelated TBs are
 reported but never guessed into the coverage result; exhausting the configured
 pending-aggregate limit is fatal.
 
+`--preserve-order` replaces unresolved aggregation with a disk-backed dynamic
+event journal and a second replay pass. It preserves the producer's observed
+stream interleaving and per-vCPU sequence. Remaining unresolved executions are
+explicit boundaries and are not connected to adjacent control flow.
+
 Plugin traces advertise `ETRACE_INFO_F_FINAL_STATUS` and end with a
 `TYPE_STATUS` record. The converter rejects a missing or incomplete final
 status and any nonzero unresolved-execution or output-error counter.
