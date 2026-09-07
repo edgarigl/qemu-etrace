@@ -158,6 +158,16 @@ represented by gap records so downstream control-flow analysis cannot connect
 unrelated retained ranges. See `docs/etrace-v1.md` for the event model,
 complete option reference, QEMU API requirements, and mapping limitations.
 
+If the early physical load address is unknown, add
+`context-unmatched=keep,exec-mapping=on` and enable the analyzer's sparse image
+resolver:
+
+$ qemu-etrace --trace /tmp/xen.elog --elf xen-syms.debug --auto-map ...
+
+The resolver defers unmatched TB executions until a later linked mapping or a
+unique code-byte match identifies them. `--unresolved-limit` bounds pending
+execution aggregates and fails conversion on overflow.
+
 Runtime address mapping
 -----------------------
 Use a repeatable `--address-map` option when code executes at a loader-selected

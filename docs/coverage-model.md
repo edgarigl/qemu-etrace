@@ -93,6 +93,12 @@ Version 1 can associate execution with context-change records and observed
 instruction mappings. A filtered trace contains explicit gap records between
 retained ranges. See `etrace-v1.md` for the format and plugin options.
 
+With `--auto-map`, unmatched TB executions are aggregated until their code and
+physical mappings can be associated with the input ELF. Resolution replays the
+aggregates through the same range processor. Ambiguous or unrelated TBs are
+reported but never guessed into the coverage result; exhausting the configured
+pending-aggregate limit is fatal.
+
 Plugin traces advertise `ETRACE_INFO_F_FINAL_STATUS` and end with a
 `TYPE_STATUS` record. The converter rejects a missing or incomplete final
 status and any nonzero unresolved-execution or output-error counter.

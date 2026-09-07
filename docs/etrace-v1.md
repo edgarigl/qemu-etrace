@@ -91,6 +91,19 @@ Range filtering requires version 1 but does not require register access. It
 therefore works with plugin API 2. Register state can be enabled independently
 to make the captured context useful for later OS-aware analysis.
 
+When the hypervisor's early physical load address is unknown, add
+`context-unmatched=keep`. TBs inside a declared range retain the hypervisor
+flag; other TBs are emitted with an incomplete context rather than discarded:
+
+```sh
+-plugin libqemu-etrace.so,out=xen.etrace,format=v1,context=hypervisor,\
+context-range=0xffff82d040000000:0x6b1198,context-unmatched=keep,\
+exec-mapping=on
+```
+
+This discovery policy increases trace volume, but it lets the analyzer recover
+early Xen execution before its physical placement is known.
+
 ## Observed execution mappings
 
 Add `exec-mapping=on` to place virtual-to-physical mapping segments in each TB
@@ -111,6 +124,38 @@ translation helper does not expose page size, permissions, intermediate
 translation stages, or architectural TLB residency. Unexecuted data mappings
 cannot be reconstructed from these records.
 
+## Automatic image attribution
+
+`qemu-etrace --auto-map` retains unresolved version 1 executions sparsely by
+TB, context, vCPU, and dispatched prefix. It resolves them using, in order:
+
+1. an explicit `--address-map` or a virtual range already belonging to the ELF;
+2. physical mappings learned from a byte-verified linked TB;
+3. an exact code sequence that occurs only once in the ELF's executable
+   sections.
+
+Once a definition resolves, pending execution aggregates are replayed through
+the normal execution-range coverage path. Repeated executions with the same
+prefix are combined without changing coverage counts or accumulated duration.
+This preserves line and function coverage, but not the original ordering of
+unresolved TBs; chronological branch reconstruction will need an ordered spill
+or event log rather than this aggregate mode.
+
+```sh
+qemu-etrace --trace xen.etrace --elf xen-syms.debug --auto-map ...
+```
+
+`--unresolved-limit=N` bounds the number of distinct pending execution
+aggregates; the default is 65536. Exceeding it fails conversion rather than
+silently losing possible hypervisor coverage. Definitions and code bytes are
+still retained by the normal TB dictionary. Ambiguous or unrelated TBs remain
+unresolved and are reported at end of input without being attributed to the
+ELF.
+
+Code bytes are the authoritative match evidence. The 64-bit FNV-1a hash in a
+TB definition is a stable lookup aid and is verified by the reader; a hash
+collision cannot establish an image match without equal bytes.
+
 ## Compatibility
 
 Version 0 readers reject version 1 at the information record. This is required
@@ -118,5 +163,5 @@ for filtered traces: an old reader must not silently treat an intentionally
 partial trace as complete coverage.
 
 The version 1 final status extends the version 0 prefix with filtered-execution,
-context-error, and mapping-error counters. Filtering itself is not an error;
-context or mapping failures are.
+context-error, mapping-error, and code-error counters. Filtering itself is not
+an error; context, mapping, or code-capture failures are.
