@@ -41,6 +41,36 @@ Create a compact version 1 trace with:
 Version 1 requires QEMU plugin API 2 or newer. Version 0 continues to work with
 API version 1.
 
+### Online UNIX socket
+
+The upstream plugin accepts a connect-only UNIX destination. qemu-etrace owns
+the listener, eliminating the connect/listen race in the older symmetric
+socket convention:
+
+```sh
+socket=/tmp/xen-etrace.sock
+rm -f "$socket"
+qemu-etrace --trace "unix:$socket" --server 0 \
+    --elf xen-syms.debug --auto-map --preserve-order \
+    --coverage-format lcov --coverage-output xen.info \
+    --trace-output none &
+analyzer_pid=$!
+while test ! -S "$socket"; do sleep 0.01; done
+
+qemu-system-x86_64 ... \
+    -plugin "/path/libqemu-etrace.so,out=unix:$socket,format=v1,\
+context=hypervisor,context-range=$xen_linked_start:$xen_size,\
+context-unmatched=keep,context-registers=basic,exec-mapping=on"
+qemu_status=$?
+wait "$analyzer_pid"
+analyzer_status=$?
+test "$qemu_status" -eq 0 -a "$analyzer_status" -eq 0
+```
+
+Raw and `compress=gzip` streams are supported. A missing listener fails plugin
+installation. Peer disconnects become output failures; qemu-etrace rejects a
+truncated stream without its required final producer status.
+
 Capture a target-specific basic context tuple with:
 
 ```sh

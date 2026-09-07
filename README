@@ -132,8 +132,9 @@ $ qemu-etrace --trace /tmp/elog.gz --elf vmlinux
 
 Raw output remains the default. The gzip stream is finalized when QEMU exits
 normally; an abruptly terminated QEMU process may leave a truncated gzip
-stream. The `out=` option accepts a regular file or a pre-created FIFO. UNIX
-socket output remains available through the Xilinx QEMU ETrace implementation.
+stream. The `out=` option accepts a regular file, a pre-created FIFO, or a UNIX
+socket connection. Start qemu-etrace first so it owns the listening socket,
+then use `out=unix:/path` in the plugin.
 
 The plugin writes the legacy ETrace 0.0 execution-range format by default. Its
 opt-in ETrace 1.0 mode emits translation-block definitions once and compact
@@ -250,17 +251,21 @@ $ genhtml -o html-outputdir cov.info
 # Add --ignore-errors source in case not all source is available.
 $ genhtml -o html-outputdir --ignore-errors source cov.info
 
-These etrace (tmp/elog) files can quickly get very large. It is also possible to do
-the trace processing online (without intermediate files). This is done
-through UNIX sockets. To use a UNIX socket, prepend the trace path
-with unix:.
+These etrace files can quickly get very large. It is also possible to process a
+trace online through a UNIX socket. qemu-etrace listens and the upstream plugin
+connects, so start the analyzer first:
 
-Example:
-$ qemu-etrace --trace unix:/tmp/my-etrace-socket ...
+$ qemu-etrace --trace unix:/tmp/my-etrace-socket --server 0 ... &
+$ while test ! -S /tmp/my-etrace-socket; do sleep 0.01; done
+$ qemu-system-x86_64 ... \
+    -plugin /path/libqemu-etrace.so,out=unix:/tmp/my-etrace-socket,format=v1
 
-The QEMU side supports the same format.
+The plugin is connect-only and never unlinks or listens on the socket path. A
+connection failure aborts plugin installation. If the analyzer disconnects,
+QEMU reports an output error and the incomplete stream cannot satisfy the
+required final-status check.
 
-$ qemu ... -etrace unix:/tmp/my-etrace-socket ...
+The Xilinx QEMU built-in ETrace producer also accepts `-etrace unix:/path`.
 
 Using with simple-trace format
 ------------------------------
