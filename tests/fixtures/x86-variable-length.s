@@ -18,4 +18,6 @@ x86_coverage_fixture:
 	.loc	1 15 0
 	ret
 	.size	x86_coverage_fixture, .-x86_coverage_fixture
+	/* Repeat the first eight bytes for ambiguous auto-map tests. */
+	.byte	0x90, 0x66, 0x90, 0x0f, 0x1f, 0x40, 0x01, 0x90
 	.section .note.GNU-stack,"",@progbits

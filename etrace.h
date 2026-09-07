@@ -31,6 +31,7 @@ void etrace_show(int fd, FILE *fp_out,
                  void **sym_tree, enum cov_format cov_fmt,
 		 enum trace_format trace_in_fmt,
 		 enum trace_format trace_out_fmt,
-		 const struct address_map *address_map);
+		 const struct address_map *address_map,
+		 bool auto_map, size_t unresolved_limit);
 
 #endif

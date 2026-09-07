@@ -59,6 +59,13 @@ struct etracer {
 	uint64_t code_errors;
 	GHashTable *tb_defs;
 	GHashTable *contexts;
+	GArray *physical_bindings;
+	bool auto_map;
+	size_t unresolved_limit;
+	size_t unresolved_entries;
+	uint64_t unresolved_events;
+	uint64_t resolved_events;
+	uint64_t ambiguous_tbs;
 	uint64_t *last_sequence;
 	bool *sequence_seen;
 	struct etrace_pkg *pkg;
@@ -72,16 +79,55 @@ struct etracer {
 struct etrace_tb_definition {
 	uint64_t tb_id;
 	uint64_t vaddr;
+	uint64_t linked_vaddr;
 	uint64_t context_id;
+	uint64_t code_hash;
 	uint32_t size;
 	uint16_t insn_count;
-	struct etrace_tb_insn insns[];
+	uint16_t mapping_count;
+	struct etrace_tb_insn *insns;
+	struct etrace_tb_mapping *mappings;
+	uint8_t *code;
+	GArray *pending;
+	bool resolved;
+	bool binding_source;
+};
+
+struct pending_tb_exec {
+	uint64_t context_id;
+	uint64_t count;
+	uint64_t duration;
+	uint64_t first_time;
+	uint32_t unit_id;
+	uint16_t insn_count;
+	uint16_t flags;
+};
+
+struct physical_binding {
+	uint64_t physical_start;
+	uint64_t physical_end;
+	uint64_t linked_start;
+	bool ambiguous;
 };
 
 static void etrace_output_exec(struct tracer *tr,
 			       const struct trace_exec *exec,
 			       const struct trace_exec_segment *segment,
 			       void *opaque);
+
+static void etrace_tb_definition_free(void *opaque)
+{
+	struct etrace_tb_definition *definition = opaque;
+
+	if (!definition)
+		return;
+	if (definition->pending)
+		g_array_free(definition->pending, true);
+	free(definition->code);
+	free(definition->mappings);
+	free(definition->insns);
+	free(definition);
+}
 
 static ssize_t etrace_read(struct etracer *t, void *buf, size_t len)
 {
@@ -311,6 +357,9 @@ static bool etrace_validate_pkg(struct etracer *t)
 			return etrace_invalid_pkg(pkg, "short architecture payload");
 		break;
 	case TYPE_EXEC:
+		if (t->auto_map)
+			return etrace_invalid_pkg(pkg,
+				"automatic mapping requires TB execution records");
 		if (pkg->hdr.len < sizeof(pkg->ex.start_time))
 			return etrace_invalid_pkg(pkg, "short execution payload");
 		if (t->arch.guest.arch_bits == 32)
@@ -526,30 +575,280 @@ void etrace_process_tb(struct etracer *t)
 	}
 }
 
-static bool etrace_process_tb_def(struct etracer *t)
+static void etrace_emit_tb_execution(struct etracer *t,
+				     const struct etrace_tb_definition *definition,
+				     const struct pending_tb_exec *pending,
+				     enum cov_format cov_fmt)
+{
+	struct tracer linked_tracer = t->tr;
+	uint16_t last = pending->insn_count - 1;
+	struct trace_exec exec = {
+		.time = pending->first_time,
+		.start = definition->resolved ? definition->linked_vaddr
+			: definition->vaddr,
+		.end = (definition->resolved ? definition->linked_vaddr
+			: definition->vaddr) + definition->insns[last].offset
+			+ definition->insns[last].size,
+		.tb_id = definition->tb_id,
+		.context_id = pending->context_id,
+		.duration = pending->duration,
+		.count = pending->count,
+		.unit_id = pending->unit_id,
+		.flags = pending->flags,
+	};
+
+	if (t->auto_map && definition->resolved) {
+		linked_tracer.address_map = NULL;
+		trace_process_exec(&linked_tracer, cov_fmt, &exec,
+				   etrace_output_exec, NULL);
+	} else {
+		trace_process_exec(&t->tr, cov_fmt, &exec, etrace_output_exec,
+				   NULL);
+	}
+}
+
+static bool binding_lookup(const struct etracer *t, uint64_t physical_start,
+			   uint64_t len, uint64_t *linked_start)
+{
+	unsigned int i;
+
+	if (!len || physical_start > UINT64_MAX - len)
+		return false;
+	for (i = 0; i < t->physical_bindings->len; i++) {
+		const struct physical_binding *binding = &g_array_index(
+			t->physical_bindings, struct physical_binding, i);
+
+		if (binding->ambiguous
+		    && physical_start < binding->physical_end
+		    && physical_start + len > binding->physical_start)
+			return false;
+		if (physical_start >= binding->physical_start
+		    && physical_start + len <= binding->physical_end) {
+			*linked_start = binding->linked_start
+				+ physical_start - binding->physical_start;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
+				 uint64_t len, uint64_t linked_start)
+{
+	struct physical_binding binding;
+	unsigned int i;
+
+	if (!len || physical_start > UINT64_MAX - len
+	    || linked_start > UINT64_MAX - len)
+		return false;
+	binding.physical_start = physical_start;
+	binding.physical_end = physical_start + len;
+	binding.linked_start = linked_start;
+	for (i = 0; i < t->physical_bindings->len; i++) {
+		struct physical_binding *existing = &g_array_index(
+			t->physical_bindings, struct physical_binding, i);
+		uint64_t overlap;
+
+		if (binding.physical_end <= existing->physical_start
+		    || binding.physical_start >= existing->physical_end)
+			continue;
+		overlap = binding.physical_start > existing->physical_start
+			? binding.physical_start : existing->physical_start;
+		if (binding.linked_start + overlap - binding.physical_start
+		    != existing->linked_start + overlap
+			- existing->physical_start) {
+			existing->ambiguous = true;
+			t->ambiguous_tbs++;
+			return false;
+		}
+		if (binding.physical_start == existing->physical_start
+		    && binding.physical_end == existing->physical_end
+		    && binding.linked_start == existing->linked_start)
+			return false;
+	}
+	g_array_append_val(t->physical_bindings, binding);
+	return true;
+}
+
+static bool resolve_from_physical(const struct etracer *t,
+				  const struct etrace_tb_definition *definition,
+				  uint64_t *linked_vaddr)
+{
+	uint64_t candidate = 0;
+	uint16_t i;
+
+	if (!definition->mapping_count)
+		return false;
+	for (i = 0; i < definition->mapping_count; i++) {
+		const struct etrace_tb_mapping *mapping = &definition->mappings[i];
+		uint64_t linked;
+		uint64_t base;
+
+		if (!binding_lookup(t, mapping->paddr, mapping->len, &linked)
+		    || linked < mapping->offset)
+			return false;
+		base = linked - mapping->offset;
+		if (i && base != candidate)
+			return false;
+		candidate = base;
+	}
+	*linked_vaddr = candidate;
+	return true;
+}
+
+static bool resolve_tb_definition(struct etracer *t,
+				  struct etrace_tb_definition *definition)
+{
+	uint64_t linked = definition->vaddr;
+	uint64_t mapped_end;
+	bool explicit_map;
+	bool trusted_code = false;
+
+	if (definition->resolved)
+		return false;
+	explicit_map = address_map_translate(t->tr.address_map,
+					     definition->vaddr, &linked);
+	if (explicit_map) {
+		uint64_t runtime_end = definition->vaddr + definition->size - 1;
+
+		if (!address_map_translate(t->tr.address_map, runtime_end,
+					   &mapped_end)
+		    || mapped_end - linked != definition->size - 1)
+			explicit_map = false;
+	}
+	if (linked <= UINT64_MAX - definition->size
+	    && (explicit_map || linked == definition->vaddr)
+	    && sym_range_is_executable(t->tr.sym_tree, linked,
+					linked + definition->size)) {
+		definition->resolved = true;
+		definition->linked_vaddr = linked;
+		trusted_code = definition->code
+			&& sym_code_matches(t->tr.sym_tree, linked,
+					    definition->code, definition->size);
+	} else if (resolve_from_physical(t, definition, &linked)
+		   && linked <= UINT64_MAX - definition->size
+		   && sym_range_is_executable(t->tr.sym_tree, linked,
+					      linked + definition->size)
+		   && definition->code
+		   && sym_code_matches(t->tr.sym_tree, linked,
+					    definition->code, definition->size)) {
+		definition->resolved = true;
+		definition->linked_vaddr = linked;
+	} else if (!definition->binding_source && definition->code
+		   && definition->size >= 8) {
+		uint64_t matches[2];
+		size_t count = sym_find_code_matches(t->tr.sym_tree,
+			definition->code, definition->size, matches, 2);
+
+		definition->binding_source = true;
+		if (count == 1) {
+			definition->resolved = true;
+			definition->linked_vaddr = matches[0];
+			trusted_code = true;
+		} else if (count > 1) {
+			t->ambiguous_tbs++;
+		}
+	}
+	if (!definition->resolved)
+		return false;
+
+	if (trusted_code) {
+		uint16_t i;
+
+		for (i = 0; i < definition->mapping_count; i++) {
+			const struct etrace_tb_mapping *mapping =
+				&definition->mappings[i];
+
+			add_physical_binding(t, mapping->paddr, mapping->len,
+				definition->linked_vaddr + mapping->offset);
+		}
+	}
+	return true;
+}
+
+static void replay_pending(struct etracer *t,
+			   struct etrace_tb_definition *definition,
+			   enum cov_format cov_fmt)
+{
+	unsigned int i;
+
+	if (!definition->resolved || !definition->pending)
+		return;
+	for (i = 0; i < definition->pending->len; i++) {
+		const struct pending_tb_exec *pending = &g_array_index(
+			definition->pending, struct pending_tb_exec, i);
+
+		etrace_emit_tb_execution(t, definition, pending, cov_fmt);
+		t->resolved_events += pending->count;
+		t->unresolved_events -= pending->count;
+	}
+	t->unresolved_entries -= definition->pending->len;
+	g_array_set_size(definition->pending, 0);
+}
+
+static void resolve_pending_definitions(struct etracer *t,
+					enum cov_format cov_fmt)
+{
+	bool changed;
+
+	do {
+		GHashTableIter iter;
+		void *value;
+
+		changed = false;
+		g_hash_table_iter_init(&iter, t->tb_defs);
+		while (g_hash_table_iter_next(&iter, NULL, &value)) {
+			struct etrace_tb_definition *definition = value;
+
+			if (resolve_tb_definition(t, definition)) {
+				replay_pending(t, definition, cov_fmt);
+				changed = true;
+			}
+		}
+	} while (changed);
+}
+
+static bool etrace_process_tb_def(struct etracer *t, enum cov_format cov_fmt)
 {
 	const struct etrace_tb_def *tb = &t->pkg->tb_def;
 	struct etrace_tb_definition *definition;
 	const struct etrace_tb_insn *insns = (const void *)tb->data8;
-	size_t alloc_size = sizeof(*definition)
-		+ (size_t)tb->insn_count * sizeof(definition->insns[0]);
+	const struct etrace_tb_mapping *mappings = (const void *)(
+		tb->data8 + (size_t)tb->insn_count * sizeof(*insns));
+	const uint8_t *code = (const uint8_t *)&mappings[tb->mapping_count];
 
 	if (g_hash_table_contains(t->tb_defs, &tb->tb_id))
 		return etrace_invalid_pkg(t->pkg, "duplicate TB ID");
 
-	definition = safe_malloc(alloc_size);
+	definition = safe_mallocz(sizeof(*definition));
 	definition->tb_id = tb->tb_id;
 	definition->vaddr = tb->vaddr;
 	definition->context_id = tb->context_id;
+	definition->code_hash = tb->code_hash;
 	definition->size = tb->size;
 	definition->insn_count = tb->insn_count;
+	definition->mapping_count = tb->mapping_count;
+	definition->insns = safe_malloc(
+		(size_t)tb->insn_count * sizeof(definition->insns[0]));
 	memcpy(definition->insns, insns,
 	       (size_t)tb->insn_count * sizeof(definition->insns[0]));
+	if (tb->mapping_count) {
+		definition->mappings = safe_malloc(
+			(size_t)tb->mapping_count * sizeof(definition->mappings[0]));
+		memcpy(definition->mappings, mappings,
+		       (size_t)tb->mapping_count * sizeof(definition->mappings[0]));
+	}
+	if (tb->code_len) {
+		definition->code = safe_malloc(tb->code_len);
+		memcpy(definition->code, code, tb->code_len);
+	}
+	if (!t->auto_map) {
+		definition->resolved = true;
+		definition->linked_vaddr = definition->vaddr;
+	}
 	g_hash_table_insert(t->tb_defs, &definition->tb_id, definition);
 
 	if (t->tr.fp_out) {
-		const struct etrace_tb_mapping *mappings = (const void *)(
-			tb->data8 + (size_t)tb->insn_count * sizeof(*insns));
 		uint16_t i;
 
 		fprintf(t->tr.fp_out,
@@ -566,7 +865,60 @@ static bool etrace_process_tb_def(struct etracer *t)
 		}
 		fputc('\n', t->tr.fp_out);
 	}
+	if (t->auto_map) {
+		resolve_pending_definitions(t, cov_fmt);
+		replay_pending(t, definition, cov_fmt);
+	}
 
+	return true;
+}
+
+static bool append_pending_execution(struct etracer *t,
+				     struct etrace_tb_definition *definition,
+				     const struct etrace_tb_exec *tb_exec)
+{
+	unsigned int i;
+
+	if (!definition->pending) {
+		definition->pending = g_array_new(false, true,
+						  sizeof(struct pending_tb_exec));
+	}
+	for (i = 0; i < definition->pending->len; i++) {
+		struct pending_tb_exec *pending = &g_array_index(
+			definition->pending, struct pending_tb_exec, i);
+
+		if (pending->context_id != tb_exec->context_id
+		    || pending->unit_id != t->pkg->hdr.unit_id
+		    || pending->insn_count != tb_exec->insn_count
+		    || pending->flags != tb_exec->flags)
+			continue;
+		if (pending->count == UINT64_MAX
+		    || pending->duration > UINT64_MAX - tb_exec->duration)
+			return etrace_invalid_pkg(t->pkg,
+				"unresolved execution aggregate overflows");
+		pending->count++;
+		pending->duration += tb_exec->duration;
+		t->unresolved_events++;
+		return true;
+	}
+	if (t->unresolved_entries >= t->unresolved_limit)
+		return etrace_invalid_pkg(t->pkg,
+			"unresolved execution limit exceeded");
+	{
+		struct pending_tb_exec pending = {
+			.context_id = tb_exec->context_id,
+			.count = 1,
+			.duration = tb_exec->duration,
+			.first_time = tb_exec->time,
+			.unit_id = t->pkg->hdr.unit_id,
+			.insn_count = tb_exec->insn_count,
+			.flags = tb_exec->flags,
+		};
+
+		g_array_append_val(definition->pending, pending);
+	}
+	t->unresolved_entries++;
+	t->unresolved_events++;
 	return true;
 }
 
@@ -574,8 +926,7 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 {
 	const struct etrace_tb_exec *tb_exec = &t->pkg->tb_exec;
 	struct etrace_tb_definition *definition;
-	struct trace_exec exec;
-	uint16_t last;
+	struct pending_tb_exec execution;
 
 	definition = g_hash_table_lookup(t->tb_defs, &tb_exec->tb_id);
 	if (!definition)
@@ -595,19 +946,18 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = tb_exec->sequence;
 
-	last = tb_exec->insn_count - 1;
-	exec = (struct trace_exec) {
-		.time = tb_exec->time,
-		.start = definition->vaddr,
-		.end = definition->vaddr + definition->insns[last].offset
-			+ definition->insns[last].size,
-		.tb_id = tb_exec->tb_id,
+	if (t->auto_map && !definition->resolved)
+		return append_pending_execution(t, definition, tb_exec);
+	execution = (struct pending_tb_exec) {
 		.context_id = tb_exec->context_id,
+		.count = 1,
 		.duration = tb_exec->duration,
+		.first_time = tb_exec->time,
 		.unit_id = t->pkg->hdr.unit_id,
+		.insn_count = tb_exec->insn_count,
 		.flags = tb_exec->flags,
 	};
-	trace_process_exec(&t->tr, cov_fmt, &exec, etrace_output_exec, NULL);
+	etrace_emit_tb_execution(t, definition, &execution, cov_fmt);
 	return true;
 }
 
@@ -920,7 +1270,8 @@ void etrace_show(int fd, FILE *fp_out,
 		 void **sym_tree, enum cov_format cov_fmt,
 		 enum trace_format trace_in_fmt,
 		 enum trace_format trace_out_fmt,
-		 const struct address_map *address_map)
+		 const struct address_map *address_map,
+		 bool auto_map, size_t unresolved_limit)
 {
 	struct etracer t = { 0 };
 	bool unknown_pkg_warn = false;
@@ -933,6 +1284,8 @@ void etrace_show(int fd, FILE *fp_out,
 	t.tr.out_fmt = trace_out_fmt;
 	t.tr.sym_tree = sym_tree;
 	t.tr.address_map = address_map;
+	t.auto_map = auto_map;
+	t.unresolved_limit = unresolved_limit;
 	t.tr.host.objdump = objdump;
 	t.tr.host.machine = machine;
 	t.tr.guest.objdump = guest_objdump;
@@ -948,8 +1301,11 @@ void etrace_show(int fd, FILE *fp_out,
 	}
 
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
-	t.tb_defs = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, free);
+	t.tb_defs = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL,
+					 etrace_tb_definition_free);
 	t.contexts = g_hash_table_new_full(g_int64_hash, g_int64_equal, free, NULL);
+	t.physical_bindings = g_array_new(false, true,
+					 sizeof(struct physical_binding));
 	t.last_sequence = calloc(UINT16_MAX + 1, sizeof(*t.last_sequence));
 	t.sequence_seen = calloc(UINT16_MAX + 1, sizeof(*t.sequence_seen));
 	if (!t.last_sequence || !t.sequence_seen) {
@@ -1014,7 +1370,7 @@ void etrace_show(int fd, FILE *fp_out,
 			etrace_process_status(&t);
 			break;
 		case TYPE_TB_DEF:
-			if (!etrace_process_tb_def(&t)) {
+			if (!etrace_process_tb_def(&t, cov_fmt)) {
 				g_hash_table_destroy(t.tb_defs);
 				free(t.pkg);
 				exit(EXIT_FAILURE);
@@ -1078,6 +1434,7 @@ void etrace_show(int fd, FILE *fp_out,
 	}
 	g_hash_table_destroy(t.contexts);
 	g_hash_table_destroy(t.tb_defs);
+	g_array_free(t.physical_bindings, true);
 	free(t.sequence_seen);
 	free(t.last_sequence);
 	free(t.pkg);
@@ -1107,6 +1464,20 @@ void etrace_show(int fd, FILE *fp_out,
 			t.mapping_errors,
 			t.code_errors);
 		exit(EXIT_FAILURE);
+	}
+	if (t.auto_map && t.unresolved_events) {
+		fprintf(stderr,
+			"Automatic mapping left %" PRIu64
+			" execution events in %zu unresolved aggregates"
+			" (%" PRIu64 " ambiguous TBs)\n",
+			t.unresolved_events, t.unresolved_entries,
+			t.ambiguous_tbs);
+	}
+	if (t.auto_map && t.resolved_events) {
+		fprintf(stderr,
+			"Automatic mapping replayed %" PRIu64
+			" deferred execution events\n",
+			t.resolved_events);
 	}
 	fprintf(stderr, "done.\n");
 }

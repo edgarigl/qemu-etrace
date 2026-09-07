@@ -94,10 +94,16 @@ void sym_build_linemap(void **rootp, const char *dwarfdump, const char *elf);
 void sym_build_source_coverage(void **rootp, const char *addr2line,
 			       const char *dwarfdump, const char *elf);
 void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
-			uint32_t time);
-void sym_update_image_cov(void **store, uint64_t start, uint64_t end);
+			uint64_t time, uint64_t count);
+void sym_update_image_cov(void **store, uint64_t start, uint64_t end,
+			  uint64_t count);
 uint64_t sym_image_coverage_at(void **store, uint64_t addr);
 bool sym_address_is_executable(void **store, uint64_t addr);
+bool sym_range_is_executable(void **store, uint64_t start, uint64_t end);
+bool sym_code_matches(void **store, uint64_t addr,
+		      const uint8_t *code, size_t len);
+size_t sym_find_code_matches(void **store, const uint8_t *code, size_t len,
+			     uint64_t *matches, size_t capacity);
 const struct sym_source_range *sym_get_source_ranges(void **store,
 						      size_t *nr_ranges);
 

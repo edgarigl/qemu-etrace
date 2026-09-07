@@ -91,18 +91,22 @@ def x86_fixture(tmp_path_factory):
         check=True,
     )
     instructions = []
+    code = bytearray()
     for line in disassembly.stdout.splitlines():
         fields = line.split("\t")
         if len(fields) < 3 or not fields[0].strip().endswith(":"):
             continue
         address = int(fields[0].strip()[:-1], 16)
         if start <= address < start + size:
-            instructions.append((address - start, len(fields[1].split())))
+            encoded = bytes.fromhex("".join(fields[1].split()))
+            instructions.append((address - start, len(encoded)))
+            code.extend(encoded)
     return SimpleNamespace(
         binary=binary,
         start=start,
         tools=tools,
         instructions=instructions,
+        code=bytes(code),
     )
 
 
@@ -135,6 +139,10 @@ def run_lcov(run_etrace, tmp_path, fixture, start, end, policy="entry"):
     )
     assert result.returncode == 0, result.stderr
 
+    return parse_lcov(output)
+
+
+def parse_lcov(output):
     lines = {}
     functions = {}
     for line in output.read_text(encoding="utf-8").splitlines():
@@ -145,6 +153,30 @@ def run_lcov(run_etrace, tmp_path, fixture, start, end, policy="entry"):
             count, name = line[5:].split(",", 1)
             functions[name] = int(count)
     return lines, functions
+
+
+def run_v1_lcov(run_etrace, tmp_path, fixture, trace, *extra_args):
+    output = tmp_path / f"{trace.stem}.info"
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        fixture.binary,
+        "--nm",
+        fixture.tools["nm"],
+        "--addr2line",
+        fixture.tools["addr2line"],
+        "--dwarfdump",
+        fixture.tools["dwarfdump"],
+        "--coverage-format",
+        "lcov",
+        "--coverage-output",
+        output,
+        *extra_args,
+    )
+    return result, parse_lcov(output) if output.exists() else ({}, {})
 
 
 def test_etrace_coverage_uses_byte_addresses(run_etrace, tmp_path, x86_fixture):
@@ -240,6 +272,146 @@ def test_v1_partial_tb_matches_execution_range(run_etrace, tmp_path, x86_fixture
 
     assert v1_lines == legacy_lines
     assert v1_functions == legacy_functions
+
+
+def test_v1_auto_map_replays_early_physical_execution(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked = x86_fixture.start
+    physical = 0x200000
+    early = physical
+    instructions = tuple(x86_fixture.instructions[:3])
+    code_len = sum(size for _, size in instructions)
+    code = x86_fixture.code[:code_len]
+    legacy = tmp_path / "physical-alias-expected.etrace"
+    legacy.write_bytes(
+        etrace_arch(guest_bits=64)
+        + etrace_exec64(start=linked, end=linked + code_len)
+        + etrace_exec64(start=linked, end=linked + code_len)
+    )
+    expected_result, expected = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, legacy
+    )
+    assert expected_result.returncode == 0, expected_result.stderr
+    trace = tmp_path / "physical-alias.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=early,
+            insns=instructions,
+            mappings=((0, code_len, physical),),
+            code=code,
+        )
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=len(instructions))
+        + etrace_tb_exec(tb_id=1, sequence=2, insn_count=len(instructions))
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=linked,
+            insns=instructions,
+            mappings=((0, code_len, physical),),
+            code=code,
+        )
+    )
+
+    result, actual = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "unresolved aggregates" not in result.stderr
+    assert actual == expected
+
+
+def test_v1_auto_map_uses_unique_code_match(run_etrace, tmp_path, x86_fixture):
+    linked = x86_fixture.start
+    runtime = 0x30000000
+    expected = run_lcov(
+        run_etrace,
+        tmp_path,
+        x86_fixture,
+        linked,
+        linked + len(x86_fixture.code),
+    )
+    trace = tmp_path / "code-match.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=runtime,
+            insns=tuple(x86_fixture.instructions),
+            code=x86_fixture.code,
+        )
+        + etrace_tb_exec(
+            tb_id=1,
+            sequence=1,
+            insn_count=len(x86_fixture.instructions),
+        )
+    )
+
+    result, actual = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert actual == expected
+
+
+def test_v1_auto_map_enforces_unresolved_limit(
+    run_etrace, tmp_path, x86_fixture
+):
+    trace = tmp_path / "unresolved-limit.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=0x40000000,
+            insns=((0, 4), (4, 4)),
+            code=b"\xff" * 8,
+        )
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=1)
+        + etrace_tb_exec(tb_id=1, sequence=2, insn_count=2)
+    )
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        x86_fixture.binary,
+        "--auto-map",
+        "--unresolved-limit",
+        "1",
+    )
+
+    assert result.returncode != 0
+    assert "unresolved execution limit exceeded" in result.stderr
+
+
+def test_v1_auto_map_keeps_ambiguous_code_unresolved(
+    run_etrace, tmp_path, x86_fixture
+):
+    code = x86_fixture.code[:8]
+    trace = tmp_path / "ambiguous-code.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=0x50000000,
+            insns=((0, 8),),
+            code=code,
+        )
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=1)
+    )
+
+    result, (_, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "1 ambiguous TBs" in result.stderr
+    assert functions["x86_coverage_fixture"] == 0
 
 
 def test_x86_fixture_has_variable_length_instructions(x86_fixture):

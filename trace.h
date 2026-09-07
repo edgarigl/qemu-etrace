@@ -34,7 +34,8 @@ struct trace_exec {
 	uint64_t end;
 	uint64_t tb_id;
 	uint64_t context_id;
-	uint32_t duration;
+	uint64_t duration;
+	uint64_t count;
 	uint32_t unit_id;
 	uint32_t flags;
 };
@@ -44,7 +45,7 @@ struct trace_exec_segment {
 	uint64_t runtime_end;
 	uint64_t linked_start;
 	uint64_t linked_end;
-	uint32_t duration;
+	uint64_t duration;
 	bool mapped;
 	struct sym *sym;
 };

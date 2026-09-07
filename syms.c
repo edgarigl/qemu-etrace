@@ -56,6 +56,8 @@
 
 struct sym_store {
 	uint64_t min, max;
+	char *elf_filename;
+	bool image_data_loaded;
 	/* Binary tree for fast name lookups.  */
 	void *rootp;
 
@@ -78,6 +80,7 @@ struct sym_store {
 		uint64_t start;
 		uint64_t end;
 		char *name;
+		uint8_t *data;
 		struct sym_coverage *cov;
 	} *sections;
 	size_t nr_sections;
@@ -583,6 +586,8 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 	bfd *abfd;
 	size_t i;
 
+	free(ss->elf_filename);
+	ss->elf_filename = strdup(elf);
 	abfd = bfd_openr(elf, NULL);
 	if (!abfd || !bfd_check_format(abfd, bfd_object)) {
 		fprintf(stderr, "Unable to read ELF sections from %s: %s\n",
@@ -650,6 +655,108 @@ bool sym_address_is_executable(void **store, uint64_t addr)
 	return ss && image_section_find(ss, addr);
 }
 
+bool sym_range_is_executable(void **store, uint64_t start, uint64_t end)
+{
+	struct sym_store *ss = *store;
+	struct image_section *section;
+
+	if (!ss || end <= start)
+		return false;
+	section = image_section_find(ss, start);
+	return section && end <= section->end;
+}
+
+static bool load_image_data(struct sym_store *ss)
+{
+	bfd *abfd;
+	asection *section;
+	size_t loaded = 0;
+
+	if (ss->image_data_loaded)
+		return true;
+	if (!ss->elf_filename)
+		return false;
+	abfd = bfd_openr(ss->elf_filename, NULL);
+	if (!abfd || !bfd_check_format(abfd, bfd_object)) {
+		if (abfd)
+			bfd_close(abfd);
+		return false;
+	}
+	for (section = abfd->sections; section; section = section->next) {
+		bfd_vma start = bfd_section_vma(section);
+		bfd_size_type size = bfd_section_size(section);
+		struct image_section *image;
+
+		if (!size)
+			continue;
+		image = image_section_find(ss, start);
+		if (!image || image->start != start
+		    || image->end - image->start != size
+		    || strcmp(image->name, bfd_section_name(section)))
+			continue;
+		image->data = safe_malloc(size);
+		if (!bfd_get_section_contents(abfd, section, image->data, 0, size)) {
+			goto fail;
+		}
+		loaded++;
+	}
+	bfd_close(abfd);
+	if (loaded != ss->nr_sections)
+		goto clear;
+	ss->image_data_loaded = true;
+	return true;
+
+fail:
+	bfd_close(abfd);
+clear:
+	for (loaded = 0; loaded < ss->nr_sections; loaded++) {
+		free(ss->sections[loaded].data);
+		ss->sections[loaded].data = NULL;
+	}
+	return false;
+}
+
+bool sym_code_matches(void **store, uint64_t addr,
+		      const uint8_t *code, size_t len)
+{
+	struct sym_store *ss = *store;
+	struct image_section *section;
+
+	if (!ss || !code || !len || addr > UINT64_MAX - len)
+		return false;
+	section = image_section_find(ss, addr);
+	if (!section || addr + len > section->end || !load_image_data(ss))
+		return false;
+	return !memcmp(section->data + addr - section->start, code, len);
+}
+
+size_t sym_find_code_matches(void **store, const uint8_t *code, size_t len,
+			     uint64_t *matches, size_t capacity)
+{
+	struct sym_store *ss = *store;
+	size_t count = 0;
+	size_t i;
+
+	if (!ss || !code || !len || !load_image_data(ss))
+		return 0;
+	for (i = 0; i < ss->nr_sections; i++) {
+		struct image_section *section = &ss->sections[i];
+		size_t section_size = section->end - section->start;
+		size_t offset;
+
+		if (len > section_size)
+			continue;
+		for (offset = 0; offset <= section_size - len; offset++) {
+			if (memcmp(section->data + offset, code, len))
+				continue;
+			if (count < capacity)
+				matches[count] = section->start + offset;
+			count++;
+		}
+	}
+	return count;
+}
+
 uint64_t sym_image_coverage_at(void **store, uint64_t addr)
 {
 	struct sym_store *ss = *store;
@@ -663,7 +770,8 @@ uint64_t sym_image_coverage_at(void **store, uint64_t addr)
 	return section->cov->counter[addr - section->start];
 }
 
-void sym_update_image_cov(void **store, uint64_t start, uint64_t end)
+void sym_update_image_cov(void **store, uint64_t start, uint64_t end,
+			  uint64_t count)
 {
 	struct sym_store *ss = *store;
 	uint64_t cursor = start;
@@ -695,20 +803,20 @@ void sym_update_image_cov(void **store, uint64_t start, uint64_t end)
 		}
 		section_end = end < section->end ? end : section->end;
 		for (i = cursor; i < section_end; i++)
-			section->cov->counter[i - section->start]++;
+			section->cov->counter[i - section->start] += count;
 		cursor = section_end;
 	}
 }
 
 void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
-			uint32_t time)
+			uint64_t time, uint64_t count)
 {
 	int64_t start_offset = start - sym->addr;
 	int64_t len = end - start;
 	uint64_t i, pos;
-	unsigned int time_per_entry;
+	uint64_t time_per_entry;
 	uint64_t entries;
-	unsigned int accounted = 0;
+	uint64_t accounted = 0;
 
 	/* Is this the unknown sym ?? */
 	if (sym->namelen == 0)
@@ -735,7 +843,7 @@ void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 	/* First update the nr entries.  */
 	i = 0;
 	do {
-		sym->cov_ent->counter[pos + i] += 1;
+		sym->cov_ent->counter[pos + i] += count;
 		i++;
 	} while (i < entries);
 

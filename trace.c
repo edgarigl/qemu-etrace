@@ -18,6 +18,7 @@ void trace_process_exec(struct tracer *tr, enum cov_format cov_fmt,
 {
 	uint64_t cursor = exec->start;
 	uint64_t accounted = 0;
+	uint64_t count = exec->count ? exec->count : 1;
 	uint64_t total_len = exec->end >= exec->start
 		? exec->end - exec->start : 0;
 
@@ -41,7 +42,7 @@ void trace_process_exec(struct tracer *tr, enum cov_format cov_fmt,
 			out.duration = exec->duration - accounted;
 		} else {
 			out.duration = total_len
-				? (uint32_t)(((__uint128_t)exec->duration * segment_len)
+				? (uint64_t)(((__uint128_t)exec->duration * segment_len)
 					     / total_len) : 0;
 			accounted += out.duration;
 		}
@@ -57,7 +58,7 @@ void trace_process_exec(struct tracer *tr, enum cov_format cov_fmt,
 			continue;
 		if (tr->sym_tree && *tr->sym_tree)
 			sym_update_image_cov(tr->sym_tree, segment.linked_start,
-					     segment.linked_end);
+					     segment.linked_end, count);
 		if (!out.sym)
 			out.sym = sym_get_unknown(tr->sym_tree);
 
@@ -74,7 +75,7 @@ void trace_process_exec(struct tracer *tr, enum cov_format cov_fmt,
 						"WARNING: fixup sym %s has spans over "
 						"to another symbol\n", sym->name);
 				}
-				sym_update_cov(sym, addr, end, out.duration);
+				sym_update_cov(sym, addr, end, out.duration, count);
 				addr = end;
 				sym = sym_lookup_by_addr(tr->sym_tree, addr);
 			}
