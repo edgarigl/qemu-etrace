@@ -9,6 +9,7 @@ def test_help_lists_trace_and_coverage_formats(run_etrace):
     assert "--function-hit-policy" in result.stdout
     assert "--coverage-inventory" in result.stdout
     assert "--auto-map" in result.stdout
+    assert "--preserve-order" in result.stdout
 
 
 def test_trace_argument_is_required(run_etrace):
@@ -57,3 +58,39 @@ def test_unresolved_limit_must_be_positive(run_etrace, tmp_path):
 
     assert result.returncode != 0
     assert "Invalid unresolved limit" in result.stderr
+
+
+def test_preserve_order_requires_auto_map(run_etrace, tmp_path):
+    trace = tmp_path / "empty.etrace"
+    trace.write_bytes(b"")
+
+    result = run_etrace(
+        "--trace", trace, "--elf", trace, "--preserve-order"
+    )
+
+    assert result.returncode != 0
+    assert "Order preservation requires automatic mapping" in result.stderr
+
+
+def test_event_spool_requires_preserve_order(run_etrace, tmp_path):
+    trace = tmp_path / "empty.etrace"
+    trace.write_bytes(b"")
+
+    result = run_etrace(
+        "--trace", trace, "--event-spool", tmp_path / "events.bin"
+    )
+
+    assert result.returncode != 0
+    assert "An event spool requires --preserve-order" in result.stderr
+
+
+def test_event_spool_limit_must_be_positive(run_etrace, tmp_path):
+    trace = tmp_path / "empty.etrace"
+    trace.write_bytes(b"")
+
+    result = run_etrace(
+        "--trace", trace, "--event-spool-limit", "0"
+    )
+
+    assert result.returncode != 0
+    assert "Invalid event spool limit" in result.stderr

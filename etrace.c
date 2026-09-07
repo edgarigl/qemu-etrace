@@ -66,6 +66,11 @@ struct etracer {
 	uint64_t unresolved_events;
 	uint64_t resolved_events;
 	uint64_t ambiguous_tbs;
+	FILE *event_spool;
+	uint64_t event_spool_bytes;
+	uint64_t event_spool_limit;
+	uint64_t ordered_unresolved;
+	bool preserve_order;
 	uint64_t *last_sequence;
 	bool *sequence_seen;
 	struct etrace_pkg *pkg;
@@ -73,6 +78,7 @@ struct etracer {
 	bool info_seen;
 	bool final_status_required;
 	bool final_status_seen;
+	bool status_v1_seen;
 	bool producer_failed;
 };
 
@@ -114,6 +120,8 @@ static void etrace_output_exec(struct tracer *tr,
 			       const struct trace_exec *exec,
 			       const struct trace_exec_segment *segment,
 			       void *opaque);
+static bool etrace_invalid_pkg(const struct etrace_pkg *pkg,
+			       const char *reason);
 
 static void etrace_tb_definition_free(void *opaque)
 {
@@ -127,6 +135,21 @@ static void etrace_tb_definition_free(void *opaque)
 	free(definition->mappings);
 	free(definition->insns);
 	free(definition);
+}
+
+static bool etrace_spool_event(struct etracer *t)
+{
+	size_t len = sizeof(t->pkg->hdr) + t->pkg->hdr.len;
+
+	if (!t->event_spool)
+		return etrace_invalid_pkg(t->pkg, "missing ordered event spool");
+	if (t->event_spool_bytes > t->event_spool_limit
+	    || len > t->event_spool_limit - t->event_spool_bytes)
+		return etrace_invalid_pkg(t->pkg, "event spool limit exceeded");
+	if (fwrite(t->pkg, 1, len, t->event_spool) != len)
+		return etrace_invalid_pkg(t->pkg, "unable to write event spool");
+	t->event_spool_bytes += len;
+	return true;
 }
 
 static ssize_t etrace_read(struct etracer *t, void *buf, size_t len)
@@ -482,6 +505,35 @@ void etrace_process_info(struct etracer *t)
 		bad_version(t);
 }
 
+static void etrace_output_status(struct etracer *t)
+{
+	const struct etrace_status *status = &t->status;
+
+	if (!t->tr.fp_out)
+		return;
+	fprintf(t->tr.fp_out,
+		"S complete=%u unresolved-tb=%" PRIu64
+		" unresolved-discontinuity=%" PRIu64
+		" unresolved-vcpu=%" PRIu64
+		" write-errors=%" PRIu64
+		" discontinuity-pc-mismatches=%" PRIu64 "\n",
+		!!(status->flags & ETRACE_STATUS_F_COMPLETE),
+		status->unresolved_tb_exits,
+		status->unresolved_discontinuities,
+		status->unresolved_vcpu_exits,
+		status->output_errors,
+		status->discontinuity_pc_mismatches);
+	if (t->status_v1_seen) {
+		fprintf(t->tr.fp_out,
+			"S1 filtered-exec=%" PRIu64
+			" context-errors=%" PRIu64
+			" mapping-errors=%" PRIu64
+			" code-errors=%" PRIu64 "\n",
+			t->filtered_execs, t->context_errors,
+			t->mapping_errors, t->code_errors);
+	}
+}
+
 static void etrace_process_status(struct etracer *t)
 {
 	struct etrace_status *status = &t->pkg->status;
@@ -491,6 +543,7 @@ static void etrace_process_status(struct etracer *t)
 
 	t->status = *status;
 	t->final_status_seen = true;
+	t->status_v1_seen = have_v1;
 	t->producer_failed = !(status->flags & ETRACE_STATUS_F_COMPLETE)
 		|| status->unresolved_tb_exits
 		|| status->unresolved_discontinuities
@@ -507,31 +560,8 @@ static void etrace_process_status(struct etracer *t)
 			|| status_v1->code_errors;
 	}
 
-	if (t->tr.fp_out) {
-		fprintf(t->tr.fp_out,
-			"S complete=%u unresolved-tb=%" PRIu64
-			" unresolved-discontinuity=%" PRIu64
-			" unresolved-vcpu=%" PRIu64
-			" write-errors=%" PRIu64
-			" discontinuity-pc-mismatches=%" PRIu64 "\n",
-			!!(status->flags & ETRACE_STATUS_F_COMPLETE),
-			status->unresolved_tb_exits,
-			status->unresolved_discontinuities,
-			status->unresolved_vcpu_exits,
-			status->output_errors,
-			status->discontinuity_pc_mismatches);
-		if (have_v1) {
-			fprintf(t->tr.fp_out,
-				"S1 filtered-exec=%" PRIu64
-				" context-errors=%" PRIu64
-				" mapping-errors=%" PRIu64
-				" code-errors=%" PRIu64 "\n",
-				status_v1->filtered_execs,
-				status_v1->context_errors,
-				status_v1->mapping_errors,
-				status_v1->code_errors);
-		}
-	}
+	if (!t->preserve_order)
+		etrace_output_status(t);
 }
 
 void etrace_process_arch(struct etracer *t)
@@ -635,7 +665,7 @@ static bool binding_lookup(const struct etracer *t, uint64_t physical_start,
 static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
 				 uint64_t len, uint64_t linked_start)
 {
-	struct physical_binding binding;
+	struct physical_binding binding = { 0 };
 	unsigned int i;
 
 	if (!len || physical_start > UINT64_MAX - len
@@ -946,6 +976,8 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = tb_exec->sequence;
 
+	if (t->preserve_order)
+		return etrace_spool_event(t);
 	if (t->auto_map && !definition->resolved)
 		return append_pending_execution(t, definition, tb_exec);
 	execution = (struct pending_tb_exec) {
@@ -1027,6 +1059,8 @@ static bool etrace_process_context_gap(struct etracer *t)
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = gap->sequence;
 
+	if (t->preserve_order)
+		return etrace_spool_event(t);
 	if (t->tr.fp_out) {
 		fprintf(t->tr.fp_out,
 			"G%u sequence=%" PRIu64 " from=%" PRIx64 " to=%" PRIx64
@@ -1036,6 +1070,19 @@ static bool etrace_process_context_gap(struct etracer *t)
 			gap->filtered_execs, gap->reason, gap->flags);
 	}
 	return true;
+}
+
+static void etrace_output_context_gap(struct etracer *t, uint16_t unit_id,
+				      const struct etrace_context_gap *gap)
+{
+	if (t->tr.fp_out) {
+		fprintf(t->tr.fp_out,
+			"G%u sequence=%" PRIu64 " from=%" PRIx64 " to=%" PRIx64
+			" filtered=%" PRIu64 " reason=%u flags=%x\n",
+			unit_id, gap->sequence,
+			gap->from_context_id, gap->to_context_id,
+			gap->filtered_execs, gap->reason, gap->flags);
+	}
 }
 
 static inline int hexchar(unsigned int val)
@@ -1264,6 +1311,104 @@ void etrace_process_discontinuity(struct etracer *t)
 		discontinuity->flags);
 }
 
+static bool etrace_replay_ordered_events(struct etracer *t,
+					 enum cov_format cov_fmt)
+{
+	struct etrace_hdr hdr;
+	size_t got;
+
+	if (fflush(t->event_spool) != 0
+	    || fseek(t->event_spool, 0, SEEK_SET) != 0) {
+		fprintf(stderr, "Unable to rewind ordered event spool: %s\n",
+			strerror(errno));
+		return false;
+	}
+	while ((got = fread(&hdr, 1, sizeof(hdr), t->event_spool)) != 0) {
+		if (got != sizeof(hdr)) {
+			fprintf(stderr, "Truncated ordered event spool header\n");
+			return false;
+		}
+		if (hdr.len > MAX_PKG) {
+			fprintf(stderr, "Ordered event spool record is too large\n");
+			return false;
+		}
+		t->pkg->hdr = hdr;
+		if (fread(t->pkg->u8, 1, hdr.len, t->event_spool) != hdr.len) {
+			fprintf(stderr, "Truncated ordered event spool\n");
+			return false;
+		}
+		switch (hdr.type) {
+		case TYPE_TB_EXEC:
+		{
+			const struct etrace_tb_exec *tb_exec = &t->pkg->tb_exec;
+			struct etrace_tb_definition *definition;
+
+			if (hdr.len < sizeof(*tb_exec)) {
+				fprintf(stderr, "Short ordered TB execution record\n");
+				return false;
+			}
+			definition = g_hash_table_lookup(t->tb_defs,
+						 &tb_exec->tb_id);
+			if (!definition) {
+				fprintf(stderr, "Ordered event references undefined TB\n");
+				return false;
+			}
+			if (definition->resolved) {
+				struct pending_tb_exec execution = {
+					.context_id = tb_exec->context_id,
+					.count = 1,
+					.duration = tb_exec->duration,
+					.first_time = tb_exec->time,
+					.unit_id = hdr.unit_id,
+					.insn_count = tb_exec->insn_count,
+					.flags = tb_exec->flags,
+				};
+
+				etrace_emit_tb_execution(t, definition, &execution,
+							 cov_fmt);
+			} else {
+				t->ordered_unresolved++;
+				if (t->tr.fp_out) {
+					fprintf(t->tr.fp_out,
+						"U%u sequence=%" PRIu64
+						" tb=%" PRIx64 " context=%" PRIx64
+						" insns=%u\n",
+						hdr.unit_id, tb_exec->sequence,
+						tb_exec->tb_id, tb_exec->context_id,
+						tb_exec->insn_count);
+				}
+			}
+			break;
+		}
+		case TYPE_CONTEXT_GAP:
+			if (hdr.len < sizeof(t->pkg->context_gap)) {
+				fprintf(stderr, "Short ordered context gap record\n");
+				return false;
+			}
+			etrace_output_context_gap(t, hdr.unit_id,
+						  &t->pkg->context_gap);
+			break;
+		case TYPE_DISCONTINUITY:
+			if (hdr.len < sizeof(t->pkg->discontinuity)) {
+				fprintf(stderr, "Short ordered discontinuity record\n");
+				return false;
+			}
+			etrace_process_discontinuity(t);
+			break;
+		default:
+			fprintf(stderr, "Invalid ordered event spool record type %u\n",
+				hdr.type);
+			return false;
+		}
+	}
+	if (ferror(t->event_spool)) {
+		fprintf(stderr, "Unable to read ordered event spool: %s\n",
+			strerror(errno));
+		return false;
+	}
+	return true;
+}
+
 void etrace_show(int fd, FILE *fp_out,
 		 const char *objdump, const char *machine,
 		 const char *guest_objdump, const char *guest_machine,
@@ -1271,7 +1416,9 @@ void etrace_show(int fd, FILE *fp_out,
 		 enum trace_format trace_in_fmt,
 		 enum trace_format trace_out_fmt,
 		 const struct address_map *address_map,
-		 bool auto_map, size_t unresolved_limit)
+		 bool auto_map, size_t unresolved_limit,
+		 bool preserve_order, const char *event_spool,
+		 uint64_t event_spool_limit)
 {
 	struct etracer t = { 0 };
 	bool unknown_pkg_warn = false;
@@ -1286,6 +1433,16 @@ void etrace_show(int fd, FILE *fp_out,
 	t.tr.address_map = address_map;
 	t.auto_map = auto_map;
 	t.unresolved_limit = unresolved_limit;
+	t.preserve_order = preserve_order;
+	t.event_spool_limit = event_spool_limit;
+	if (preserve_order) {
+		t.event_spool = event_spool ? fopen(event_spool, "w+b") : tmpfile();
+		if (!t.event_spool) {
+			fprintf(stderr, "Unable to open ordered event spool: %s\n",
+				strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+	}
 	t.tr.host.objdump = objdump;
 	t.tr.host.machine = machine;
 	t.tr.guest.objdump = guest_objdump;
@@ -1364,7 +1521,14 @@ void etrace_show(int fd, FILE *fp_out,
 			etrace_process_event_u64(&t);
 			break;
 		case TYPE_DISCONTINUITY:
-			etrace_process_discontinuity(&t);
+			if (t.preserve_order) {
+				if (!etrace_spool_event(&t)) {
+					free(t.pkg);
+					exit(EXIT_FAILURE);
+				}
+			} else {
+				etrace_process_discontinuity(&t);
+			}
 			break;
 		case TYPE_STATUS:
 			etrace_process_status(&t);
@@ -1432,12 +1596,6 @@ void etrace_show(int fd, FILE *fp_out,
 			}
 		}
 	}
-	g_hash_table_destroy(t.contexts);
-	g_hash_table_destroy(t.tb_defs);
-	g_array_free(t.physical_bindings, true);
-	free(t.sequence_seen);
-	free(t.last_sequence);
-	free(t.pkg);
 	if (gzclose(t.input) != Z_OK) {
 		fprintf(stderr, "Unable to finish ETrace input\n");
 		exit(EXIT_FAILURE);
@@ -1465,6 +1623,16 @@ void etrace_show(int fd, FILE *fp_out,
 			t.code_errors);
 		exit(EXIT_FAILURE);
 	}
+	if (t.preserve_order
+	    && !etrace_replay_ordered_events(&t, cov_fmt))
+		exit(EXIT_FAILURE);
+	if (t.preserve_order && t.final_status_seen)
+		etrace_output_status(&t);
+	if (t.event_spool && fclose(t.event_spool) != 0) {
+		fprintf(stderr, "Unable to close ordered event spool: %s\n",
+			strerror(errno));
+		exit(EXIT_FAILURE);
+	}
 	if (t.auto_map && t.unresolved_events) {
 		fprintf(stderr,
 			"Automatic mapping left %" PRIu64
@@ -1479,5 +1647,17 @@ void etrace_show(int fd, FILE *fp_out,
 			" deferred execution events\n",
 			t.resolved_events);
 	}
+	if (t.preserve_order && t.ordered_unresolved) {
+		fprintf(stderr,
+			"Ordered replay retained %" PRIu64
+			" unresolved execution boundaries\n",
+			t.ordered_unresolved);
+	}
+	g_hash_table_destroy(t.contexts);
+	g_hash_table_destroy(t.tb_defs);
+	g_array_free(t.physical_bindings, true);
+	free(t.sequence_seen);
+	free(t.last_sequence);
+	free(t.pkg);
 	fprintf(stderr, "done.\n");
 }
