@@ -286,11 +286,11 @@ def test_v1_partial_tb_matches_execution_range(run_etrace, tmp_path, x86_fixture
     assert v1_functions == legacy_functions
 
 
+@pytest.mark.parametrize("physical", [0x200000, 0x200FFC, 0xFFFFFFFFFFFFF000])
 def test_v1_auto_map_replays_early_physical_execution(
-    run_etrace, tmp_path, x86_fixture
+    run_etrace, tmp_path, x86_fixture, physical
 ):
     linked = x86_fixture.start
-    physical = 0x200000
     early = physical
     instructions = tuple(x86_fixture.instructions[:3])
     code_len = sum(size for _, size in instructions)

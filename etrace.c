@@ -49,6 +49,9 @@
 
 #define MAX_PKG (2 * 1024 * 1024)
 
+/* Index granularity, independent of the guest's translation granule. */
+#define BINDING_INDEX_SHIFT 12
+
 struct etracer {
 	struct tracer tr;
 	struct etrace_info_data info;
@@ -61,6 +64,7 @@ struct etracer {
 	GHashTable *tb_defs;
 	GHashTable *contexts;
 	GArray *physical_bindings;
+	GHashTable *binding_buckets;
 	bool auto_map;
 	size_t unresolved_limit;
 	size_t unresolved_entries;
@@ -668,33 +672,62 @@ static void etrace_emit_tb_execution(struct etracer *t,
 static bool binding_lookup(const struct etracer *t, uint64_t physical_start,
 			   uint64_t len, uint64_t *linked_start)
 {
-	unsigned int i;
+	uint64_t first_bucket, last_bucket;
+	uint64_t bucket, candidate = 0;
+	unsigned int first_match = G_MAXUINT;
+	bool found = false;
 
 	if (!len || physical_start > UINT64_MAX - len)
 		return false;
-	for (i = 0; i < t->physical_bindings->len; i++) {
-		const struct physical_binding *binding = &g_array_index(
-			t->physical_bindings, struct physical_binding, i);
+	first_bucket = physical_start >> BINDING_INDEX_SHIFT;
+	last_bucket = (physical_start + len - 1) >> BINDING_INDEX_SHIFT;
+	if (!g_hash_table_contains(t->binding_buckets, &first_bucket)
+	    || !g_hash_table_contains(t->binding_buckets, &last_bucket))
+		return false;
+	for (bucket = first_bucket; bucket <= last_bucket; bucket++) {
+		const GArray *indices = g_hash_table_lookup(t->binding_buckets,
+							  &bucket);
+		unsigned int i;
 
-		if (binding->ambiguous
-		    && physical_start < binding->physical_end
-		    && physical_start + len > binding->physical_start)
-			return false;
-		if (physical_start >= binding->physical_start
-		    && physical_start + len <= binding->physical_end) {
-			*linked_start = binding->linked_start
-				+ physical_start - binding->physical_start;
-			return true;
+		if (!indices)
+			continue;
+		for (i = 0; i < indices->len; i++) {
+			unsigned int index = g_array_index(indices, unsigned int, i);
+			const struct physical_binding *binding;
+
+			/* Keep the original binding order across bucket boundaries. */
+			if (index >= first_match)
+				break;
+			binding = &g_array_index(t->physical_bindings,
+						struct physical_binding, index);
+			if (binding->ambiguous
+			    && physical_start < binding->physical_end
+			    && physical_start + len > binding->physical_start) {
+				first_match = index;
+				found = false;
+				break;
+			}
+			if (physical_start >= binding->physical_start
+			    && physical_start + len <= binding->physical_end) {
+				first_match = index;
+				candidate = binding->linked_start
+					+ physical_start - binding->physical_start;
+				found = true;
+				break;
+			}
 		}
 	}
-	return false;
+	if (found)
+		*linked_start = candidate;
+	return found;
 }
 
 static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
 				 uint64_t len, uint64_t linked_start)
 {
 	struct physical_binding binding = { 0 };
-	unsigned int i;
+	uint64_t bucket, last_bucket;
+	unsigned int i, index;
 
 	if (!len || physical_start > UINT64_MAX - len
 	    || linked_start > UINT64_MAX - len)
@@ -725,6 +758,21 @@ static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
 			return false;
 	}
 	g_array_append_val(t->physical_bindings, binding);
+	index = t->physical_bindings->len - 1;
+	last_bucket = (binding.physical_end - 1) >> BINDING_INDEX_SHIFT;
+	for (bucket = binding.physical_start >> BINDING_INDEX_SHIFT;
+	     bucket <= last_bucket; bucket++) {
+		GArray *indices = g_hash_table_lookup(t->binding_buckets, &bucket);
+
+		if (!indices) {
+			uint64_t *key = safe_malloc(sizeof(*key));
+
+			*key = bucket;
+			indices = g_array_new(false, false, sizeof(index));
+			g_hash_table_insert(t->binding_buckets, key, indices);
+		}
+		g_array_append_val(indices, index);
+	}
 	return true;
 }
 
@@ -1520,6 +1568,8 @@ void etrace_show(int fd, FILE *fp_out,
 	t.contexts = g_hash_table_new_full(g_int64_hash, g_int64_equal, free, NULL);
 	t.physical_bindings = g_array_new(false, true,
 					 sizeof(struct physical_binding));
+	t.binding_buckets = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+						free, (GDestroyNotify)g_array_unref);
 	t.last_sequence = calloc(UINT16_MAX + 1, sizeof(*t.last_sequence));
 	t.sequence_seen = calloc(UINT16_MAX + 1, sizeof(*t.sequence_seen));
 	if (!t.last_sequence || !t.sequence_seen) {
@@ -1720,6 +1770,7 @@ void etrace_show(int fd, FILE *fp_out,
 	g_hash_table_destroy(t.contexts);
 	g_hash_table_destroy(t.tb_defs);
 	g_array_free(t.physical_bindings, true);
+	g_hash_table_destroy(t.binding_buckets);
 	free(t.sequence_seen);
 	free(t.last_sequence);
 	free(t.pkg);
