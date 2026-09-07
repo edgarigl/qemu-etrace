@@ -747,11 +747,17 @@ size_t sym_find_code_matches(void **store, const uint8_t *code, size_t len,
 		if (len > section_size)
 			continue;
 		for (offset = 0; offset <= section_size - len; offset++) {
-			if (memcmp(section->data + offset, code, len))
-				continue;
-			if (count < capacity)
-				matches[count] = section->start + offset;
-			count++;
+			const uint8_t *candidate = memchr(section->data + offset,
+				code[0], section_size - len - offset + 1);
+
+			if (!candidate)
+				break;
+			offset = candidate - section->data;
+			if (!memcmp(candidate, code, len)) {
+				if (count < capacity)
+					matches[count] = section->start + offset;
+				count++;
+			}
 		}
 	}
 	return count;
