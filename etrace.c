@@ -752,11 +752,13 @@ static bool resolve_tb_definition(struct etracer *t,
 	    && (explicit_map || linked == definition->vaddr)
 	    && sym_range_is_executable(t->tr.sym_tree, linked,
 					linked + definition->size)) {
-		definition->resolved = true;
-		definition->linked_vaddr = linked;
 		trusted_code = definition->code
 			&& sym_code_matches(t->tr.sym_tree, linked,
 					    definition->code, definition->size);
+		if (definition->code && !trusted_code)
+			return false;
+		definition->resolved = true;
+		definition->linked_vaddr = linked;
 	} else if (resolve_from_physical(t, definition, &linked)
 		   && linked <= UINT64_MAX - definition->size
 		   && sym_range_is_executable(t->tr.sym_tree, linked,

@@ -159,7 +159,8 @@ cannot be reconstructed from these records.
 `qemu-etrace --auto-map` retains unresolved version 1 executions sparsely by
 TB, context, vCPU, and dispatched prefix. It resolves them using, in order:
 
-1. an explicit `--address-map` or a virtual range already belonging to the ELF;
+1. an explicit `--address-map` or a virtual range already belonging to the ELF,
+   checking captured code against the ELF when available;
 2. physical mappings learned from a byte-verified linked TB, with full
    containment and matching bytes at the resulting linked address.
 
@@ -177,6 +178,11 @@ they do not establish ownership of an adjacent entry, a whole page, or a load
 segment. Version 1 has no image-instance lifetime or page-reuse records, so
 these anchors require a stable image mapping. A privilege flag or a matching
 byte sequence alone cannot establish that contract for mixed-image traces.
+
+Captured code that contradicts an explicit or linked-address mapping leaves
+the TB unresolved. TBs without captured code can use those address mappings
+for coverage, but cannot seed physical bindings. There is no minimum code
+length for verification at an established address, including short entries.
 
 Once a definition resolves, pending execution aggregates are replayed through
 the normal execution-range coverage path. Repeated executions with the same
