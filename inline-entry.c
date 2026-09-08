@@ -156,11 +156,6 @@ bool inline_entry_clone_x86_64(const uint8_t *code, size_t len, uint64_t base,
 	    || a.prefix != b.prefix
 	    || memcmp(code + entry - base, code + candidate - base, a.prefix))
 		return false;
-	if (!range_end(ranges, nr_ranges, a.taken)
-	    || !range_end(ranges, nr_ranges, a.fallthrough)
-	    || !range_end(ranges, nr_ranges, b.taken)
-	    || !range_end(ranges, nr_ranges, b.fallthrough))
-		return false;
 	/* Equal conditions preserve successors; inverted conditions swap them. */
 	return (a.condition == b.condition && a.taken == b.taken
 		&& a.fallthrough == b.fallthrough)

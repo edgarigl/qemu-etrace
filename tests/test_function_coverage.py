@@ -72,7 +72,8 @@ def function_records(output, name):
     ]
 
 
-def run_coverage(run_etrace, tmp_path, policy, address, *extra_args):
+def run_coverage(run_etrace, tmp_path, policy, address, *extra_args,
+                 binary=FIXTURE, objdump=None):
     trace = tmp_path / f"{policy}.hex"
     output = tmp_path / f"{policy}.info"
     addresses = (address,) if isinstance(address, int) else address
@@ -89,7 +90,7 @@ def run_coverage(run_etrace, tmp_path, policy, address, *extra_args):
         "--trace-output",
         "none",
         "--elf",
-        FIXTURE,
+        binary,
         "--dwarfdump",
         shutil.which("dwarfdump"),
         "--addr2line",
@@ -101,9 +102,10 @@ def run_coverage(run_etrace, tmp_path, policy, address, *extra_args):
         "--function-hit-policy",
         policy,
         *extra_args,
+        *(() if objdump is None else ("--objdump", objdump)),
     )
 
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     return function_counts(output)
 
 
@@ -131,6 +133,64 @@ def test_source_policy_ignores_jump_into_inline_range(run_etrace, tmp_path):
     source_counts = run_coverage(run_etrace, tmp_path, "source", addresses[-1])
 
     assert source_counts["inline_helper"] == 0
+
+
+def test_source_policy_counts_validated_alternate_inline_entry(
+    run_etrace, tmp_path
+):
+    tools = {
+        "cc": shutil.which("x86_64-linux-gnu-gcc"),
+        "nm": shutil.which("x86_64-linux-gnu-nm"),
+        "objdump": shutil.which("x86_64-linux-gnu-objdump"),
+        "addr2line": shutil.which("addr2line"),
+        "dwarfdump": shutil.which("dwarfdump"),
+    }
+    if any(value is None for value in tools.values()):
+        pytest.skip("x86 compiler and DWARF tools are required")
+    binary = tmp_path / "inline-entry-clone"
+    source = ROOT / "tests/fixtures/inline-entry-clone.c"
+    build = subprocess.run(
+        [tools["cc"], "-O2", "-g", "-fno-pie", "-fno-stack-protector",
+         "-fomit-frame-pointer", "-fprofile-arcs", "-ftest-coverage",
+         "-fprofile-update=atomic", "-no-pie", "--coverage", source,
+         "-o", binary],
+        text=True, capture_output=True,
+    )
+    if build.returncode:
+        pytest.skip(f"x86 compiler cannot build coverage fixture: {build.stderr}")
+    disassembly = subprocess.run(
+        [tools["objdump"], "-d", "--disassemble=elf_access_ok", binary],
+        text=True, capture_output=True, check=True,
+    ).stdout
+    comparisons = [
+        int(line.split(":", 1)[0], 16)
+        for line in disassembly.splitlines()
+        if "cmpq" in line and "0x98(" in line
+    ]
+    assert len(comparisons) == 2
+    declared, alternate = comparisons
+    stores = [
+        int(line.split(":", 1)[0], 16)
+        for line in disassembly.splitlines()
+        if "movq" in line and "0x98(" in line
+    ]
+    assert len(stores) == 1
+
+    entry_counts = run_coverage(
+        run_etrace, tmp_path, "source", declared, binary=binary,
+        objdump=tools["objdump"],
+    )
+    alternate_counts = run_coverage(
+        run_etrace, tmp_path, "source", alternate, binary=binary,
+        objdump=tools["objdump"],
+    )
+    store_counts = run_coverage(
+        run_etrace, tmp_path, "source", stores[0], binary=binary,
+        objdump=tools["objdump"],
+    )
+    assert entry_counts["elf_mark_broken"] == 1
+    assert alternate_counts["elf_mark_broken"] == 1
+    assert store_counts["elf_mark_broken"] == 0
 
 
 @pytest.mark.parametrize(

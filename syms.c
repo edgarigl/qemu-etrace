@@ -28,6 +28,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <unistd.h>
+#include <glib.h>
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -44,6 +45,7 @@
 #include "safeio.h"
 #include "syms.h"
 #include "run.h"
+#include "inline-entry.h"
 
 #include "bfd.h"
 
@@ -84,6 +86,7 @@ struct sym_store {
 		struct sym_coverage *cov;
 	} *sections;
 	size_t nr_sections;
+	bool x86_64;
 };
 
 void sym_show(const char *prefix, const struct sym *s)
@@ -594,6 +597,17 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 			elf, bfd_errmsg(bfd_get_error()));
 		exit(EXIT_FAILURE);
 	}
+	{
+		uint8_t header[20];
+		FILE *fp = fopen(elf, "rb");
+
+		ss->x86_64 = fp && fread(header, 1, sizeof(header), fp) == sizeof(header)
+			&& !memcmp(header, "\177ELF", 4) && header[4] == 2
+			&& ((header[5] == 1 && header[18] == 62 && header[19] == 0)
+			    || (header[5] == 2 && header[18] == 0 && header[19] == 62));
+		if (fp)
+			fclose(fp);
+	}
 
 	for (section = abfd->sections; section; section = section->next) {
 		flagword flags = bfd_section_flags(section);
@@ -1064,8 +1078,236 @@ static void write_covered_address(struct sym_store *ss, int fd, uint64_t addr)
 	}
 }
 
+static bool parse_objdump_target(const char *text, uint64_t *target)
+{
+	char *end;
+
+	while (isspace((unsigned char)*text))
+		text++;
+	if (*text == '*')
+		return false;
+	errno = 0;
+	*target = strtoull(text, &end, 16);
+	return !errno && end != text;
+}
+
+static bool parse_objdump_instruction(struct sym_store *ss, const char *line,
+				      struct inline_instruction *insn)
+{
+	const char *p = line;
+	const char *mnemonic;
+	char *end;
+	uint8_t bytes[15];
+	size_t count = 0;
+	void *store = ss;
+
+	while (isspace((unsigned char)*p))
+		p++;
+	errno = 0;
+	insn->address = strtoull(p, &end, 16);
+	if (errno || end == p || *end != ':')
+		return false;
+	p = end + 1;
+	while (isspace((unsigned char)*p))
+		p++;
+	while (isxdigit((unsigned char)p[0])
+	       && isxdigit((unsigned char)p[1])
+	       && isspace((unsigned char)p[2])) {
+		char byte[3] = { p[0], p[1], 0 };
+
+		if (count == sizeof(bytes))
+			return false;
+		bytes[count++] = strtoul(byte, NULL, 16);
+		p += 2;
+		while (isspace((unsigned char)*p))
+			p++;
+	}
+	if (!count || insn->address > UINT64_MAX - count
+	    || !sym_code_matches(&store, insn->address, bytes, count))
+		return false;
+	insn->next = insn->address + count;
+	insn->target = 0;
+	insn->kind = INLINE_FLOW_NEXT;
+	mnemonic = p;
+	while (isalpha((unsigned char)*p) || *p == '.')
+		p++;
+	while (isspace((unsigned char)*p))
+		p++;
+	if (!strncmp(mnemonic, "jmp", 3)) {
+		insn->kind = parse_objdump_target(p, &insn->target)
+			? INLINE_FLOW_JUMP : INLINE_FLOW_STOP;
+	} else if (mnemonic[0] == 'j' || !strncmp(mnemonic, "loop", 4)) {
+		insn->kind = parse_objdump_target(p, &insn->target)
+			? INLINE_FLOW_BRANCH : INLINE_FLOW_STOP;
+	} else if (!strncmp(mnemonic, "ret", 3)
+		   || !strncmp(mnemonic, "iret", 4)
+		   || !strncmp(mnemonic, "sysret", 6)
+		   || !strncmp(mnemonic, "syscall", 7)
+		   || !strncmp(mnemonic, "sysenter", 8)
+		   || !strncmp(mnemonic, "sysexit", 7)
+		   || !strncmp(mnemonic, "hlt", 3)
+		   || !strncmp(mnemonic, "int", 3)
+		   || !strncmp(mnemonic, "ud", 2)
+		   || !strncmp(mnemonic, "xabort", 6)
+		   || !strncmp(mnemonic, "xbegin", 6)) {
+		insn->kind = INLINE_FLOW_STOP;
+	}
+	return true;
+}
+
+static GArray *read_function_cfg(struct sym_store *ss, const char *objdump,
+				 const char *elf, const struct sym *function)
+{
+	char start_arg[48], stop_arg[48];
+	char *argv[] = { (char *)objdump, "-d", "--insn-width=16",
+			 start_arg, stop_arg, (char *)elf, NULL };
+	int stdio[3] = { STDIN_FILENO, -1, STDERR_FILENO };
+	GArray *insns = NULL;
+	FILE *output;
+	int status;
+	pid_t child;
+
+	if (!function->size || function->size > 1024 * 1024
+	    || function->addr > UINT64_MAX - function->size)
+		return NULL;
+	snprintf(start_arg, sizeof(start_arg), "--start-address=0x%" PRIx64,
+		 function->addr);
+	snprintf(stop_arg, sizeof(stop_arg), "--stop-address=0x%" PRIx64,
+		 function->addr + function->size);
+	output = tmpfile();
+	if (!output)
+		return NULL;
+	stdio[1] = fileno(output);
+	child = run(argv[0], argv, stdio);
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status)
+	    || WEXITSTATUS(status) != 0 || fseek(output, 0, SEEK_SET) != 0)
+		goto out;
+	insns = g_array_new(false, false, sizeof(struct inline_instruction));
+	while (1) {
+		char *line = NULL;
+		size_t size = 0;
+		struct inline_instruction insn;
+
+		if (getline(&line, &size, output) < 0) {
+			free(line);
+			break;
+		}
+		if (parse_objdump_instruction(ss, line, &insn)) {
+			if (insns->len
+			    && g_array_index(insns, struct inline_instruction,
+					     insns->len - 1).address >= insn.address) {
+				free(line);
+				g_array_free(insns, true);
+				insns = NULL;
+				goto out;
+			}
+			g_array_append_val(insns, insn);
+		}
+		free(line);
+	}
+	if (!insns->len
+	    || g_array_index(insns, struct inline_instruction, 0).address
+	       != function->addr) {
+		g_array_free(insns, true);
+		insns = NULL;
+	}
+out:
+	fclose(output);
+	return insns;
+}
+
+static bool parse_dwarf_range(const char *line, struct inline_range *range)
+{
+	const char *p;
+	char *end;
+
+	if (!strstr(line, "start,end") && !strstr(line, "range entry"))
+		return false;
+	p = strstr(line, "0x");
+	if (!p)
+		return false;
+	errno = 0;
+	range->start = strtoull(p, &end, 16);
+	if (errno || end == p)
+		return false;
+	p = strstr(end, "0x");
+	if (!p)
+		return false;
+	errno = 0;
+	range->end = strtoull(p, &end, 16);
+	return !errno && end != p && range->end > range->start;
+}
+
+static bool validate_inline_entry(struct sym_store *ss, const char *objdump,
+				  const char *elf, uint64_t entry,
+				  uint64_t candidate, const GArray *ranges)
+{
+	struct image_section *image = image_section_find(ss, entry);
+	struct sym *function;
+	GArray *cfg;
+	void *store = ss;
+	bool valid;
+
+	if (!ss->x86_64 || !image || !load_image_data(ss)
+	    || candidate < image->start || candidate >= image->end)
+		return false;
+	function = sym_lookup_by_addr(&store, entry);
+	if (!function || candidate < function->addr
+	    || candidate - function->addr >= function->size)
+		return false;
+	if (!inline_entry_clone_x86_64(image->data,
+					image->end - image->start, image->start,
+					entry, candidate,
+					(const struct inline_range *)ranges->data,
+					ranges->len))
+	{
+		return false;
+	}
+	cfg = read_function_cfg(ss, objdump, elf, function);
+	if (!cfg)
+		return false;
+	valid = inline_entry_external_path(
+		(const struct inline_instruction *)cfg->data, cfg->len, candidate,
+		(const struct inline_range *)ranges->data, ranges->len);
+	g_array_free(cfg, true);
+	return valid;
+}
+
+static void write_inline_instance(struct sym_store *ss, int fd,
+				  const char *objdump, const char *elf,
+				  bool in_inline, bool have_entry_pc,
+				  bool have_low_pc, uint64_t entry,
+				  const GArray *ranges,
+				  uint64_t *verified, uint64_t *unverified)
+{
+	unsigned int i;
+	void *store = ss;
+
+	if (!in_inline || (!have_entry_pc && !have_low_pc))
+		return;
+	write_covered_address(ss, fd, entry);
+	if (sym_image_coverage_at(&store, entry))
+		return;
+	for (i = 0; i < ranges->len; i++) {
+		const struct inline_range *range = &g_array_index(
+			ranges, struct inline_range, i);
+
+		if (range->start == entry
+		    || !sym_image_coverage_at(&store, range->start))
+			continue;
+		if (validate_inline_entry(ss, objdump, elf, entry, range->start,
+					  ranges)) {
+			write_covered_address(ss, fd, range->start);
+			(*verified)++;
+		} else {
+			(*unverified)++;
+		}
+	}
+}
+
 static void write_inline_entries(struct sym_store *ss, int fd,
-				 const char *dwarfdump, const char *elf)
+				 const char *dwarfdump, const char *objdump,
+				 const char *elf)
 {
 	char *argv[] = { (char *)dwarfdump, "-i", (char *)elf, NULL };
 	char tmpout_template[] = "/tmp/etrace-dd-info-XXXXXX";
@@ -1074,6 +1316,8 @@ static void write_inline_entries(struct sym_store *ss, int fd,
 	bool have_low_pc = false;
 	bool have_entry_pc = false;
 	bool in_inline = false;
+	GArray *ranges = g_array_new(false, false, sizeof(struct inline_range));
+	uint64_t verified = 0, unverified = 0;
 	int fdout;
 	int status;
 	FILE *fp;
@@ -1110,28 +1354,39 @@ static void write_inline_entries(struct sym_store *ss, int fd,
 			break;
 		}
 		if (strstr(line, "DW_TAG_")) {
-			if (in_inline && have_low_pc && !have_entry_pc)
-				write_covered_address(ss, fd, low_pc);
+			write_inline_instance(ss, fd, objdump, elf, in_inline,
+				have_entry_pc, have_low_pc, low_pc, ranges,
+				&verified, &unverified);
 			in_inline = strstr(line, "DW_TAG_inlined_subroutine") != NULL;
 			have_low_pc = false;
 			have_entry_pc = false;
+			g_array_set_size(ranges, 0);
 		} else if (in_inline
 			   && parse_dwarf_address(line, "DW_AT_entry_pc", &low_pc)) {
-			write_covered_address(ss, fd, low_pc);
 			have_entry_pc = true;
 		} else if (in_inline && !have_entry_pc
 			   && parse_dwarf_address(line, "DW_AT_low_pc", &low_pc)) {
 			have_low_pc = true;
+		} else if (in_inline) {
+			struct inline_range range;
+
+			if (parse_dwarf_range(line, &range))
+				g_array_append_val(ranges, range);
 		}
 		free(line);
 	}
-	if (in_inline && have_low_pc && !have_entry_pc)
-		write_covered_address(ss, fd, low_pc);
+	write_inline_instance(ss, fd, objdump, elf, in_inline, have_entry_pc,
+			      have_low_pc, low_pc, ranges, &verified, &unverified);
+	if (verified || unverified)
+		fprintf(stderr, "Inline alternate entries: verified=%" PRIu64
+			" unverified=%" PRIu64 "\n", verified, unverified);
+	g_array_free(ranges, true);
 	fclose(fp);
 }
 
 void sym_build_source_coverage(void **store, const char *addr2line,
-			       const char *dwarfdump, const char *elf)
+			       const char *dwarfdump, const char *objdump,
+			       const char *elf)
 {
 	char *argv[] = { (char *)addr2line, "-a", "-f", "-i", "-C", "-p",
 			 "-e", (char *)elf, NULL };
@@ -1160,7 +1415,7 @@ void sym_build_source_coverage(void **store, const char *addr2line,
 
 		sym->source_hits = sym_image_coverage_at(store, sym->addr);
 	}
-	write_inline_entries(ss, fdin_tmp, dwarfdump, elf);
+	write_inline_entries(ss, fdin_tmp, dwarfdump, objdump, elf);
 	lseek(fdin_tmp, 0, SEEK_SET);
 
 	fdout_tmp = mkstemp(tmpout_template);

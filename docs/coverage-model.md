@@ -47,6 +47,16 @@ the function denominator, even when an inline-only instance is visible in
 DWARF. Inline instances without `DW_AT_entry_pc` use `DW_AT_low_pc`; instances
 without either attribute are ignored conservatively.
 
+An x86-64 inline instance may have several compiler-generated entry blocks in
+one DWARF range list. For a covered alternate range start, the source policy
+accepts it only when its initial integer comparison block is byte-equivalent
+to the declared entry, its conditional branch reaches the same two successor
+addresses (allowing an inverted condition), and the caller's machine CFG has
+a path to it from outside that inline instance. RIP-relative, unsupported, or
+ambiguous blocks remain unverified. This duplicated-block check does not
+recognize source names or fixed addresses, and it never treats all range starts
+as entries. Other architectures retain the declared-entry policy.
+
 Generate separate reports when both facts matter:
 
 ```sh

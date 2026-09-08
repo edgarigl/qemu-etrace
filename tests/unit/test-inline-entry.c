@@ -75,7 +75,7 @@ static void test_prefix_and_successors(void)
 static void test_ranges(void)
 {
 	uint8_t code[0x30];
-	struct inline_range ranges[] = { { 0x1000, 0x1010 }, { 0x1013, 0x1020 } };
+	struct inline_range ranges[] = { { 0x1000, 0x1010 }, { 0x1013, 0x101f } };
 	size_t i;
 
 	make_code(code);
