@@ -88,6 +88,7 @@ OBJS += coverage.o
 OBJS += cov-gcov.o
 OBJS += cov-cachegrind.o
 OBJS += etrace.o
+OBJS += event-journal.o
 OBJS += trace-hex.o
 OBJS += trace-qemu-simple.o
 
@@ -124,6 +125,7 @@ TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v5-discon
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v6-discon
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v7
 TEST_BINS += $(TEST_BUILD_DIR)/test-run
+TEST_BINS += $(TEST_BUILD_DIR)/test-event-journal
 TEST_FIXTURES = $(TEST_BUILD_DIR)/coverage-fixture
 TEST_FIXTURES += $(TEST_BUILD_DIR)/duplicate-inline-fixture
 TEST_FIXTURES += $(TEST_BUILD_DIR)/inline-function-fixture
@@ -273,6 +275,12 @@ $(TEST_BUILD_DIR)/test-run: tests/unit/test-run.c run.c run.h | $(TEST_BUILD_DIR
 		tests/unit/test-run.c run.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
+$(TEST_BUILD_DIR)/test-event-journal: tests/unit/test-event-journal.c \
+		event-journal.c event-journal.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-event-journal.c event-journal.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -lz -o $@
+
 $(TEST_BUILD_DIR)/coverage-fixture: tests/fixtures/coverage.c | $(TEST_BUILD_DIR)
 	$(CC) -O0 -g -fno-inline -fno-pie -no-pie $< -o $@
 
@@ -311,6 +319,7 @@ check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-plugin-v6-discon
 	$(TEST_BUILD_DIR)/test-plugin-v7
 	$(TEST_BUILD_DIR)/test-run
+	$(TEST_BUILD_DIR)/test-event-journal
 	$(PYTEST) -q
 
 install: $(TARGET) $(PLUGIN)
