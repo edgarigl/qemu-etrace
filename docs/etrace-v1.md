@@ -178,6 +178,9 @@ they do not establish ownership of an adjacent entry, a whole page, or a load
 segment. Version 1 has no image-instance lifetime or page-reuse records, so
 these anchors require a stable image mapping. A privilege flag or a matching
 byte sequence alone cannot establish that contract for mixed-image traces.
+Contradictory physical-to-linked bindings violate the stable-mapping contract
+and fail conversion, including when an earlier execution was already resolved.
+The converter does not choose a claimant based on arrival or lookup order.
 
 Captured code that contradicts an explicit or linked-address mapping leaves
 the TB unresolved. TBs without captured code can use those address mappings

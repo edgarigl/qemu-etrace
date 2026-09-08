@@ -65,6 +65,7 @@ struct etracer {
 	GHashTable *contexts;
 	GArray *physical_bindings;
 	GHashTable *binding_buckets;
+	bool binding_conflict;
 	bool auto_map;
 	size_t unresolved_limit;
 	size_t unresolved_entries;
@@ -749,6 +750,7 @@ static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
 		    != existing->linked_start + overlap
 			- existing->physical_start) {
 			existing->ambiguous = true;
+			t->binding_conflict = true;
 			t->ambiguous_tbs++;
 			return false;
 		}
@@ -978,6 +980,9 @@ static bool etrace_process_tb_def(struct etracer *t, enum cov_format cov_fmt)
 	}
 	if (t->auto_map) {
 		resolve_pending_definitions(t, cov_fmt);
+		if (t->binding_conflict)
+			return etrace_invalid_pkg(t->pkg,
+				"conflicting physical image mappings");
 		replay_pending(t, definition, cov_fmt);
 	}
 

@@ -514,6 +514,35 @@ def test_v1_auto_map_requires_anchor_to_cover_candidate(
     assert "1 unverified code-match candidates" in result.stderr
 
 
+@pytest.mark.parametrize("ordered", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_v1_auto_map_rejects_conflicting_physical_claims(
+    run_etrace, tmp_path, x86_fixture, ordered, reverse
+):
+    # The fixture repeats its first eight bytes immediately after the function.
+    addresses = [x86_fixture.start, x86_fixture.start + len(x86_fixture.code)]
+    if reverse:
+        addresses.reverse()
+    packets = [etrace_info(major=1)]
+    for number, linked in enumerate(addresses, 1):
+        packets.extend([
+            etrace_tb_def(
+                tb_id=number, vaddr=linked, insns=tuple(x86_fixture.instructions[:4]),
+                mappings=((0, 8, 0x200000),), code=x86_fixture.code[:8],
+            ),
+            etrace_tb_exec(tb_id=number, sequence=number, insn_count=4),
+        ])
+    trace = tmp_path / "conflicting-physical-claims.etrace"
+    trace.write_bytes(b"".join(packets))
+    extra = ("--preserve-order",) if ordered else ()
+    result, _ = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map", *extra
+    )
+    assert result.returncode != 0
+    assert "conflicting physical image mappings" in result.stderr
+    assert not trace.with_suffix(".info").exists()
+
+
 def test_v1_auto_map_enforces_unresolved_limit(
     run_etrace, tmp_path, x86_fixture
 ):
