@@ -165,9 +165,12 @@ resolver:
 
 $ qemu-etrace --trace /tmp/xen.elog --elf xen-syms.debug --auto-map ...
 
-The resolver defers unmatched TB executions until a later linked mapping or a
-unique code-byte match identifies them. `--unresolved-limit` bounds pending
-execution aggregates and fails conversion on overflow.
+The resolver defers unmatched TB executions until a byte-verified linked
+mapping covers them. Unique code-byte matches remain unverified candidates
+and cannot create mappings or credit coverage on their own. Linked mappings
+assume a stable image in the selected trace address space; see the attribution
+contract in `docs/etrace-v1.md`. `--unresolved-limit` bounds pending execution
+aggregates and fails conversion on overflow.
 
 Add `--preserve-order` when chronological consumers need individual dynamic
 events rather than coverage-only aggregates. Dynamic events are journaled to a

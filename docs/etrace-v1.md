@@ -160,9 +160,23 @@ cannot be reconstructed from these records.
 TB, context, vCPU, and dispatched prefix. It resolves them using, in order:
 
 1. an explicit `--address-map` or a virtual range already belonging to the ELF;
-2. physical mappings learned from a byte-verified linked TB;
-3. an exact code sequence that occurs only once in the ELF's executable
-   sections.
+2. physical mappings learned from a byte-verified linked TB, with full
+   containment and matching bytes at the resulting linked address.
+
+An exact code sequence that occurs only once in the ELF's executable sections
+is an unverified candidate. It does not credit coverage or create a physical
+binding: another image can contain the same bytes. Candidates remain pending
+until independent address-mapping evidence resolves them. End-of-input
+diagnostics count the remaining unverified candidate TB definitions in both
+aggregate and ordered modes.
+
+Linked-address anchors assume the selected trace address space belongs to the
+input ELF at those virtual addresses. Explicit maps assert the corresponding
+runtime ownership. Physical bindings cover only the byte-verified TB spans;
+they do not establish ownership of an adjacent entry, a whole page, or a load
+segment. Version 1 has no image-instance lifetime or page-reuse records, so
+these anchors require a stable image mapping. A privilege flag or a matching
+byte sequence alone cannot establish that contract for mixed-image traces.
 
 Once a definition resolves, pending execution aggregates are replayed through
 the normal execution-range coverage path. Repeated executions with the same
@@ -204,9 +218,10 @@ still retained by the normal TB dictionary. Ambiguous or unrelated TBs remain
 unresolved and are reported at end of input without being attributed to the
 ELF.
 
-Code bytes are the authoritative match evidence. The 64-bit FNV-1a hash in a
-TB definition is a stable lookup aid and is verified by the reader; a hash
-collision cannot establish an image match without equal bytes.
+Code bytes validate a mapping's contents, independently of the evidence for
+image ownership. The 64-bit FNV-1a hash in a TB definition is a stable lookup
+aid and is verified by the reader; neither matching hashes nor equal bytes
+alone establish image identity.
 
 ## Compatibility
 

@@ -66,6 +66,7 @@ struct etracer {
 	uint64_t unresolved_events;
 	uint64_t resolved_events;
 	uint64_t ambiguous_tbs;
+	uint64_t code_candidates;
 	FILE *event_spool;
 	uint64_t event_spool_bytes;
 	uint64_t event_spool_limit;
@@ -96,7 +97,8 @@ struct etrace_tb_definition {
 	uint8_t *code;
 	GArray *pending;
 	bool resolved;
-	bool binding_source;
+	bool code_searched;
+	bool code_candidate;
 };
 
 struct pending_tb_exec {
@@ -764,17 +766,16 @@ static bool resolve_tb_definition(struct etracer *t,
 					    definition->code, definition->size)) {
 		definition->resolved = true;
 		definition->linked_vaddr = linked;
-	} else if (!definition->binding_source && definition->code
+	} else if (!definition->code_searched && definition->code
 		   && definition->size >= 8) {
-		uint64_t matches[2];
 		size_t count = sym_find_code_matches(t->tr.sym_tree,
-			definition->code, definition->size, matches, 2);
+			definition->code, definition->size, NULL, 0);
 
-		definition->binding_source = true;
+		definition->code_searched = true;
 		if (count == 1) {
-			definition->resolved = true;
-			definition->linked_vaddr = matches[0];
-			trusted_code = true;
+			/* Equal bytes alone do not establish image ownership. */
+			definition->code_candidate = true;
+			t->code_candidates++;
 		} else if (count > 1) {
 			t->ambiguous_tbs++;
 		}
@@ -782,6 +783,10 @@ static bool resolve_tb_definition(struct etracer *t,
 	if (!definition->resolved)
 		return false;
 
+	if (definition->code_candidate) {
+		definition->code_candidate = false;
+		t->code_candidates--;
+	}
 	if (trusted_code) {
 		uint16_t i;
 
@@ -1646,6 +1651,12 @@ void etrace_show(int fd, FILE *fp_out,
 			"Automatic mapping replayed %" PRIu64
 			" deferred execution events\n",
 			t.resolved_events);
+	}
+	if (t.auto_map && t.code_candidates) {
+		fprintf(stderr,
+			"Automatic mapping retained %" PRIu64
+			" unverified code-match candidates\n",
+			t.code_candidates);
 	}
 	if (t.preserve_order && t.ordered_unresolved) {
 		fprintf(stderr,

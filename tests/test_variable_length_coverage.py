@@ -343,23 +343,75 @@ def test_v1_auto_map_replays_early_physical_execution(
     assert ordered == expected
 
 
-def test_v1_auto_map_uses_unique_code_match(run_etrace, tmp_path, x86_fixture):
+@pytest.mark.parametrize("ordered", [False, True])
+def test_v1_auto_map_keeps_unique_code_unresolved(
+    run_etrace, tmp_path, x86_fixture, ordered
+):
+    physical = 0x200000
+    trace = tmp_path / "unverified-code.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=0x30000000,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, len(x86_fixture.code), physical),),
+            code=x86_fixture.code,
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, insn_count=len(x86_fixture.instructions)
+        )
+        # A unique match must not seed a binding for a short physical alias.
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=physical,
+            insns=tuple(x86_fixture.instructions[:3]),
+            mappings=((0, 7, physical),),
+            code=x86_fixture.code[:7],
+        )
+        + etrace_tb_exec(tb_id=2, sequence=2, insn_count=3)
+    )
+    extra_args = ("--preserve-order",) if ordered else ()
+
+    result, (lines, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map", *extra_args
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 0
+    assert lines and not any(lines.values())
+    assert "1 unverified code-match candidates" in result.stderr
+    if ordered:
+        assert "retained 2 unresolved execution boundaries" in result.stderr
+    else:
+        assert "2 execution events in 2 unresolved aggregates" in result.stderr
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_v1_auto_map_replays_code_candidate_after_anchor(
+    run_etrace, tmp_path, x86_fixture, ordered, explicit
+):
     linked = x86_fixture.start
     runtime = 0x30000000
+    physical = 0x200000
+    anchor = 0x40000000 if explicit else linked
+    code_len = len(x86_fixture.code)
     expected = run_lcov(
         run_etrace,
         tmp_path,
         x86_fixture,
         linked,
-        linked + len(x86_fixture.code),
+        linked + code_len,
     )
-    trace = tmp_path / "code-match.etrace"
+    trace = tmp_path / "anchored-code.etrace"
     trace.write_bytes(
         etrace_info(major=1)
         + etrace_tb_def(
             tb_id=1,
             vaddr=runtime,
             insns=tuple(x86_fixture.instructions),
+            mappings=((0, code_len, physical),),
             code=x86_fixture.code,
         )
         + etrace_tb_exec(
@@ -367,14 +419,65 @@ def test_v1_auto_map_uses_unique_code_match(run_etrace, tmp_path, x86_fixture):
             sequence=1,
             insn_count=len(x86_fixture.instructions),
         )
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=anchor,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, code_len, physical),),
+            code=x86_fixture.code,
+        )
     )
+    extra_args = ["--preserve-order"] if ordered else []
+    if explicit:
+        extra_args += ["--address-map", f"{anchor:x}:{linked:x}:{code_len:x}"]
 
     result, actual = run_v1_lcov(
-        run_etrace, tmp_path, x86_fixture, trace, "--auto-map"
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map", *extra_args
     )
 
     assert result.returncode == 0, result.stderr
+    assert "unresolved" not in result.stderr
+    assert "unverified code-match candidates" not in result.stderr
     assert actual == expected
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_v1_auto_map_requires_anchor_to_cover_candidate(
+    run_etrace, tmp_path, x86_fixture, ordered
+):
+    physical = 0x200000
+    trace = tmp_path / "partial-anchor.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=0x30000000,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, len(x86_fixture.code), physical),),
+            code=x86_fixture.code,
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, insn_count=len(x86_fixture.instructions)
+        )
+        # This verified binding covers only the candidate's first seven bytes.
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=x86_fixture.start,
+            insns=tuple(x86_fixture.instructions[:3]),
+            mappings=((0, 7, physical),),
+            code=x86_fixture.code[:7],
+        )
+    )
+    extra_args = ("--preserve-order",) if ordered else ()
+
+    result, (lines, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map", *extra_args
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 0
+    assert lines and not any(lines.values())
+    assert "1 unverified code-match candidates" in result.stderr
 
 
 def test_v1_auto_map_enforces_unresolved_limit(
