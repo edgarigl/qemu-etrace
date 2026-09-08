@@ -175,7 +175,9 @@ aggregates and fails conversion on overflow.
 Add `--preserve-order` when chronological consumers need individual dynamic
 events rather than coverage-only aggregates. Dynamic events are journaled to a
 temporary file and replayed after mapping resolution. `--event-spool` selects a
-retained journal and `--event-spool-limit` bounds its size.
+retained journal and `--event-spool-limit` bounds its compressed storage size.
+`--event-spool-decoded-limit` independently bounds decoded work. Replay checks
+frame checksums and the full event-stream digest; see `docs/event-journal.md`.
 
 Runtime address mapping
 -----------------------

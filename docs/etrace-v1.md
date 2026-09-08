@@ -206,6 +206,17 @@ retained file with `--event-spool=PATH` and bound journal growth with
 `--event-spool-limit=BYTES`; the default limit is 1 GiB. Limit or I/O failures
 abort conversion without producing coverage.
 
+The journal uses bounded, lossless compressed frames. The storage limit counts
+encoded payloads, headers and the terminal integrity record; socket gzip is
+independent. `--event-spool-decoded-limit=BYTES` sets a separate limit on
+decoded dynamic record bytes (unlimited by default, up to the 64-bit counter
+range). Capture and replay report progress every 64 MiB of logical records,
+including execution/gap/discontinuity counts. Final diagnostics report logical
+and stored sizes, frame counts, and the verified SHA-256 of the original
+dynamic record stream. See [event-journal.md](event-journal.md) for the codec
+and buffer accounting. Incomplete final producer status remains fatal before
+replay, and journal integrity failure prevents coverage output.
+
 Resolved executions retain their original per-vCPU sequence and stream
 interleaving. An execution which remains unresolved is emitted as a `U`
 boundary, so future branch analysis can reset predecessor state instead of

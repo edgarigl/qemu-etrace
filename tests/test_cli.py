@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_help_lists_trace_and_coverage_formats(run_etrace):
     result = run_etrace("--help")
 
@@ -10,6 +13,7 @@ def test_help_lists_trace_and_coverage_formats(run_etrace):
     assert "--coverage-inventory" in result.stdout
     assert "--auto-map" in result.stdout
     assert "--preserve-order" in result.stdout
+    assert "--event-spool-decoded-limit" in result.stdout
 
 
 def test_trace_argument_is_required(run_etrace):
@@ -84,13 +88,15 @@ def test_event_spool_requires_preserve_order(run_etrace, tmp_path):
     assert "An event spool requires --preserve-order" in result.stderr
 
 
-def test_event_spool_limit_must_be_positive(run_etrace, tmp_path):
+@pytest.mark.parametrize("option", ["--event-spool-limit", "--event-spool-decoded-limit"])
+@pytest.mark.parametrize("value", ["0", "-1", "+1", " 1", "18446744073709551616"])
+def test_event_spool_limit_must_be_positive(run_etrace, tmp_path, option, value):
     trace = tmp_path / "empty.etrace"
     trace.write_bytes(b"")
 
     result = run_etrace(
-        "--trace", trace, "--event-spool-limit", "0"
+        "--trace", trace, option, value
     )
 
     assert result.returncode != 0
-    assert "Invalid event spool limit" in result.stderr
+    assert "Invalid event spool" in result.stderr

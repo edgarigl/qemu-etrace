@@ -43,6 +43,7 @@
 #include "trace.h"
 #include "etrace.h"
 #include "etrace-hash.h"
+#include "event-journal.h"
 
 #define ETRACE_MAX_VERSION_MAJOR ETRACE_VERSION_TB_EXEC
 
@@ -68,8 +69,9 @@ struct etracer {
 	uint64_t ambiguous_tbs;
 	uint64_t code_candidates;
 	FILE *event_spool;
-	uint64_t event_spool_bytes;
-	uint64_t event_spool_limit;
+	struct event_journal *journal;
+	uint64_t journal_counts[3];
+	uint64_t journal_reported;
 	uint64_t ordered_unresolved;
 	bool preserve_order;
 	uint64_t *last_sequence;
@@ -139,18 +141,42 @@ static void etrace_tb_definition_free(void *opaque)
 	free(definition);
 }
 
+static void etrace_report_journal(struct etracer *t, const char *phase)
+{
+	struct event_journal_stats stats;
+
+	event_journal_get_stats(t->journal, &stats);
+	fprintf(stderr, "Ordered journal %s: tb-exec=%" PRIu64
+		" context-gap=%" PRIu64 " discontinuity=%" PRIu64
+		" logical=%" PRIu64 " stored=%" PRIu64 " frames=%" PRIu64
+		" buffered-logical=%zu reserved=%zu\n",
+		phase, t->journal_counts[0], t->journal_counts[1],
+		t->journal_counts[2], stats.logical_bytes, stats.stored_bytes,
+		stats.frames, stats.buffered_logical_bytes, stats.reserved_bytes);
+	t->journal_reported = stats.logical_bytes;
+}
+
 static bool etrace_spool_event(struct etracer *t)
 {
 	size_t len = sizeof(t->pkg->hdr) + t->pkg->hdr.len;
+	struct event_journal_stats stats;
 
-	if (!t->event_spool)
-		return etrace_invalid_pkg(t->pkg, "missing ordered event spool");
-	if (t->event_spool_bytes > t->event_spool_limit
-	    || len > t->event_spool_limit - t->event_spool_bytes)
-		return etrace_invalid_pkg(t->pkg, "event spool limit exceeded");
-	if (fwrite(t->pkg, 1, len, t->event_spool) != len)
-		return etrace_invalid_pkg(t->pkg, "unable to write event spool");
-	t->event_spool_bytes += len;
+	if (!event_journal_append(t->journal, t->pkg, len))
+		return etrace_invalid_pkg(t->pkg, event_journal_error(t->journal));
+	switch (t->pkg->hdr.type) {
+	case TYPE_TB_EXEC:
+		t->journal_counts[0]++;
+		break;
+	case TYPE_CONTEXT_GAP:
+		t->journal_counts[1]++;
+		break;
+	case TYPE_DISCONTINUITY:
+		t->journal_counts[2]++;
+		break;
+	}
+	event_journal_get_stats(t->journal, &stats);
+	if (stats.logical_bytes - t->journal_reported >= UINT64_C(64) * 1024 * 1024)
+		etrace_report_journal(t, "capture");
 	return true;
 }
 
@@ -1322,15 +1348,17 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 					 enum cov_format cov_fmt)
 {
 	struct etrace_hdr hdr;
-	size_t got;
+	ssize_t got;
+	uint64_t counts[3] = { 0 };
+	uint64_t replayed_bytes = 0, reported_bytes = 0;
 
-	if (fflush(t->event_spool) != 0
-	    || fseek(t->event_spool, 0, SEEK_SET) != 0) {
-		fprintf(stderr, "Unable to rewind ordered event spool: %s\n",
-			strerror(errno));
+	if (!event_journal_rewind(t->journal)) {
+		fprintf(stderr, "Ordered event spool: %s\n",
+			event_journal_error(t->journal));
 		return false;
 	}
-	while ((got = fread(&hdr, 1, sizeof(hdr), t->event_spool)) != 0) {
+	etrace_report_journal(t, "replay-start");
+	while ((got = event_journal_read(t->journal, &hdr, sizeof(hdr))) > 0) {
 		if (got != sizeof(hdr)) {
 			fprintf(stderr, "Truncated ordered event spool header\n");
 			return false;
@@ -1340,8 +1368,10 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 			return false;
 		}
 		t->pkg->hdr = hdr;
-		if (fread(t->pkg->u8, 1, hdr.len, t->event_spool) != hdr.len) {
-			fprintf(stderr, "Truncated ordered event spool\n");
+		if (event_journal_read(t->journal, t->pkg->u8, hdr.len) != hdr.len) {
+			fprintf(stderr, "Ordered event spool: %s\n",
+				event_journal_error(t->journal) ?
+				event_journal_error(t->journal) : "truncated record");
 			return false;
 		}
 		switch (hdr.type) {
@@ -1349,6 +1379,8 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 		{
 			const struct etrace_tb_exec *tb_exec = &t->pkg->tb_exec;
 			struct etrace_tb_definition *definition;
+
+			counts[0]++;
 
 			if (hdr.len < sizeof(*tb_exec)) {
 				fprintf(stderr, "Short ordered TB execution record\n");
@@ -1388,6 +1420,7 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 			break;
 		}
 		case TYPE_CONTEXT_GAP:
+			counts[1]++;
 			if (hdr.len < sizeof(t->pkg->context_gap)) {
 				fprintf(stderr, "Short ordered context gap record\n");
 				return false;
@@ -1396,6 +1429,7 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 						  &t->pkg->context_gap);
 			break;
 		case TYPE_DISCONTINUITY:
+			counts[2]++;
 			if (hdr.len < sizeof(t->pkg->discontinuity)) {
 				fprintf(stderr, "Short ordered discontinuity record\n");
 				return false;
@@ -1407,12 +1441,27 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 				hdr.type);
 			return false;
 		}
+		replayed_bytes += sizeof(hdr) + hdr.len;
+		if (replayed_bytes - reported_bytes >= UINT64_C(64) * 1024 * 1024) {
+			fprintf(stderr, "Ordered journal replay-progress: bytes=%" PRIu64
+				" tb-exec=%" PRIu64 " context-gap=%" PRIu64
+				" discontinuity=%" PRIu64 "\n",
+				replayed_bytes, counts[0], counts[1], counts[2]);
+			reported_bytes = replayed_bytes;
+		}
 	}
-	if (ferror(t->event_spool)) {
-		fprintf(stderr, "Unable to read ordered event spool: %s\n",
-			strerror(errno));
+	if (got < 0) {
+		fprintf(stderr, "Ordered event spool: %s\n",
+			event_journal_error(t->journal));
 		return false;
 	}
+	if (memcmp(counts, t->journal_counts, sizeof(counts))) {
+		fprintf(stderr, "Ordered event spool record counts differ\n");
+		return false;
+	}
+	etrace_report_journal(t, "replay-complete");
+	fprintf(stderr, "Ordered journal verified sha256=%s\n",
+		event_journal_digest(t->journal));
 	return true;
 }
 
@@ -1425,7 +1474,7 @@ void etrace_show(int fd, FILE *fp_out,
 		 const struct address_map *address_map,
 		 bool auto_map, size_t unresolved_limit,
 		 bool preserve_order, const char *event_spool,
-		 uint64_t event_spool_limit)
+		 uint64_t event_spool_limit, uint64_t event_spool_decoded_limit)
 {
 	struct etracer t = { 0 };
 	bool unknown_pkg_warn = false;
@@ -1441,7 +1490,6 @@ void etrace_show(int fd, FILE *fp_out,
 	t.auto_map = auto_map;
 	t.unresolved_limit = unresolved_limit;
 	t.preserve_order = preserve_order;
-	t.event_spool_limit = event_spool_limit;
 	if (preserve_order) {
 		t.event_spool = event_spool ? fopen(event_spool, "w+b") : tmpfile();
 		if (!t.event_spool) {
@@ -1449,6 +1497,8 @@ void etrace_show(int fd, FILE *fp_out,
 				strerror(errno));
 			exit(EXIT_FAILURE);
 		}
+		t.journal = event_journal_new(t.event_spool, event_spool_limit,
+					     event_spool_decoded_limit);
 	}
 	t.tr.host.objdump = objdump;
 	t.tr.host.machine = machine;
@@ -1635,6 +1685,7 @@ void etrace_show(int fd, FILE *fp_out,
 		exit(EXIT_FAILURE);
 	if (t.preserve_order && t.final_status_seen)
 		etrace_output_status(&t);
+	event_journal_free(t.journal);
 	if (t.event_spool && fclose(t.event_spool) != 0) {
 		fprintf(stderr, "Unable to close ordered event spool: %s\n",
 			strerror(errno));

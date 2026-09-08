@@ -34,6 +34,6 @@ void etrace_show(int fd, FILE *fp_out,
 		 const struct address_map *address_map,
 		 bool auto_map, size_t unresolved_limit,
 		 bool preserve_order, const char *event_spool,
-		 uint64_t event_spool_limit);
+		 uint64_t event_spool_limit, uint64_t event_spool_decoded_limit);
 
 #endif

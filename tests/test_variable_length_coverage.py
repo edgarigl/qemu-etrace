@@ -1,10 +1,13 @@
 from pathlib import Path
+import hashlib
 import shutil
 import struct
 import subprocess
 from types import SimpleNamespace
 
 import pytest
+
+from tests.journal_reader import decode_journal
 
 from tests.trace_builder import (
     ETRACE_INFO_F_FILTERED,
@@ -662,7 +665,7 @@ def test_v1_ordered_replay_preserves_dynamic_events(
     assert dynamic == ["E", "D", "G", "E"]
     assert spool.stat().st_size > 0
     records = []
-    data = spool.read_bytes()
+    data = decode_journal(spool.read_bytes())
     offset = 0
     while offset < len(data):
         record_type, _, payload_len = struct.unpack_from("=HHI", data, offset)
@@ -715,6 +718,113 @@ def test_v1_ordered_replay_preserves_vcpu_interleaving(
         if line.startswith("E")
     ]
     assert units == ["E1", "E2", "E1"]
+
+
+def test_v1_journal_preserves_record_bytes_and_coverage(
+    run_etrace, tmp_path, x86_fixture
+):
+    sequences = [0, 0]
+    events = []
+    gap_count = 0
+    for number in range(10000):
+        cpu = number % 2
+        sequences[cpu] += 1
+        events.append(etrace_tb_exec(
+            sequence=sequences[cpu], time=number * 7, duration=number % 19,
+            insn_count=1 + number % len(x86_fixture.instructions), unit_id=cpu,
+            extension=b"\xa5" * (number % 11),
+        ))
+        if number % 97 == 0:
+            sequences[cpu] += 1
+            gap_count += 1
+            events.append(etrace_context_gap(
+                sequence=sequences[cpu], filtered_execs=1, unit_id=cpu,
+            ))
+            events.append(etrace_discontinuity(
+                from_pc=x86_fixture.start, to_pc=x86_fixture.start + 8,
+                kind=1, unit_id=cpu,
+            ))
+    logical = b"".join(events)
+    trace = tmp_path / "journal-roundtrip.etrace"
+    trace.write_bytes(
+        etrace_info(
+            major=1,
+            attributes=ETRACE_INFO_F_FILTERED | ETRACE_INFO_F_FINAL_STATUS,
+        )
+        + etrace_tb_def(
+            vaddr=x86_fixture.start, insns=tuple(x86_fixture.instructions),
+            code=x86_fixture.code,
+        )
+        + logical
+        + etrace_status_v1(filtered_execs=gap_count)
+    )
+    reference, expected = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map"
+    )
+    assert reference.returncode == 0, reference.stderr
+    spool = tmp_path / "journal-roundtrip.bin"
+    result, actual = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, "--auto-map",
+        "--preserve-order", "--event-spool", spool,
+        "--event-spool-decoded-limit", len(logical),
+    )
+    assert result.returncode == 0, result.stderr
+    assert actual == expected
+    assert decode_journal(spool.read_bytes()) == logical
+    assert spool.stat().st_size < len(logical) / 2
+    assert f"sha256={hashlib.sha256(logical).hexdigest()}" in result.stderr
+    assert f"logical={len(logical)} stored={spool.stat().st_size}" in result.stderr
+    assert f"tb-exec=10000 context-gap={gap_count} discontinuity={gap_count}" in result.stderr
+
+    # Encoding and its storage footprint are independent of the configured cap.
+    exact = spool.stat().st_size
+    for limit, succeeds in ((exact, True), (exact - 1, False)):
+        output = tmp_path / f"bounded-{limit}.info"
+        checked = run_etrace(
+            "--trace", trace, "--trace-output", "none", "--elf", x86_fixture.binary,
+            "--auto-map", "--preserve-order", "--event-spool", spool,
+            "--event-spool-limit", limit, "--coverage-format", "lcov",
+            "--coverage-output", output,
+        )
+        assert (checked.returncode == 0) == succeeds, checked.stderr
+        assert output.exists() == succeeds
+        assert spool.stat().st_size <= limit
+        if succeeds:
+            assert decode_journal(spool.read_bytes()) == logical
+        else:
+            assert "event spool limit exceeded" in checked.stderr
+
+    output = tmp_path / "decoded-limit.info"
+    checked = run_etrace(
+        "--trace", trace, "--trace-output", "none", "--elf", x86_fixture.binary,
+        "--auto-map", "--preserve-order", "--event-spool-decoded-limit",
+        len(logical) - 1, "--coverage-format", "lcov", "--coverage-output", output,
+    )
+    assert checked.returncode != 0
+    assert "event spool decoded limit exceeded" in checked.stderr
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("status", [b"", etrace_status_v1(code_errors=1)])
+def test_v1_journal_requires_successful_producer_status(
+    run_etrace, tmp_path, x86_fixture, status
+):
+    trace = tmp_path / "invalid-journal-status.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_FINAL_STATUS)
+        + etrace_tb_def(vaddr=x86_fixture.start, code=x86_fixture.code[:1], insns=((0, 1),))
+        + etrace_tb_exec() + status
+    )
+    output = tmp_path / "invalid-journal-status.info"
+    result = run_etrace(
+        "--trace", trace, "--trace-output", "none", "--elf", x86_fixture.binary,
+        "--auto-map", "--preserve-order", "--coverage-format", "lcov",
+        "--coverage-output", output,
+    )
+    assert result.returncode != 0
+    assert "producer" in result.stderr
+    assert "replay-complete" not in result.stderr
+    assert not output.exists()
 
 
 def test_v1_ordered_replay_enforces_spool_limit(

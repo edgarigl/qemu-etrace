@@ -102,6 +102,7 @@ struct
 	bool preserve_order;
 	char *event_spool;
 	uint64_t event_spool_limit;
+	uint64_t event_spool_decoded_limit;
 	bool server;
 	char *coverage_output;
 	char *coverage_inventory;
@@ -130,6 +131,7 @@ struct
 	.server = true,
 	.unresolved_limit = 65536,
 	.event_spool_limit = UINT64_C(1) << 30,
+	.event_spool_decoded_limit = UINT64_MAX,
 };
 
 static const char etrace_usagestr[] = \
@@ -160,6 +162,7 @@ static const char etrace_usagestr[] = \
 "--preserve-order       Replay auto-mapped events in original order.\n"
 "--event-spool          Ordered-event journal path (temporary by default).\n"
 "--event-spool-limit    Maximum ordered-event journal size in bytes.\n"
+"--event-spool-decoded-limit Maximum decoded journal bytes (default: unlimited).\n"
 "\n";
 
 void usage(void)
@@ -254,6 +257,7 @@ static void parse_arguments(int argc, char **argv)
 			{"preserve-order", no_argument, 0, 1002 },
 			{"event-spool", required_argument, 0, 1003 },
 			{"event-spool-limit", required_argument, 0, 1004 },
+			{"event-spool-decoded-limit", required_argument, 0, 1005 },
 			{"gcov-strip", required_argument, 0, 'z' },
 			{"gcov-prefix", required_argument, 0, 'p' },
 			{0,         0,                 0,  0 }
@@ -361,17 +365,23 @@ static void parse_arguments(int argc, char **argv)
 			args.event_spool = optarg;
 			break;
 		case 1004:
+		case 1005:
 		{
 			char *end;
 			unsigned long long limit;
 
 			errno = 0;
 			limit = strtoull(optarg, &end, 0);
-			if (errno || end == optarg || *end || !limit) {
-				fprintf(stderr, "Invalid event spool limit %s\n", optarg);
+			if (errno || end == optarg || *end || !limit
+			    || optarg[0] < '0' || optarg[0] > '9') {
+				fprintf(stderr, "Invalid event spool %slimit %s\n",
+					c == 1005 ? "decoded " : "", optarg);
 				exit(EXIT_FAILURE);
 			}
-			args.event_spool_limit = limit;
+			if (c == 1005)
+				args.event_spool_decoded_limit = limit;
+			else
+				args.event_spool_limit = limit;
 			break;
 		}
 		case 'y':
@@ -486,7 +496,7 @@ void trace_show(int fd, FILE *fp_out,
 		 const struct address_map *address_map,
 		 bool auto_map, size_t unresolved_limit,
 		 bool preserve_order, const char *event_spool,
-		 uint64_t event_spool_limit)
+		 uint64_t event_spool_limit, uint64_t event_spool_decoded_limit)
 {
 	switch (trace_in_fmt) {
 	case TRACE_ETRACE:
@@ -496,7 +506,7 @@ void trace_show(int fd, FILE *fp_out,
 			    sym_tree, cov_fmt,
 			    trace_in_fmt, trace_out_fmt, address_map,
 			    auto_map, unresolved_limit, preserve_order,
-			    event_spool, event_spool_limit);
+			    event_spool, event_spool_limit, event_spool_decoded_limit);
 		break;
 	case TRACE_ASCII_HEX:
 	case TRACE_ASCII_HEX_LE16:
@@ -587,7 +597,7 @@ int main(int argc, char **argv)
 			   &args.address_map,
 			   args.auto_map, args.unresolved_limit,
 			   args.preserve_order, args.event_spool,
-			   args.event_spool_limit);
+			   args.event_spool_limit, args.event_spool_decoded_limit);
 		close(fd);
 	} while (is_socket && !got_sigint && args.server);
 
