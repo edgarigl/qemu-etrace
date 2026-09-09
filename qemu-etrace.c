@@ -573,6 +573,13 @@ int main(int argc, char **argv)
 
 	if (args.elf) {
 		sym_read_from_elf(&sym_tree, args.nm, args.elf);
+		if (args.elf_context.configured
+		    && args.elf_context.architecture
+			!= sym_get_elf_machine(&sym_tree)) {
+			fprintf(stderr,
+				"ELF context architecture does not match the ELF\n");
+			exit(EXIT_FAILURE);
+		}
 		if (args.coverage_format != NONE)
 			sym_build_linemap(&sym_tree, args.dwarfdump, args.elf);
 	}

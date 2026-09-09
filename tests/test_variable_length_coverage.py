@@ -359,6 +359,29 @@ def test_v1_elf_context_requires_trace_contexts(
     assert "requires trace context records" in result.stderr
 
 
+def test_elf_context_requires_matching_elf_architecture(
+    run_etrace, tmp_path, x86_fixture
+):
+    trace = tmp_path / "elf-context-architecture.etrace"
+    trace.write_bytes(b"")
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        x86_fixture.binary,
+        "--nm",
+        x86_fixture.tools["nm"],
+        "--elf-context",
+        "aarch64:el2",
+    )
+
+    assert result.returncode != 0
+    assert "architecture does not match the ELF" in result.stderr
+
+
 @pytest.mark.parametrize("ordered", [False, True])
 @pytest.mark.parametrize(("anchor_privilege", "expected_hit"), [(0, 2), (3, 0)])
 def test_v1_elf_context_qualifies_mapping_anchor(

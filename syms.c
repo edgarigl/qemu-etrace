@@ -89,6 +89,7 @@ struct sym_store {
 	size_t nr_sections;
 	struct sym_load_segment *load_segments;
 	size_t nr_load_segments;
+	uint16_t elf_machine;
 	bool x86_64;
 };
 
@@ -152,6 +153,7 @@ static void read_executable_load_segments(struct sym_store *ss,
 	}
 	big_endian = header[EI_DATA] == ELFDATA2MSB;
 	elf64_format = header[EI_CLASS] == ELFCLASS64;
+	ss->elf_machine = elf16(header + 18, big_endian);
 	if (elf64_format) {
 		program_offset = elf64(header + 32, big_endian);
 		program_size = elf16(header + 54, big_endian);
@@ -240,6 +242,13 @@ const struct sym_load_segment *sym_get_executable_load_segments(
 	}
 	*nr_segments = ss->nr_load_segments;
 	return ss->load_segments;
+}
+
+uint16_t sym_get_elf_machine(void **store)
+{
+	struct sym_store *ss = *store;
+
+	return ss ? ss->elf_machine : EM_NONE;
 }
 
 void sym_show(const char *prefix, const struct sym *s)

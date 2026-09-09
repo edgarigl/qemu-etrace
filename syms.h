@@ -116,5 +116,6 @@ const struct sym_source_range *sym_get_source_ranges(void **store,
 						      size_t *nr_ranges);
 const struct sym_load_segment *sym_get_executable_load_segments(
 	void **store, size_t *nr_segments);
+uint16_t sym_get_elf_machine(void **store);
 
 #endif
