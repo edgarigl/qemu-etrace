@@ -110,7 +110,9 @@ selection complements address and byte validation; it does not identify an
 image by itself. A matching execution at a byte-verified linked ELF address
 can establish the load bias for the ELF's executable load segments. Physical
 executions within those segments are then checked against their derived ELF
-addresses before coverage is credited.
+addresses before coverage is credited. An incomplete early context can use
+that established ownership after its architecture and TB bytes are checked;
+an explicitly different privilege level remains excluded.
 
 With `--auto-map`, unmatched TB executions are aggregated until their code and
 physical mappings can be associated with the input ELF. Resolution replays the

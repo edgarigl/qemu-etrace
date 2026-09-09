@@ -112,6 +112,7 @@ struct etrace_tb_definition {
 	bool mapping_anchor;
 	bool bindings_seeded;
 	bool infer_image_mapping;
+	bool owned_mapping;
 };
 
 struct pending_tb_exec {
@@ -159,6 +160,29 @@ static bool context_matches_elf(const struct etracer *t, uint64_t context_id)
 	context = g_hash_table_lookup(t->contexts, &context_id);
 	return context && elf_context_matches(t->elf_context,
 		context->architecture, context->privilege, context->flags);
+}
+
+static bool context_is_incomplete_for_elf(const struct etracer *t,
+					  uint64_t context_id)
+{
+	const struct observed_context *context;
+
+	if (!t->elf_context || !t->elf_context->configured || !context_id)
+		return false;
+	context = g_hash_table_lookup(t->contexts, &context_id);
+	return context
+		&& context->architecture == t->elf_context->architecture
+		&& (context->flags & ETRACE_CONTEXT_F_INCOMPLETE)
+		&& !(context->flags & ETRACE_CONTEXT_F_PRIVILEGE_VALID);
+}
+
+static bool execution_context_matches_elf(
+	const struct etracer *t, const struct etrace_tb_definition *definition,
+	uint64_t context_id)
+{
+	return context_matches_elf(t, context_id)
+		|| (definition->owned_mapping
+		    && context_is_incomplete_for_elf(t, context_id));
 }
 
 static bool address_map_covers_linked_range(const struct address_map *map,
@@ -1037,6 +1061,7 @@ static bool resolve_tb_definition(struct etracer *t,
 			return false;
 		definition->resolved = true;
 		definition->linked_vaddr = linked;
+		definition->owned_mapping = explicit_map;
 	} else if (resolve_from_physical(t, definition, &linked)
 		   && linked <= UINT64_MAX - definition->size
 		   && sym_range_is_executable(t->tr.sym_tree, linked,
@@ -1046,6 +1071,7 @@ static bool resolve_tb_definition(struct etracer *t,
 					    definition->code, definition->size)) {
 		definition->resolved = true;
 		definition->linked_vaddr = linked;
+		definition->owned_mapping = true;
 	} else if (!definition->code_searched && definition->code
 		   && definition->size >= 8) {
 		size_t count = sym_find_code_matches(t->tr.sym_tree,
@@ -1090,8 +1116,11 @@ static void replay_pending(struct etracer *t,
 		const struct pending_tb_exec *pending = &g_array_index(
 			definition->pending, struct pending_tb_exec, i);
 
-		etrace_emit_tb_execution(t, definition, pending, cov_fmt);
-		t->resolved_events += pending->count;
+		if (execution_context_matches_elf(t, definition,
+						 pending->context_id)) {
+			etrace_emit_tb_execution(t, definition, pending, cov_fmt);
+			t->resolved_events += pending->count;
+		}
 		t->unresolved_events -= pending->count;
 	}
 	t->unresolved_entries -= definition->pending->len;
@@ -1291,9 +1320,13 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 		}
 		return true;
 	}
-	if (!context_matches_elf(t, tb_exec->context_id)) {
+	if (!execution_context_matches_elf(t, definition, tb_exec->context_id)) {
 		if (!t->preserve_order)
-			return true;
+			return t->auto_map && !definition->resolved
+				&& context_is_incomplete_for_elf(
+					t, tb_exec->context_id)
+				? append_pending_execution(t, definition, tb_exec)
+				: true;
 		goto ordered_unresolved;
 	}
 	if (t->auto_map && !definition->resolved) {
@@ -1700,7 +1733,8 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 				return false;
 			}
 			if (definition->resolved
-			    && context_matches_elf(t, tb_exec->context_id)) {
+			    && execution_context_matches_elf(
+					t, definition, tb_exec->context_id)) {
 				struct pending_tb_exec execution = {
 					.context_id = tb_exec->context_id,
 					.count = 1,

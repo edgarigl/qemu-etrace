@@ -169,6 +169,13 @@ Executions in unknown or nonmatching contexts do not contribute coverage.
 The selector qualifies image attribution; the ELF header continues to supply
 the instruction architecture used for symbols and disassembly.
 
+An early execution may carry an incomplete context when register sampling is
+deliberately unavailable. After a matching-context anchor establishes the
+image mapping, an incomplete execution in the same architecture can contribute
+coverage only when its physical span belongs to that mapping and its captured
+bytes match the derived ELF address. A recorded, nonmatching privilege level
+is never accepted through this fallback.
+
 `qemu-etrace --auto-map` retains unresolved version 1 executions sparsely by
 TB, context, vCPU, and dispatched prefix. It resolves them using, in order:
 
