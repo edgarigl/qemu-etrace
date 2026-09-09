@@ -4,6 +4,12 @@ The internal journal stores the original dynamic record bytes in bounded
 frames. It is independent of the ETrace wire format and of socket gzip.
 Compression does not aggregate, filter, or reorder executions.
 
+With a context-qualified automatic image mapping, the journal contains only
+the discovery prefix. The analyzer verifies and replays that prefix before
+closing the journal, then consumes later ordered events online. If discovery
+does not establish a mapping, the journal extends to end of input and is
+replayed there.
+
 The version 1 container uses little-endian integers. Its 16-byte file header
 contains the eight bytes `ETJRNL01`, a 32-bit decoded frame capacity (65536),
 and a zero 32-bit reserved field. Each frame has four 32-bit fields:

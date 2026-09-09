@@ -215,20 +215,26 @@ This preserves line and function coverage, but not the original ordering of
 unresolved TBs; chronological branch reconstruction will need an ordered spill
 or event log rather than this aggregate mode.
 
-Add `--preserve-order` to use that disk-backed event log. The first pass learns
-all available image bindings while appending TB executions, context gaps, and
-discontinuities to an ordered journal. A second pass replays those records in
-their original stream order:
+Add `--preserve-order` to use that disk-backed event log. When a
+context-qualified image mapping is established, the analyzer pauses input
+consumption, verifies and replays the discovery prefix, closes the journal,
+and processes the remaining stream online. If no such mapping appears, replay
+occurs after end of input. Both paths preserve the producer's observed stream
+interleaving and per-vCPU sequence:
 
 ```sh
 qemu-etrace --trace xen.etrace --elf xen-syms.debug \
     --auto-map --preserve-order ...
 ```
 
+An explicit address map that covers every executable `PT_LOAD` segment starts
+ordered online processing immediately, so its discovery journal is empty.
+
 The default journal uses an automatically removed temporary file. Select a
 retained file with `--event-spool=PATH` and bound journal growth with
-`--event-spool-limit=BYTES`; the default limit is 1 GiB. Limit or I/O failures
-abort conversion without producing coverage.
+`--event-spool-limit=BYTES`; the default limit is 1 GiB. A retained journal
+contains the verified discovery prefix when processing switches online. Limit
+or I/O failures abort conversion without producing coverage.
 
 The journal uses bounded, lossless compressed frames. The storage limit counts
 encoded payloads, headers and the terminal integrity record; socket gzip is

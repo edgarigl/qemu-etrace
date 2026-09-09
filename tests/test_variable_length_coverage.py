@@ -502,6 +502,161 @@ def test_v1_context_anchor_maps_executable_load_segment(
         assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 
+def test_v1_context_anchor_releases_ordered_journal(
+    run_etrace, tmp_path, x86_fixture
+):
+    physical = 0x200000
+    entry_instructions = tuple(x86_fixture.instructions[:3])
+    entry_size = sum(size for _, size in entry_instructions)
+    anchor_instructions = tuple(
+        (offset - entry_size, size)
+        for offset, size in x86_fixture.instructions[3:]
+    )
+    trace = tmp_path / "ordered-prefix.etrace"
+    spool = tmp_path / "ordered-prefix.journal"
+    packets = [
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT),
+        etrace_context(
+            context_id=1,
+            pc=physical,
+            architecture=62,
+            privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        ),
+        etrace_tb_def(
+            tb_id=1,
+            vaddr=physical,
+            insns=entry_instructions,
+            mappings=((0, entry_size, physical),),
+            code=x86_fixture.code[:entry_size],
+        ),
+        etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1,
+            insn_count=len(entry_instructions),
+        ),
+        etrace_tb_def(
+            tb_id=2,
+            vaddr=x86_fixture.start + entry_size,
+            insns=anchor_instructions,
+            mappings=((0, len(x86_fixture.code) - entry_size,
+                       physical + entry_size),),
+            code=x86_fixture.code[entry_size:],
+        ),
+        etrace_tb_exec(
+            tb_id=2, sequence=2, context_id=1,
+            insn_count=len(anchor_instructions),
+        ),
+    ]
+    packets.extend(
+        etrace_tb_exec(
+            tb_id=1, sequence=sequence, context_id=1,
+            insn_count=len(entry_instructions),
+        )
+        for sequence in range(3, 203)
+    )
+    trace.write_bytes(b"".join(packets))
+
+    result, (_, functions) = run_v1_lcov(
+        run_etrace,
+        tmp_path,
+        x86_fixture,
+        trace,
+        "--auto-map",
+        "--elf-context",
+        "x86_64:cpl0",
+        "--preserve-order",
+        "--event-spool",
+        spool,
+        "--event-spool-decoded-limit",
+        "96",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 201
+    assert "switched to online processing" in result.stderr
+    journal = decode_journal(spool.read_bytes())
+    assert len(journal) == 96
+    assert [
+        struct.unpack_from("=H", journal, offset)[0]
+        for offset in range(0, len(journal), 48)
+    ] == [ETRACE_TYPE_TB_EXEC, ETRACE_TYPE_TB_EXEC]
+
+    copied = tmp_path / "ordered-prefix-copy.etrace"
+    copied_spool = tmp_path / "ordered-prefix-copy.journal"
+    passthrough = run_etrace(
+        "--trace",
+        trace,
+        "--trace-in-format",
+        "etrace",
+        "--trace-out-format",
+        "etrace",
+        "--trace-output",
+        copied,
+        "--elf",
+        x86_fixture.binary,
+        "--nm",
+        x86_fixture.tools["nm"],
+        "--auto-map",
+        "--elf-context",
+        "x86_64:cpl0",
+        "--preserve-order",
+        "--event-spool",
+        copied_spool,
+        "--event-spool-decoded-limit",
+        "96",
+    )
+    assert passthrough.returncode == 0, passthrough.stderr
+    assert copied.read_bytes() == trace.read_bytes()
+
+
+def test_v1_complete_explicit_map_skips_ordered_journal(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked_base = x86_fixture.start & ~0xFFFF
+    physical_base = 0x200000
+    physical = physical_base + x86_fixture.start - linked_base
+    trace = tmp_path / "ordered-explicit-map.etrace"
+    spool = tmp_path / "ordered-explicit-map.journal"
+    packets = [
+        etrace_info(major=1),
+        etrace_tb_def(
+            tb_id=1,
+            vaddr=physical,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, len(x86_fixture.code), physical),),
+            code=x86_fixture.code,
+        ),
+    ]
+    packets.extend(
+        etrace_tb_exec(
+            tb_id=1, sequence=sequence,
+            insn_count=len(x86_fixture.instructions),
+        )
+        for sequence in range(1, 101)
+    )
+    trace.write_bytes(b"".join(packets))
+
+    result, (_, functions) = run_v1_lcov(
+        run_etrace,
+        tmp_path,
+        x86_fixture,
+        trace,
+        "--auto-map",
+        "--address-map",
+        f"{physical_base:x}:{linked_base:x}:10000",
+        "--preserve-order",
+        "--event-spool",
+        spool,
+        "--event-spool-decoded-limit",
+        "1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 100
+    assert "switched to online processing" in result.stderr
+    assert decode_journal(spool.read_bytes()) == b""
+
+
 @pytest.mark.parametrize("physical", [0x200000, 0x200FFC, 0xFFFFFFFFFFFFF000])
 def test_v1_auto_map_replays_early_physical_execution(
     run_etrace, tmp_path, x86_fixture, physical

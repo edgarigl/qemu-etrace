@@ -143,6 +143,10 @@ static void etrace_output_exec(struct tracer *tr,
 			       void *opaque);
 static bool etrace_invalid_pkg(const struct etrace_pkg *pkg,
 			       const char *reason);
+static bool etrace_replay_ordered_events(struct etracer *t,
+					 enum cov_format cov_fmt);
+static bool etrace_finish_ordered_prefix(struct etracer *t,
+					 enum cov_format cov_fmt);
 
 static bool context_matches_elf(const struct etracer *t, uint64_t context_id)
 {
@@ -155,6 +159,49 @@ static bool context_matches_elf(const struct etracer *t, uint64_t context_id)
 	context = g_hash_table_lookup(t->contexts, &context_id);
 	return context && elf_context_matches(t->elf_context,
 		context->architecture, context->privilege, context->flags);
+}
+
+static bool address_map_covers_linked_range(const struct address_map *map,
+					    uint64_t start, uint64_t end)
+{
+	uint64_t cursor = start;
+
+	while (cursor < end) {
+		uint64_t covered_end = cursor;
+		size_t i;
+
+		for (i = 0; i < map->count; i++) {
+			const struct address_map_entry *entry = &map->entries[i];
+			uint64_t entry_end = entry->linked_start + entry->size;
+
+			if (entry->linked_start <= cursor && entry_end > covered_end)
+				covered_end = entry_end;
+		}
+		if (covered_end == cursor)
+			return false;
+		cursor = MIN(covered_end, end);
+	}
+	return true;
+}
+
+static bool explicit_map_covers_image(const struct etracer *t)
+{
+	const struct sym_load_segment *segments;
+	size_t count;
+	size_t i;
+
+	if (!t->tr.address_map || !t->tr.address_map->count)
+		return false;
+	segments = sym_get_executable_load_segments(t->tr.sym_tree, &count);
+	if (!segments || !count)
+		return false;
+	for (i = 0; i < count; i++) {
+		if (!address_map_covers_linked_range(t->tr.address_map,
+				segments[i].linked_start,
+				segments[i].linked_start + segments[i].memory_size))
+			return false;
+	}
+	return true;
 }
 
 static void etrace_tb_definition_free(void *opaque)
@@ -1195,6 +1242,7 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 	const struct etrace_tb_exec *tb_exec = &t->pkg->tb_exec;
 	struct etrace_tb_definition *definition;
 	struct pending_tb_exec execution;
+	bool established_image_mapping = false;
 
 	definition = g_hash_table_lookup(t->tb_defs, &tb_exec->tb_id);
 	if (!definition)
@@ -1215,7 +1263,11 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 	t->last_sequence[t->pkg->hdr.unit_id] = tb_exec->sequence;
 	if (definition->mapping_anchor && !definition->bindings_seeded
 	    && context_matches_elf(t, tb_exec->context_id)) {
+		uint64_t previous_mappings = t->inferred_image_mappings;
+
 		seed_physical_bindings(t, definition);
+		established_image_mapping = t->inferred_image_mappings
+			!= previous_mappings;
 		if (t->auto_map)
 			resolve_pending_definitions(t, cov_fmt);
 		if (t->binding_conflict)
@@ -1223,12 +1275,32 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 				"conflicting physical image mappings");
 	}
 
-	if (t->preserve_order)
-		return etrace_spool_event(t);
-	if (!context_matches_elf(t, tb_exec->context_id))
+	if (t->preserve_order && t->journal) {
+		if (!etrace_spool_event(t))
+			return false;
+		if (established_image_mapping) {
+			size_t packet_len = sizeof(t->pkg->hdr) + t->pkg->hdr.len;
+			uint8_t *packet = safe_malloc(packet_len);
+			bool success;
+
+			memcpy(packet, t->pkg, packet_len);
+			success = etrace_finish_ordered_prefix(t, cov_fmt);
+			memcpy(t->pkg, packet, packet_len);
+			free(packet);
+			return success;
+		}
 		return true;
-	if (t->auto_map && !definition->resolved)
-		return append_pending_execution(t, definition, tb_exec);
+	}
+	if (!context_matches_elf(t, tb_exec->context_id)) {
+		if (!t->preserve_order)
+			return true;
+		goto ordered_unresolved;
+	}
+	if (t->auto_map && !definition->resolved) {
+		if (!t->preserve_order)
+			return append_pending_execution(t, definition, tb_exec);
+		goto ordered_unresolved;
+	}
 	execution = (struct pending_tb_exec) {
 		.context_id = tb_exec->context_id,
 		.count = 1,
@@ -1239,6 +1311,18 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 		.flags = tb_exec->flags,
 	};
 	etrace_emit_tb_execution(t, definition, &execution, cov_fmt);
+	return true;
+
+ordered_unresolved:
+	t->ordered_unresolved++;
+	if (t->tr.fp_out) {
+		fprintf(t->tr.fp_out,
+			"U%u sequence=%" PRIu64 " tb=%" PRIx64
+			" context=%" PRIx64 " insns=%u\n",
+			t->pkg->hdr.unit_id, tb_exec->sequence,
+			tb_exec->tb_id, tb_exec->context_id,
+			tb_exec->insn_count);
+	}
 	return true;
 }
 
@@ -1315,7 +1399,7 @@ static bool etrace_process_context_gap(struct etracer *t)
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = gap->sequence;
 
-	if (t->preserve_order)
+	if (t->preserve_order && t->journal)
 		return etrace_spool_event(t);
 	if (t->tr.fp_out) {
 		fprintf(t->tr.fp_out,
@@ -1689,6 +1773,25 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 	return true;
 }
 
+static bool etrace_finish_ordered_prefix(struct etracer *t,
+					 enum cov_format cov_fmt)
+{
+	if (!etrace_replay_ordered_events(t, cov_fmt))
+		return false;
+	event_journal_free(t->journal);
+	t->journal = NULL;
+	if (fclose(t->event_spool) != 0) {
+		t->event_spool = NULL;
+		fprintf(stderr, "Unable to close ordered event spool: %s\n",
+			strerror(errno));
+		return false;
+	}
+	t->event_spool = NULL;
+	fprintf(stderr,
+		"Ordered replay switched to online processing after image mapping\n");
+	return true;
+}
+
 void etrace_show(int fd, FILE *fp_out,
 		 const char *objdump, const char *machine,
 		 const char *guest_objdump, const char *guest_machine,
@@ -1755,6 +1858,11 @@ void etrace_show(int fd, FILE *fp_out,
 		fprintf(stderr, "Unable to allocate ETrace sequence state\n");
 		exit(EXIT_FAILURE);
 	}
+	if (t.preserve_order && explicit_map_covers_image(&t)
+	    && !etrace_finish_ordered_prefix(&t, cov_fmt)) {
+		fprintf(stderr, "Unable to start ordered online processing\n");
+		exit(EXIT_FAILURE);
+	}
 
 	/* Short path for passthrough.  */
 	if (trace_out_fmt == trace_in_fmt) {
@@ -1807,7 +1915,7 @@ void etrace_show(int fd, FILE *fp_out,
 			etrace_process_event_u64(&t);
 			break;
 		case TYPE_DISCONTINUITY:
-			if (t.preserve_order) {
+			if (t.preserve_order && t.journal) {
 				if (!etrace_spool_event(&t)) {
 					free(t.pkg);
 					exit(EXIT_FAILURE);
@@ -1915,7 +2023,7 @@ void etrace_show(int fd, FILE *fp_out,
 			t.code_errors);
 		exit(EXIT_FAILURE);
 	}
-	if (t.preserve_order
+	if (t.preserve_order && t.journal
 	    && !etrace_replay_ordered_events(&t, cov_fmt))
 		exit(EXIT_FAILURE);
 	if (t.preserve_order && t.final_status_seen)
