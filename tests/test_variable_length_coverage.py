@@ -10,12 +10,15 @@ import pytest
 from tests.journal_reader import decode_journal
 
 from tests.trace_builder import (
+    ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+    ETRACE_INFO_F_CONTEXT,
     ETRACE_INFO_F_FILTERED,
     ETRACE_INFO_F_FINAL_STATUS,
     ETRACE_TYPE_CONTEXT_GAP,
     ETRACE_TYPE_DISCONTINUITY,
     ETRACE_TYPE_TB_EXEC,
     etrace_arch,
+    etrace_context,
     etrace_context_gap,
     etrace_discontinuity,
     etrace_exec64,
@@ -284,6 +287,138 @@ def test_v1_partial_tb_matches_execution_range(run_etrace, tmp_path, x86_fixture
 
     assert v1_lines == legacy_lines
     assert v1_functions == legacy_functions
+
+
+@pytest.mark.parametrize(("selector", "expected_hit"), [
+    ("x86_64:cpl0", 1),
+    ("x86_64:cpl3", 0),
+])
+@pytest.mark.parametrize("ordered", [False, True])
+def test_v1_elf_context_qualifies_coverage(
+    run_etrace, tmp_path, x86_fixture, selector, expected_hit, ordered
+):
+    trace = tmp_path / f"elf-context-{selector.replace(':', '-')}.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=3,
+            pc=x86_fixture.start,
+            architecture=62,
+            privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=7,
+            vaddr=x86_fixture.start,
+            insns=tuple(x86_fixture.instructions),
+            code=x86_fixture.code,
+        )
+        + etrace_tb_exec(
+            tb_id=7,
+            sequence=1,
+            context_id=3,
+            insn_count=len(x86_fixture.instructions),
+        )
+    )
+
+    extra_args = ["--elf-context", selector]
+    if ordered:
+        extra_args += ["--auto-map", "--preserve-order"]
+    result, (_, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, *extra_args
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == expected_hit
+
+
+def test_v1_elf_context_requires_trace_contexts(
+    run_etrace, tmp_path, x86_fixture
+):
+    trace = tmp_path / "elf-context-missing.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + etrace_tb_def(
+            tb_id=7,
+            vaddr=x86_fixture.start,
+            insns=tuple(x86_fixture.instructions),
+        )
+        + etrace_tb_exec(
+            tb_id=7,
+            sequence=1,
+            insn_count=len(x86_fixture.instructions),
+        )
+    )
+
+    result, _ = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--elf-context", "x86_64:cpl0",
+    )
+
+    assert result.returncode != 0
+    assert "requires trace context records" in result.stderr
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+@pytest.mark.parametrize(("anchor_privilege", "expected_hit"), [(0, 2), (3, 0)])
+def test_v1_elf_context_qualifies_mapping_anchor(
+    run_etrace, tmp_path, x86_fixture, ordered, anchor_privilege, expected_hit
+):
+    physical = 0x200000
+    trace = tmp_path / f"context-anchor-{ordered}-{anchor_privilege}.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1,
+            pc=physical,
+            architecture=62,
+            privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_context(
+            context_id=2,
+            pc=x86_fixture.start,
+            architecture=62,
+            privilege=anchor_privilege,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=physical,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, len(x86_fixture.code), physical),),
+            code=x86_fixture.code,
+        )
+        + etrace_tb_exec(
+            tb_id=1,
+            sequence=1,
+            context_id=1,
+            insn_count=len(x86_fixture.instructions),
+        )
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=x86_fixture.start,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, len(x86_fixture.code), physical),),
+            code=x86_fixture.code,
+        )
+        + etrace_tb_exec(
+            tb_id=2,
+            sequence=2,
+            context_id=2,
+            insn_count=len(x86_fixture.instructions),
+        )
+    )
+    extra_args = ["--auto-map", "--elf-context", "x86_64:cpl0"]
+    if ordered:
+        extra_args.append("--preserve-order")
+
+    result, (_, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, *extra_args
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == expected_hit
 
 
 @pytest.mark.parametrize("physical", [0x200000, 0x200FFC, 0xFFFFFFFFFFFFF000])

@@ -12,6 +12,7 @@ def test_help_lists_trace_and_coverage_formats(run_etrace):
     assert "--function-hit-policy" in result.stdout
     assert "--coverage-inventory" in result.stdout
     assert "--auto-map" in result.stdout
+    assert "--elf-context" in result.stdout
     assert "--preserve-order" in result.stdout
     assert "--event-spool-decoded-limit" in result.stdout
 
@@ -50,6 +51,32 @@ def test_auto_map_requires_elf(run_etrace, tmp_path):
 
     assert result.returncode != 0
     assert "Automatic mapping requires an ELF" in result.stderr
+
+
+def test_elf_context_requires_elf(run_etrace, tmp_path):
+    trace = tmp_path / "empty.etrace"
+    trace.write_bytes(b"")
+
+    result = run_etrace(
+        "--trace", trace, "--elf-context", "aarch64:el2"
+    )
+
+    assert result.returncode != 0
+    assert "An ELF context requires an ELF" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "context",
+    ["aarch64", "aarch64:el4", "x86_64:el2", "armv8:el2"],
+)
+def test_elf_context_rejects_invalid_selector(run_etrace, tmp_path, context):
+    trace = tmp_path / "empty.etrace"
+    trace.write_bytes(b"")
+
+    result = run_etrace("--trace", trace, "--elf-context", context)
+
+    assert result.returncode != 0
+    assert "Invalid ELF context" in result.stderr
 
 
 def test_unresolved_limit_must_be_positive(run_etrace, tmp_path):

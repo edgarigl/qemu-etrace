@@ -74,6 +74,7 @@ BINUTILS_MODE_STAMP = .binutils-mode-$(BINUTILS_MODE)
 
 OBJS += qemu-etrace.o
 OBJS += address-map.o
+OBJS += elf-context.o
 OBJS += trace.o
 OBJS += trace-open.o
 OBJS += filename.o
@@ -115,6 +116,7 @@ plugindir ?= $(libdir)/qemu-etrace/plugins/$(QEMU_PLUGIN_API)
 TEST_BUILD_DIR = .test-build
 TEST_BINS = $(TEST_BUILD_DIR)/test-filename
 TEST_BINS += $(TEST_BUILD_DIR)/test-address-map
+TEST_BINS += $(TEST_BUILD_DIR)/test-elf-context
 TEST_BINS += $(TEST_BUILD_DIR)/test-disas
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
 TEST_BINS += $(TEST_BUILD_DIR)/test-dwarf-lines
@@ -197,6 +199,12 @@ $(TEST_BUILD_DIR)/test-address-map: tests/unit/test-address-map.c \
 		address-map.c address-map.h | $(TEST_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
 		tests/unit/test-address-map.c address-map.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
+$(TEST_BUILD_DIR)/test-elf-context: tests/unit/test-elf-context.c \
+		elf-context.c elf-context.h etrace-format.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-elf-context.c elf-context.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
 $(TEST_BUILD_DIR)/test-disas: tests/unit/test-disas.c disas.c disas.h \
@@ -315,6 +323,7 @@ $(TEST_BUILD_DIR)/duplicate-inline-b.o: tests/fixtures/duplicate-inline.c | $(TE
 
 check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-address-map
+	$(TEST_BUILD_DIR)/test-elf-context
 	$(TEST_BUILD_DIR)/test-disas
 	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-dwarf-lines

@@ -40,6 +40,7 @@
 #include "syms.h"
 #include "disas.h"
 #include "coverage.h"
+#include "elf-context.h"
 #include "trace.h"
 #include "etrace.h"
 #include "etrace-hash.h"
@@ -63,6 +64,7 @@ struct etracer {
 	uint64_t code_errors;
 	GHashTable *tb_defs;
 	GHashTable *contexts;
+	const struct elf_context *elf_context;
 	GArray *physical_bindings;
 	GHashTable *binding_buckets;
 	bool binding_conflict;
@@ -106,6 +108,8 @@ struct etrace_tb_definition {
 	bool resolved;
 	bool code_searched;
 	bool code_candidate;
+	bool mapping_anchor;
+	bool bindings_seeded;
 };
 
 struct pending_tb_exec {
@@ -125,12 +129,31 @@ struct physical_binding {
 	bool ambiguous;
 };
 
+struct observed_context {
+	uint16_t architecture;
+	uint8_t privilege;
+	uint32_t flags;
+};
+
 static void etrace_output_exec(struct tracer *tr,
 			       const struct trace_exec *exec,
 			       const struct trace_exec_segment *segment,
 			       void *opaque);
 static bool etrace_invalid_pkg(const struct etrace_pkg *pkg,
 			       const char *reason);
+
+static bool context_matches_elf(const struct etracer *t, uint64_t context_id)
+{
+	const struct observed_context *context;
+
+	if (!t->elf_context || !t->elf_context->configured)
+		return true;
+	if (!context_id)
+		return false;
+	context = g_hash_table_lookup(t->contexts, &context_id);
+	return context && elf_context_matches(t->elf_context,
+		context->architecture, context->privilege, context->flags);
+}
 
 static void etrace_tb_definition_free(void *opaque)
 {
@@ -778,6 +801,22 @@ static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
 	return true;
 }
 
+static void seed_physical_bindings(struct etracer *t,
+				   struct etrace_tb_definition *definition)
+{
+	uint16_t i;
+
+	if (definition->bindings_seeded)
+		return;
+	for (i = 0; i < definition->mapping_count; i++) {
+		const struct etrace_tb_mapping *mapping = &definition->mappings[i];
+
+		add_physical_binding(t, mapping->paddr, mapping->len,
+			definition->linked_vaddr + mapping->offset);
+	}
+	definition->bindings_seeded = true;
+}
+
 static bool resolve_from_physical(const struct etracer *t,
 				  const struct etrace_tb_definition *definition,
 				  uint64_t *linked_vaddr)
@@ -866,15 +905,10 @@ static bool resolve_tb_definition(struct etracer *t,
 		t->code_candidates--;
 	}
 	if (trusted_code) {
-		uint16_t i;
-
-		for (i = 0; i < definition->mapping_count; i++) {
-			const struct etrace_tb_mapping *mapping =
-				&definition->mappings[i];
-
-			add_physical_binding(t, mapping->paddr, mapping->len,
-				definition->linked_vaddr + mapping->offset);
-		}
+		definition->mapping_anchor = true;
+		if (explicit_map || !t->elf_context
+		    || !t->elf_context->configured)
+			seed_physical_bindings(t, definition);
 	}
 	return true;
 }
@@ -1061,9 +1095,20 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 			"non-consecutive per-vCPU sequence");
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = tb_exec->sequence;
+	if (definition->mapping_anchor
+	    && context_matches_elf(t, tb_exec->context_id)) {
+		seed_physical_bindings(t, definition);
+		if (t->auto_map)
+			resolve_pending_definitions(t, cov_fmt);
+		if (t->binding_conflict)
+			return etrace_invalid_pkg(t->pkg,
+				"conflicting physical image mappings");
+	}
 
 	if (t->preserve_order)
 		return etrace_spool_event(t);
+	if (!context_matches_elf(t, tb_exec->context_id))
+		return true;
 	if (t->auto_map && !definition->resolved)
 		return append_pending_execution(t, definition, tb_exec);
 	execution = (struct pending_tb_exec) {
@@ -1083,14 +1128,21 @@ static bool etrace_process_context(struct etracer *t)
 {
 	const struct etrace_context *context = &t->pkg->context;
 	const uint8_t *cursor = context->data8;
+	struct observed_context *observed;
 	uint64_t *id;
 	uint8_t i;
 
 	if (g_hash_table_contains(t->contexts, &context->context_id))
 		return etrace_invalid_pkg(t->pkg, "duplicate context ID");
 	id = safe_malloc(sizeof(*id));
+	observed = safe_malloc(sizeof(*observed));
 	*id = context->context_id;
-	g_hash_table_add(t->contexts, id);
+	*observed = (struct observed_context) {
+		.architecture = context->architecture,
+		.privilege = context->privilege,
+		.flags = context->flags,
+	};
+	g_hash_table_insert(t->contexts, id, observed);
 
 	if (t->tr.fp_out) {
 		fprintf(t->tr.fp_out,
@@ -1445,7 +1497,8 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 				fprintf(stderr, "Ordered event references undefined TB\n");
 				return false;
 			}
-			if (definition->resolved) {
+			if (definition->resolved
+			    && context_matches_elf(t, tb_exec->context_id)) {
 				struct pending_tb_exec execution = {
 					.context_id = tb_exec->context_id,
 					.count = 1,
@@ -1525,6 +1578,7 @@ void etrace_show(int fd, FILE *fp_out,
 		 enum trace_format trace_in_fmt,
 		 enum trace_format trace_out_fmt,
 		 const struct address_map *address_map,
+		 const struct elf_context *elf_context,
 		 bool auto_map, size_t unresolved_limit,
 		 bool preserve_order, const char *event_spool,
 		 uint64_t event_spool_limit, uint64_t event_spool_decoded_limit)
@@ -1540,6 +1594,7 @@ void etrace_show(int fd, FILE *fp_out,
 	t.tr.out_fmt = trace_out_fmt;
 	t.tr.sym_tree = sym_tree;
 	t.tr.address_map = address_map;
+	t.elf_context = elf_context;
 	t.auto_map = auto_map;
 	t.unresolved_limit = unresolved_limit;
 	t.preserve_order = preserve_order;
@@ -1570,7 +1625,8 @@ void etrace_show(int fd, FILE *fp_out,
 	t.pkg = safe_malloc(sizeof t.pkg->hdr + MAX_PKG);
 	t.tb_defs = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL,
 					 etrace_tb_definition_free);
-	t.contexts = g_hash_table_new_full(g_int64_hash, g_int64_equal, free, NULL);
+	t.contexts = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+					free, free);
 	t.physical_bindings = g_array_new(false, true,
 					 sizeof(struct physical_binding));
 	t.binding_buckets = g_hash_table_new_full(g_int64_hash, g_int64_equal,
@@ -1710,6 +1766,12 @@ void etrace_show(int fd, FILE *fp_out,
 	}
 	if (gzclose(t.input) != Z_OK) {
 		fprintf(stderr, "Unable to finish ETrace input\n");
+		exit(EXIT_FAILURE);
+	}
+	if (t.elf_context && t.elf_context->configured
+	    && (!t.info_seen || !(t.info.attr & ETRACE_INFO_F_CONTEXT))) {
+		fprintf(stderr,
+			"ELF context matching requires trace context records\n");
 		exit(EXIT_FAILURE);
 	}
 	if (t.final_status_required && !t.final_status_seen) {

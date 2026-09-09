@@ -156,6 +156,19 @@ cannot be reconstructed from these records.
 
 ## Automatic image attribution
 
+An ELF can be associated with its expected architectural privilege level:
+
+```sh
+qemu-etrace --elf xen-syms --elf-context aarch64:el2 ...
+```
+
+Supported selectors are `aarch64:el0` through `aarch64:el3`, and
+`i386:cpl0` through `i386:cpl3` or `x86_64:cpl0` through `x86_64:cpl3`.
+The trace must contain context records with valid privilege information.
+Executions in unknown or nonmatching contexts do not contribute coverage.
+The selector qualifies image attribution; the ELF header continues to supply
+the instruction architecture used for symbols and disassembly.
+
 `qemu-etrace --auto-map` retains unresolved version 1 executions sparsely by
 TB, context, vCPU, and dispatched prefix. It resolves them using, in order:
 

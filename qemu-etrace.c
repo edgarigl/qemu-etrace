@@ -37,6 +37,7 @@
 
 #include "config.h"
 #include "address-map.h"
+#include "elf-context.h"
 #include "trace-open.h"
 #include "coverage.h"
 #include "syms.h"
@@ -97,6 +98,7 @@ struct
 	enum cov_format coverage_format;
 	enum function_hit_policy function_hit_policy;
 	struct address_map address_map;
+	struct elf_context elf_context;
 	bool auto_map;
 	size_t unresolved_limit;
 	bool preserve_order;
@@ -157,6 +159,7 @@ static const char etrace_usagestr[] = \
 "--coverage-inventory   Write a JSON Lines function inventory.\n"
 "--function-hit-policy Function hits: entry or source.\n"
 "--address-map          Map runtime addresses to linked ELF addresses.\n"
+"--elf-context          Expected ELF execution context, such as aarch64:el2.\n"
 "--auto-map             Infer runtime addresses from TB mappings and code.\n"
 "--unresolved-limit     Maximum unresolved TB execution aggregates.\n"
 "--preserve-order       Replay auto-mapped events in original order.\n"
@@ -258,6 +261,7 @@ static void parse_arguments(int argc, char **argv)
 			{"event-spool", required_argument, 0, 1003 },
 			{"event-spool-limit", required_argument, 0, 1004 },
 			{"event-spool-decoded-limit", required_argument, 0, 1005 },
+			{"elf-context", required_argument, 0, 1006 },
 			{"gcov-strip", required_argument, 0, 'z' },
 			{"gcov-prefix", required_argument, 0, 'p' },
 			{0,         0,                 0,  0 }
@@ -384,6 +388,18 @@ static void parse_arguments(int argc, char **argv)
 				args.event_spool_limit = limit;
 			break;
 		}
+		case 1006:
+		{
+			char error[128];
+
+			if (!elf_context_parse(&args.elf_context, optarg,
+					       error, sizeof(error))) {
+				fprintf(stderr, "Invalid ELF context '%s': %s\n",
+					optarg, error);
+				exit(EXIT_FAILURE);
+			}
+			break;
+		}
 		case 'y':
 			args.trace_in_format = map_traceformat(optarg);
 			break;
@@ -461,6 +477,11 @@ void validate_arguments(void)
 		fprintf(stderr, "Address maps require --elf\n");
 		exit(EXIT_FAILURE);
 	}
+	if (args.elf_context.configured
+	    && (!args.elf || args.trace_in_format != TRACE_ETRACE)) {
+		fprintf(stderr, "An ELF context requires an ELF and ETrace input\n");
+		exit(EXIT_FAILURE);
+	}
 	if (args.auto_map
 	    && (!args.elf || args.trace_in_format != TRACE_ETRACE)) {
 		fprintf(stderr, "Automatic mapping requires an ELF and ETrace input\n");
@@ -491,9 +512,10 @@ void trace_show(int fd, FILE *fp_out,
                  const char *objdump, const char *machine,
                  const char *guest_objdump, const char *guest_machine,
                  void **sym_tree, enum cov_format cov_fmt,
-                 enum trace_format trace_in_fmt,
+		 enum trace_format trace_in_fmt,
 		 enum trace_format trace_out_fmt,
 		 const struct address_map *address_map,
+		 const struct elf_context *elf_context,
 		 bool auto_map, size_t unresolved_limit,
 		 bool preserve_order, const char *event_spool,
 		 uint64_t event_spool_limit, uint64_t event_spool_decoded_limit)
@@ -505,6 +527,7 @@ void trace_show(int fd, FILE *fp_out,
 			    guest_objdump, guest_machine,
 			    sym_tree, cov_fmt,
 			    trace_in_fmt, trace_out_fmt, address_map,
+			    elf_context,
 			    auto_map, unresolved_limit, preserve_order,
 			    event_spool, event_spool_limit, event_spool_decoded_limit);
 		break;
@@ -595,6 +618,7 @@ int main(int argc, char **argv)
 			   args.trace_in_format,
 			   args.trace_out_format,
 			   &args.address_map,
+			   &args.elf_context,
 			   args.auto_map, args.unresolved_limit,
 			   args.preserve_order, args.event_spool,
 			   args.event_spool_limit, args.event_spool_decoded_limit);

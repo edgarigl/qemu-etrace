@@ -103,6 +103,12 @@ Version 1 can associate execution with context-change records and observed
 instruction mappings. A filtered trace contains explicit gap records between
 retained ranges. See `etrace-v1.md` for the format and plugin options.
 
+`--elf-context` restricts coverage for the selected ELF to an architectural
+privilege level recorded by the producer. This distinguishes, for example,
+an AArch64 EL2 image from code executing at EL1 at the same address. Context
+selection complements address and byte validation; it does not identify an
+image by itself.
+
 With `--auto-map`, unmatched TB executions are aggregated until their code and
 physical mappings can be associated with the input ELF. Resolution replays the
 aggregates through the same range processor. Ambiguous or unrelated TBs are

@@ -22,6 +22,7 @@
 #include <stdio.h>
 
 #include "coverage.h"
+#include "elf-context.h"
 #include "etrace-format.h"
 #include "trace.h"
 
@@ -32,6 +33,7 @@ void etrace_show(int fd, FILE *fp_out,
 		 enum trace_format trace_in_fmt,
 		 enum trace_format trace_out_fmt,
 		 const struct address_map *address_map,
+		 const struct elf_context *elf_context,
 		 bool auto_map, size_t unresolved_limit,
 		 bool preserve_order, const char *event_spool,
 		 uint64_t event_spool_limit, uint64_t event_spool_decoded_limit);
