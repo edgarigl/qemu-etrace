@@ -35,6 +35,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <elf.h>
 
 #include <search.h>
 
@@ -86,8 +87,160 @@ struct sym_store {
 		struct sym_coverage *cov;
 	} *sections;
 	size_t nr_sections;
+	struct sym_load_segment *load_segments;
+	size_t nr_load_segments;
 	bool x86_64;
 };
+
+static uint16_t elf16(const uint8_t *data, bool big_endian)
+{
+	return big_endian ? ((uint16_t)data[0] << 8) | data[1]
+		: data[0] | ((uint16_t)data[1] << 8);
+}
+
+static uint32_t elf32(const uint8_t *data, bool big_endian)
+{
+	uint32_t value = 0;
+	unsigned int i;
+
+	for (i = 0; i < 4; i++) {
+		unsigned int byte = big_endian ? i : 3 - i;
+
+		value = (value << 8) | data[byte];
+	}
+	return value;
+}
+
+static uint64_t elf64(const uint8_t *data, bool big_endian)
+{
+	uint64_t value = 0;
+	unsigned int i;
+
+	for (i = 0; i < 8; i++) {
+		unsigned int byte = big_endian ? i : 7 - i;
+
+		value = (value << 8) | data[byte];
+	}
+	return value;
+}
+
+static void read_executable_load_segments(struct sym_store *ss,
+					  const char *filename)
+{
+	uint8_t header[sizeof(Elf64_Ehdr)];
+	uint8_t program[sizeof(Elf64_Phdr)];
+	uint64_t program_offset;
+	uint16_t program_size;
+	uint16_t program_count;
+	bool big_endian;
+	bool elf64_format;
+	FILE *fp;
+	uint16_t i;
+
+	fp = fopen(filename, "rb");
+	if (!fp || fread(header, 1, sizeof(header), fp) != sizeof(header)
+	    || memcmp(header, ELFMAG, SELFMAG)
+	    || (header[EI_CLASS] != ELFCLASS32
+		&& header[EI_CLASS] != ELFCLASS64)
+	    || (header[EI_DATA] != ELFDATA2LSB
+		&& header[EI_DATA] != ELFDATA2MSB)) {
+		fprintf(stderr, "Unable to read ELF program headers from %s\n",
+			filename);
+		if (fp)
+			fclose(fp);
+		exit(EXIT_FAILURE);
+	}
+	big_endian = header[EI_DATA] == ELFDATA2MSB;
+	elf64_format = header[EI_CLASS] == ELFCLASS64;
+	if (elf64_format) {
+		program_offset = elf64(header + 32, big_endian);
+		program_size = elf16(header + 54, big_endian);
+		program_count = elf16(header + 56, big_endian);
+	} else {
+		program_offset = elf32(header + 28, big_endian);
+		program_size = elf16(header + 42, big_endian);
+		program_count = elf16(header + 44, big_endian);
+	}
+	if (program_count == PN_XNUM
+	    || (program_count
+		&& program_size != (elf64_format ? sizeof(Elf64_Phdr)
+					     : sizeof(Elf32_Phdr)))) {
+		fprintf(stderr, "Unsupported ELF program header table in %s\n",
+			filename);
+		fclose(fp);
+		exit(EXIT_FAILURE);
+	}
+	for (i = 0; i < program_count; i++) {
+		uint64_t offset;
+		uint64_t linked;
+		uint64_t image;
+		uint64_t file_size;
+		uint64_t memory_size;
+		uint32_t type;
+		uint32_t flags;
+
+		if (i > (UINT64_MAX - program_offset) / program_size
+		    || program_offset + (uint64_t)i * program_size > INT64_MAX
+		    || fseeko(fp, program_offset + (uint64_t)i * program_size,
+			      SEEK_SET) != 0
+		    || fread(program, 1, program_size, fp) != program_size) {
+			fprintf(stderr, "Unable to read ELF program headers from %s\n",
+				filename);
+			fclose(fp);
+			exit(EXIT_FAILURE);
+		}
+		type = elf32(program, big_endian);
+		if (elf64_format) {
+			flags = elf32(program + 4, big_endian);
+			offset = elf64(program + 8, big_endian);
+			linked = elf64(program + 16, big_endian);
+			image = elf64(program + 24, big_endian);
+			file_size = elf64(program + 32, big_endian);
+			memory_size = elf64(program + 40, big_endian);
+		} else {
+			offset = elf32(program + 4, big_endian);
+			linked = elf32(program + 8, big_endian);
+			image = elf32(program + 12, big_endian);
+			file_size = elf32(program + 16, big_endian);
+			memory_size = elf32(program + 20, big_endian);
+			flags = elf32(program + 24, big_endian);
+		}
+		(void)offset;
+		if (type != PT_LOAD || !(flags & PF_X) || !memory_size)
+			continue;
+		if (linked > UINT64_MAX - memory_size
+		    || image > UINT64_MAX - memory_size
+		    || file_size > memory_size) {
+			fprintf(stderr, "Invalid executable ELF load segment in %s\n",
+				filename);
+			fclose(fp);
+			exit(EXIT_FAILURE);
+		}
+		ss->load_segments = safe_realloc(ss->load_segments,
+			(sizeof(*ss->load_segments) * (ss->nr_load_segments + 1)));
+		ss->load_segments[ss->nr_load_segments++] =
+			(struct sym_load_segment) {
+				.linked_start = linked,
+				.image_start = image,
+				.file_size = file_size,
+				.memory_size = memory_size,
+			};
+	}
+	fclose(fp);
+}
+
+const struct sym_load_segment *sym_get_executable_load_segments(
+	void **store, size_t *nr_segments)
+{
+	struct sym_store *ss = *store;
+
+	if (!ss) {
+		*nr_segments = 0;
+		return NULL;
+	}
+	*nr_segments = ss->nr_load_segments;
+	return ss->load_segments;
+}
 
 void sym_show(const char *prefix, const struct sym *s)
 {
@@ -591,6 +744,7 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 
 	free(ss->elf_filename);
 	ss->elf_filename = strdup(elf);
+	read_executable_load_segments(ss, elf);
 	abfd = bfd_openr(elf, NULL);
 	if (!abfd || !bfd_check_format(abfd, bfd_object)) {
 		fprintf(stderr, "Unable to read ELF sections from %s: %s\n",

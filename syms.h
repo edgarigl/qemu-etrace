@@ -59,6 +59,13 @@ struct sym_source_range {
 	struct sym_src_loc *locs;
 };
 
+struct sym_load_segment {
+	uint64_t linked_start;
+	uint64_t image_start;
+	uint64_t file_size;
+	uint64_t memory_size;
+};
+
 struct sym
 {
 	struct sym *next;
@@ -107,5 +114,7 @@ size_t sym_find_code_matches(void **store, const uint8_t *code, size_t len,
 			     uint64_t *matches, size_t capacity);
 const struct sym_source_range *sym_get_source_ranges(void **store,
 						      size_t *nr_ranges);
+const struct sym_load_segment *sym_get_executable_load_segments(
+	void **store, size_t *nr_segments);
 
 #endif

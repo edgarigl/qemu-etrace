@@ -107,7 +107,10 @@ retained ranges. See `etrace-v1.md` for the format and plugin options.
 privilege level recorded by the producer. This distinguishes, for example,
 an AArch64 EL2 image from code executing at EL1 at the same address. Context
 selection complements address and byte validation; it does not identify an
-image by itself.
+image by itself. A matching execution at a byte-verified linked ELF address
+can establish the load bias for the ELF's executable load segments. Physical
+executions within those segments are then checked against their derived ELF
+addresses before coverage is credited.
 
 With `--auto-map`, unmatched TB executions are aggregated until their code and
 physical mappings can be associated with the input ELF. Resolution replays the

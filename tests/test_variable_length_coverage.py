@@ -421,6 +421,87 @@ def test_v1_elf_context_qualifies_mapping_anchor(
     assert functions["x86_coverage_fixture"] == expected_hit
 
 
+@pytest.mark.parametrize("ordered", [False, True])
+def test_v1_context_anchor_maps_executable_load_segment(
+    run_etrace, tmp_path, x86_fixture, ordered
+):
+    physical = 0x200000
+    entry_instructions = tuple(x86_fixture.instructions[:3])
+    entry_size = sum(size for _, size in entry_instructions)
+    anchor_instructions = tuple(
+        (offset - entry_size, size)
+        for offset, size in x86_fixture.instructions[3:]
+    )
+    trace = tmp_path / f"context-image-mapping-{ordered}.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1,
+            pc=physical,
+            architecture=62,
+            privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        # Equal bytes outside the inferred image mapping remain untrusted.
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=0x300000,
+            insns=entry_instructions,
+            mappings=((0, entry_size, 0x300000),),
+            code=x86_fixture.code[:entry_size],
+        )
+        + etrace_tb_exec(
+            tb_id=1,
+            sequence=1,
+            context_id=1,
+            insn_count=len(entry_instructions),
+        )
+        # The short physical entry executes before the linked anchor.
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=physical,
+            insns=entry_instructions,
+            mappings=((0, entry_size, physical),),
+            code=x86_fixture.code[:entry_size],
+        )
+        + etrace_tb_exec(
+            tb_id=2,
+            sequence=2,
+            context_id=1,
+            insn_count=len(entry_instructions),
+        )
+        + etrace_tb_def(
+            tb_id=3,
+            vaddr=x86_fixture.start + entry_size,
+            insns=anchor_instructions,
+            mappings=((0, len(x86_fixture.code) - entry_size,
+                       physical + entry_size),),
+            code=x86_fixture.code[entry_size:],
+        )
+        + etrace_tb_exec(
+            tb_id=3,
+            sequence=3,
+            context_id=1,
+            insn_count=len(anchor_instructions),
+        )
+    )
+    extra_args = ["--auto-map", "--elf-context", "x86_64:cpl0"]
+    if ordered:
+        extra_args.append("--preserve-order")
+
+    result, (_, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, *extra_args
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 1
+    assert "context-qualified executable image mapping" in result.stderr
+    if ordered:
+        assert "retained 1 unresolved execution boundaries" in result.stderr
+    else:
+        assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
 @pytest.mark.parametrize("physical", [0x200000, 0x200FFC, 0xFFFFFFFFFFFFF000])
 def test_v1_auto_map_replays_early_physical_execution(
     run_etrace, tmp_path, x86_fixture, physical

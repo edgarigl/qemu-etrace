@@ -186,14 +186,22 @@ aggregate and ordered modes.
 
 Linked-address anchors assume the selected trace address space belongs to the
 input ELF at those virtual addresses. Explicit maps assert the corresponding
-runtime ownership. Physical bindings cover only the byte-verified TB spans;
-they do not establish ownership of an adjacent entry, a whole page, or a load
-segment. Version 1 has no image-instance lifetime or page-reuse records, so
-these anchors require a stable image mapping. A privilege flag or a matching
-byte sequence alone cannot establish that contract for mixed-image traces.
-Contradictory physical-to-linked bindings violate the stable-mapping contract
-and fail conversion, including when an earlier execution was already resolved.
-The converter does not choose a claimant based on arrival or lookup order.
+runtime ownership. Without an ELF context selector, physical bindings cover
+only the byte-verified TB spans.
+
+When a byte-verified linked-address TB executes in the selected ELF context,
+the analyzer derives its load bias from the containing executable `PT_LOAD`
+segment. A consistent anchor maps every executable `PT_LOAD` segment from its
+ELF physical address to its observed runtime physical address. Each resolved
+TB must still lie in an executable ELF section and match its captured bytes at
+the resulting linked address. This permits short or adjacent entry TBs to use
+the established image mapping without treating their bytes as identity proof.
+
+Version 1 has no image-instance lifetime or page-reuse records, so inferred
+image mappings require a stable image mapping. Contradictory
+physical-to-linked bindings violate that contract and fail conversion,
+including when an earlier execution was already resolved. The converter does
+not choose a claimant based on arrival or lookup order.
 
 Captured code that contradicts an explicit or linked-address mapping leaves
 the TB unresolved. TBs without captured code can use those address mappings

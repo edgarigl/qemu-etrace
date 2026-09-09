@@ -80,6 +80,7 @@ struct etracer {
 	uint64_t journal_counts[3];
 	uint64_t journal_reported;
 	uint64_t ordered_unresolved;
+	uint64_t inferred_image_mappings;
 	bool preserve_order;
 	uint64_t *last_sequence;
 	bool *sequence_seen;
@@ -110,6 +111,7 @@ struct etrace_tb_definition {
 	bool code_candidate;
 	bool mapping_anchor;
 	bool bindings_seeded;
+	bool infer_image_mapping;
 };
 
 struct pending_tb_exec {
@@ -801,6 +803,115 @@ static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
 	return true;
 }
 
+static bool translate_relative(uint64_t value, uint64_t input_anchor,
+			       uint64_t output_anchor, uint64_t *translated)
+{
+	if (value >= input_anchor) {
+		uint64_t offset = value - input_anchor;
+
+		if (output_anchor > UINT64_MAX - offset)
+			return false;
+		*translated = output_anchor + offset;
+	} else {
+		uint64_t offset = input_anchor - value;
+
+		if (output_anchor < offset)
+			return false;
+		*translated = output_anchor - offset;
+	}
+	return true;
+}
+
+static const struct sym_load_segment *find_load_segment(
+	const struct sym_load_segment *segments, size_t count,
+	uint64_t linked_start, uint64_t len)
+{
+	size_t i;
+
+	if (!len || linked_start > UINT64_MAX - len)
+		return NULL;
+	for (i = 0; i < count; i++) {
+		const struct sym_load_segment *segment = &segments[i];
+
+		if (linked_start >= segment->linked_start
+		    && linked_start + len <= segment->linked_start
+			+ segment->memory_size)
+			return segment;
+	}
+	return NULL;
+}
+
+static bool seed_image_bindings(struct etracer *t,
+				struct etrace_tb_definition *definition)
+{
+	const struct sym_load_segment *segments;
+	const struct sym_load_segment *anchor_segment;
+	const struct etrace_tb_mapping *anchor_mapping;
+	struct physical_binding *bindings;
+	uint64_t anchor_linked;
+	uint64_t anchor_image;
+	uint64_t existing_linked;
+	size_t count;
+	size_t i;
+
+	segments = sym_get_executable_load_segments(t->tr.sym_tree, &count);
+	if (!segments || !count || !definition->mapping_count)
+		return false;
+	anchor_mapping = &definition->mappings[0];
+	anchor_linked = definition->linked_vaddr + anchor_mapping->offset;
+	anchor_segment = find_load_segment(segments, count, anchor_linked,
+					  anchor_mapping->len);
+	if (!anchor_segment)
+		return false;
+	anchor_image = anchor_segment->image_start
+		+ anchor_linked - anchor_segment->linked_start;
+	if (binding_lookup(t, anchor_mapping->paddr, anchor_mapping->len,
+			   &existing_linked)
+	    && existing_linked == anchor_linked)
+		return true;
+
+	/* Every observed piece of the anchor must describe one load bias. */
+	for (i = 0; i < definition->mapping_count; i++) {
+		const struct etrace_tb_mapping *mapping = &definition->mappings[i];
+		const struct sym_load_segment *segment;
+		uint64_t linked = definition->linked_vaddr + mapping->offset;
+		uint64_t image;
+		uint64_t physical;
+
+		segment = find_load_segment(segments, count, linked, mapping->len);
+		if (!segment)
+			return false;
+		image = segment->image_start + linked - segment->linked_start;
+		if (!translate_relative(image, anchor_image, anchor_mapping->paddr,
+					&physical)
+		    || physical != mapping->paddr)
+			return false;
+	}
+
+	bindings = safe_malloc(count * sizeof(*bindings));
+	for (i = 0; i < count; i++) {
+		if (!translate_relative(segments[i].image_start, anchor_image,
+					anchor_mapping->paddr,
+					&bindings[i].physical_start)
+		    || bindings[i].physical_start
+			> UINT64_MAX - segments[i].memory_size) {
+			free(bindings);
+			return false;
+		}
+		bindings[i].physical_end = bindings[i].physical_start
+			+ segments[i].memory_size;
+		bindings[i].linked_start = segments[i].linked_start;
+	}
+	for (i = 0; i < count; i++) {
+		add_physical_binding(t, bindings[i].physical_start,
+			bindings[i].physical_end - bindings[i].physical_start,
+			bindings[i].linked_start);
+	}
+	free(bindings);
+	t->inferred_image_mappings++;
+	return true;
+}
+
 static void seed_physical_bindings(struct etracer *t,
 				   struct etrace_tb_definition *definition)
 {
@@ -808,6 +919,11 @@ static void seed_physical_bindings(struct etracer *t,
 
 	if (definition->bindings_seeded)
 		return;
+	if (definition->infer_image_mapping
+	    && seed_image_bindings(t, definition)) {
+		definition->bindings_seeded = true;
+		return;
+	}
 	for (i = 0; i < definition->mapping_count; i++) {
 		const struct etrace_tb_mapping *mapping = &definition->mappings[i];
 
@@ -906,6 +1022,8 @@ static bool resolve_tb_definition(struct etracer *t,
 	}
 	if (trusted_code) {
 		definition->mapping_anchor = true;
+		definition->infer_image_mapping = !explicit_map
+			&& t->elf_context && t->elf_context->configured;
 		if (explicit_map || !t->elf_context
 		    || !t->elf_context->configured)
 			seed_physical_bindings(t, definition);
@@ -1095,7 +1213,7 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 			"non-consecutive per-vCPU sequence");
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = tb_exec->sequence;
-	if (definition->mapping_anchor
+	if (definition->mapping_anchor && !definition->bindings_seeded
 	    && context_matches_elf(t, tb_exec->context_id)) {
 		seed_physical_bindings(t, definition);
 		if (t->auto_map)
@@ -1821,6 +1939,13 @@ void etrace_show(int fd, FILE *fp_out,
 			"Automatic mapping replayed %" PRIu64
 			" deferred execution events\n",
 			t.resolved_events);
+	}
+	if (t.auto_map && t.inferred_image_mappings) {
+		fprintf(stderr,
+			"Automatic mapping established %" PRIu64
+			" context-qualified executable image mapping%s\n",
+			t.inferred_image_mappings,
+			t.inferred_image_mappings == 1 ? "" : "s");
 	}
 	if (t.auto_map && t.code_candidates) {
 		fprintf(stderr,
