@@ -134,6 +134,29 @@ exec-mapping=on
 This discovery policy increases trace volume, but it lets the analyzer recover
 early Xen execution before its physical placement is known.
 
+For long traces, use `context-unmatched=discover` with a privilege register:
+
+```sh
+-plugin libqemu-etrace.so,out=xen.etrace,format=v1,context=hypervisor,\
+context-range=0xffff82d040000000:0x6b1198,context-unmatched=discover,\
+context-register=cs,exec-mapping=on
+```
+
+Discovery mode retains unmatched execution until the first declared-range TB
+executes with valid privilege information. Unmatched TB callbacks do not
+request register synchronization; their pre-anchor contexts are marked
+incomplete. After the anchor, unmatched execution is represented by context
+gaps instead of individual TB records. Already translated unmatched TBs are
+also filtered, and later unmatched translations omit instruction-progress,
+code, mapping, and definition collection. Declared-range TBs continue to carry
+the requested context and exact execution data.
+
+The analyzer can recover an incomplete early TB only after the anchor maps its
+physical span into the selected ELF and its captured bytes match. Discovery
+mode requires the architecture's privilege register (`cs` on x86, `cpsr` on
+AArch64, or `priv` on RISC-V). Use `context-unmatched=keep` when unmatched
+execution must remain individually observable after the declared range starts.
+
 ## Observed execution mappings
 
 Add `exec-mapping=on` to place virtual-to-physical mapping segments in each TB

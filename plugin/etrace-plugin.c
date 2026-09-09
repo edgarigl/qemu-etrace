@@ -68,6 +68,7 @@ struct vcpu_exec_state {
 	uint64_t virtual_machine_id;
 	uint32_t context_flags;
 	uint8_t privilege;
+	bool pending_included;
 	bool context_incomplete;
 	bool gap_open;
 	bool seen;
@@ -141,6 +142,8 @@ static bool gzip_output;
 static bool tb_exec_output;
 static bool hypervisor_filter;
 static bool keep_unmatched_context;
+static bool discover_unmatched_context;
+static bool context_discovery_complete;
 static bool context_unmatched_set;
 static bool exec_mapping;
 static bool context_enabled;
@@ -158,6 +161,10 @@ static struct qemu_plugin_scoreboard *exec_state;
 static qemu_plugin_u64 exec_progress;
 static bool have_vcpu;
 static unsigned int max_vcpu_index;
+#endif
+
+#if QEMU_PLUGIN_VERSION >= 2
+static bool context_register_requested(const char *name);
 #endif
 
 #define UNIX_PREFIX "unix:"
@@ -461,6 +468,22 @@ static bool configure_basic_context(const char *target_name)
 	context_register_basic = false;
 	return set_context_register_names(names);
 }
+
+#if QEMU_PLUGIN_VERSION >= 2
+static const char *privilege_context_register(const char *target_name)
+{
+	if (!target_name)
+		return NULL;
+	if (!strcmp(target_name, "x86_64") || !strcmp(target_name, "i386"))
+		return "cs";
+	if (!strcmp(target_name, "aarch64"))
+		return "cpsr";
+	if (!strcmp(target_name, "riscv32")
+	    || !strcmp(target_name, "riscv64"))
+		return "priv";
+	return NULL;
+}
+#endif
 
 static void configure_target_architecture(const char *target_name)
 {
@@ -944,7 +967,8 @@ static void write_context(unsigned int cpu_index, uint64_t pc,
 
 static uint64_t sample_context(struct vcpu_exec_state *state,
 			       unsigned int cpu_index,
-			       const struct tb_data *tb)
+			       const struct tb_data *tb,
+			       bool sample_registers)
 {
 	uint64_t address_space_id = 0;
 	uint64_t virtual_machine_id = 0;
@@ -965,13 +989,14 @@ static uint64_t sample_context(struct vcpu_exec_state *state,
 		state->last_context_sample = g_byte_array_new();
 	}
 	g_byte_array_set_size(state->context_sample, 0);
-	if ((context_register_all || context_register_names)
+	if (sample_registers
+	    && (context_register_all || context_register_names)
 	    && !state->context_registers)
 		report_context_error(state);
 	if (state->context_incomplete)
 		flags |= ETRACE_CONTEXT_F_INCOMPLETE;
 
-	if (state->context_registers) {
+	if (sample_registers && state->context_registers) {
 		for (i = 0; i < state->context_registers->len; i++) {
 			struct context_register *reg = &g_array_index(
 				state->context_registers, struct context_register, i);
@@ -1056,14 +1081,24 @@ static uint64_t sample_context(struct vcpu_exec_state *state,
 	return state->current_context_id;
 }
 
+static bool tb_is_included(const struct tb_data *tb)
+{
+	return tb->included
+		&& !(discover_unmatched_context
+		     && __atomic_load_n(&context_discovery_complete,
+					__ATOMIC_ACQUIRE)
+		     && !tb->hypervisor);
+}
+
 static bool write_exec_prefix(unsigned int cpu_index,
-			      const struct tb_data *tb, uint64_t end)
+			      const struct tb_data *tb, uint64_t end,
+			      bool included)
 {
 	if (tb_exec_output) {
 		struct vcpu_exec_state *state;
 
 		state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
-		if (!tb->included) {
+		if (!included) {
 			if (tb->context_error)
 				increment_status_counter(
 					&producer_status.context_errors);
@@ -1108,18 +1143,29 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *userdata)
 	struct tb_data *current = userdata;
 	uint64_t current_context_id;
 	uint64_t progress;
+	bool current_included;
 
 	state = qemu_plugin_scoreboard_find(exec_state, cpu_index);
 	record_vcpu(state, cpu_index);
-	current_context_id = sample_context(state, cpu_index, current);
+	current_included = tb_is_included(current);
+	current_context_id = current_included
+		? sample_context(state, cpu_index, current,
+				 !discover_unmatched_context || current->hypervisor)
+		: 0;
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
 	if (state->pending
-	    && !write_exec_prefix(cpu_index, state->pending, progress))
+	    && !write_exec_prefix(cpu_index, state->pending, progress,
+				  state->pending_included))
 		increment_status_counter(&producer_status.unresolved_tb_exits);
-	if (current->included && state->gap_open)
+	if (discover_unmatched_context && current->hypervisor
+	    && (state->context_flags & ETRACE_CONTEXT_F_PRIVILEGE_VALID))
+		__atomic_store_n(&context_discovery_complete, true,
+				 __ATOMIC_RELEASE);
+	if (current_included && state->gap_open)
 		write_context_gap(cpu_index, state, current_context_id);
 	state->pending = current;
 	state->pending_context_id = current_context_id;
+	state->pending_included = current_included;
 	qemu_plugin_u64_set(exec_progress, cpu_index, 0);
 }
 
@@ -1154,7 +1200,8 @@ static void flush_discontinuity_range(unsigned int cpu_index,
 			&producer_status.discontinuity_pc_mismatches);
 	}
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
-	if (!write_exec_prefix(cpu_index, state->pending, progress))
+	if (!write_exec_prefix(cpu_index, state->pending, progress,
+			       state->pending_included))
 		increment_status_counter(
 			&producer_status.unresolved_discontinuities);
 
@@ -1175,7 +1222,8 @@ static void flush_vcpu(unsigned int cpu_index)
 		return;
 
 	progress = qemu_plugin_u64_get(exec_progress, cpu_index);
-	if (!write_exec_prefix(cpu_index, state->pending, progress))
+	if (!write_exec_prefix(cpu_index, state->pending, progress,
+			       state->pending_included))
 		increment_status_counter(&producer_status.unresolved_vcpu_exits);
 
 	state->pending = NULL;
@@ -1281,13 +1329,16 @@ static struct tb_data *new_exec_data(uint64_t start, uint64_t last_addr,
 #if QEMU_PLUGIN_VERSION >= 2
 	if (hypervisor_filter) {
 		int classification = classify_context_range(data->start, data->end);
+		bool retain_unmatched = keep_unmatched_context
+			&& (!discover_unmatched_context
+			    || !__atomic_load_n(&context_discovery_complete,
+						__ATOMIC_ACQUIRE));
 
 		data->hypervisor = classification > 0;
-		data->included = data->hypervisor || keep_unmatched_context;
-		data->context_unknown = classification <= 0
-			&& keep_unmatched_context;
+		data->included = data->hypervisor || retain_unmatched;
+		data->context_unknown = classification <= 0 && retain_unmatched;
 		data->context_error = classification < 0
-			&& !keep_unmatched_context;
+			&& (!keep_unmatched_context || discover_unmatched_context);
 	}
 #endif
 
@@ -1383,7 +1434,9 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 		write_tb_definition(data);
 	qemu_plugin_register_vcpu_tb_exec_cb(
 		tb, vcpu_tb_exec,
-		context_register_all || context_register_names
+		(context_register_all || context_register_names)
+			&& data->included
+			&& (!discover_unmatched_context || data->hypervisor)
 			? QEMU_PLUGIN_CB_R_REGS : QEMU_PLUGIN_CB_NO_REGS,
 		data);
 #endif
@@ -1539,6 +1592,8 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 	tb_exec_output = false;
 	hypervisor_filter = false;
 	keep_unmatched_context = false;
+	discover_unmatched_context = false;
+	context_discovery_complete = false;
 	context_unmatched_set = false;
 	exec_mapping = false;
 	context_enabled = false;
@@ -1591,9 +1646,15 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 			}
 		} else if (!strcmp(argv[i], "context-unmatched=keep")) {
 			keep_unmatched_context = true;
+			discover_unmatched_context = false;
+			context_unmatched_set = true;
+		} else if (!strcmp(argv[i], "context-unmatched=discover")) {
+			keep_unmatched_context = true;
+			discover_unmatched_context = true;
 			context_unmatched_set = true;
 		} else if (!strcmp(argv[i], "context-unmatched=drop")) {
 			keep_unmatched_context = false;
+			discover_unmatched_context = false;
 			context_unmatched_set = true;
 		} else if (!strcmp(argv[i], "exec-mapping=on")) {
 #if QEMU_PLUGIN_VERSION >= 5
@@ -1664,6 +1725,19 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
 			info->target_name);
 		return -1;
 	}
+#if QEMU_PLUGIN_VERSION >= 2
+	if (discover_unmatched_context) {
+		const char *privilege = privilege_context_register(info->target_name);
+
+		if (!privilege || !context_register_requested(privilege)) {
+			fprintf(stderr,
+				"qemu-etrace-plugin: context discovery requires "
+				"the %s privilege register\n",
+				privilege ? privilege : "target");
+			return -1;
+		}
+	}
+#endif
 	context_enabled = hypervisor_filter || context_register_all
 		|| context_register_names;
 	if (context_enabled && !tb_exec_output) {
