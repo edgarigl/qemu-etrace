@@ -89,7 +89,10 @@ struct sym_store {
 	size_t nr_sections;
 	struct sym_load_segment *load_segments;
 	size_t nr_load_segments;
+	uint64_t *alt_call_sites;
+	size_t nr_alt_call_sites;
 	uint16_t elf_machine;
+	bool elf_big_endian;
 	bool x86_64;
 };
 
@@ -152,6 +155,7 @@ static void read_executable_load_segments(struct sym_store *ss,
 		exit(EXIT_FAILURE);
 	}
 	big_endian = header[EI_DATA] == ELFDATA2MSB;
+	ss->elf_big_endian = big_endian;
 	elf64_format = header[EI_CLASS] == ELFCLASS64;
 	ss->elf_machine = elf16(header + 18, big_endian);
 	if (elf64_format) {
@@ -638,6 +642,159 @@ static uint64_t next_image_section_start(struct sym_store *ss, uint64_t addr)
 	return low < ss->nr_sections ? ss->sections[low].start : UINT64_MAX;
 }
 
+static int uint64_compare(const void *a, const void *b)
+{
+	uint64_t av = *(const uint64_t *)a;
+	uint64_t bv = *(const uint64_t *)b;
+
+	return av < bv ? -1 : av > bv;
+}
+
+static bool add_relative_s32(uint64_t base, int32_t delta, uint64_t *result)
+{
+	if (delta >= 0) {
+		if (base > UINT64_MAX - (uint32_t)delta)
+			return false;
+		*result = base + (uint32_t)delta;
+	} else {
+		uint64_t magnitude = -(int64_t)delta;
+
+		if (base < magnitude)
+			return false;
+		*result = base - magnitude;
+	}
+	return true;
+}
+
+static void invalid_alt_call_metadata(void)
+{
+	fprintf(stderr, "Invalid ELF alternative-call metadata\n");
+	exit(EXIT_FAILURE);
+}
+
+static bool bfd_symbol_value(bfd *abfd, const char *name, uint64_t *value)
+{
+	asymbol **symbols;
+	long storage;
+	long count;
+	long i;
+	bool found = false;
+
+	storage = bfd_get_symtab_upper_bound(abfd);
+	if (storage <= 0)
+		return false;
+	symbols = safe_malloc(storage);
+	count = bfd_canonicalize_symtab(abfd, symbols);
+	if (count < 0) {
+		free(symbols);
+		invalid_alt_call_metadata();
+	}
+	for (i = 0; i < count; i++) {
+		asymbol *symbol = symbols[i];
+
+		if (strcmp(bfd_asymbol_name(symbol), name))
+			continue;
+		if (found && *value != bfd_asymbol_value(symbol)) {
+			free(symbols);
+			invalid_alt_call_metadata();
+		}
+		*value = bfd_asymbol_value(symbol);
+		found = true;
+	}
+	free(symbols);
+	return found;
+}
+
+static void read_alt_call_sites(struct sym_store *ss, bfd *abfd)
+{
+	asection *section;
+	uint8_t *data;
+	uint64_t start;
+	uint64_t end;
+	size_t count;
+	size_t i;
+	bool have_start;
+	bool have_end;
+
+	if (!ss->x86_64)
+		return;
+	have_start = bfd_symbol_value(abfd, "__alt_call_sites_start", &start);
+	have_end = bfd_symbol_value(abfd, "__alt_call_sites_end", &end);
+	if (!have_start && !have_end)
+		return;
+	if (!have_start || !have_end || end < start
+	    || (end - start) % sizeof(uint32_t))
+		invalid_alt_call_metadata();
+	if (end == start)
+		return;
+	if (end - start > SIZE_MAX)
+		invalid_alt_call_metadata();
+	for (section = abfd->sections; section; section = section->next) {
+		uint64_t section_start = bfd_section_vma(section);
+		uint64_t section_size = bfd_section_size(section);
+
+		if (section_start <= start
+		    && section_size <= UINT64_MAX - section_start
+		    && end <= section_start + section_size)
+			break;
+	}
+	if (!section)
+		invalid_alt_call_metadata();
+	count = (end - start) / sizeof(uint32_t);
+	data = safe_malloc(end - start);
+	if (!bfd_get_section_contents(abfd, section, data,
+				      start - bfd_section_vma(section), end - start)) {
+		free(data);
+		invalid_alt_call_metadata();
+	}
+	ss->alt_call_sites = safe_malloc(count * sizeof(*ss->alt_call_sites));
+	for (i = 0; i < count; i++) {
+		uint64_t entry = start + i * sizeof(uint32_t);
+		uint32_t raw = elf32(data + i * sizeof(uint32_t),
+				     ss->elf_big_endian);
+		int32_t delta;
+		uint64_t call;
+		asection *call_section;
+		uint8_t opcode[2];
+		void *image = ss;
+
+		memcpy(&delta, &raw, sizeof(delta));
+		if (!add_relative_s32(entry, delta, &call)
+		    || call > UINT64_MAX - 6
+		    || !sym_range_is_executable(&image, call, call + 6)) {
+			free(data);
+			invalid_alt_call_metadata();
+		}
+		for (call_section = abfd->sections; call_section;
+		     call_section = call_section->next) {
+			uint64_t section_start = bfd_section_vma(call_section);
+			uint64_t section_size = bfd_section_size(call_section);
+
+			if (section_start <= call
+			    && section_size <= UINT64_MAX - section_start
+			    && call + 6 <= section_start + section_size)
+				break;
+		}
+		if (!call_section
+		    || !bfd_get_section_contents(abfd, call_section, opcode,
+						 call - bfd_section_vma(call_section),
+						 sizeof(opcode))
+		    || opcode[0] != 0xff || opcode[1] != 0x15) {
+			free(data);
+			invalid_alt_call_metadata();
+		}
+		ss->alt_call_sites[i] = call;
+	}
+	free(data);
+	qsort(ss->alt_call_sites, count, sizeof(*ss->alt_call_sites),
+	      uint64_compare);
+	for (i = 1; i < count; i++) {
+		if (ss->alt_call_sites[i] == ss->alt_call_sites[i - 1])
+			invalid_alt_call_metadata();
+	}
+	ss->nr_alt_call_sites = count;
+}
+
 static struct sym *find_bfd_symbol(struct sym_store *ss, const char *name,
 				   uint64_t addr)
 {
@@ -800,6 +957,7 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 			exit(EXIT_FAILURE);
 		}
 	}
+	read_alt_call_sites(ss, abfd);
 	for (i = 0; i < ss->nr_stored; i++) {
 		struct image_section *image;
 
@@ -905,6 +1063,68 @@ bool sym_code_matches(void **store, uint64_t addr,
 	if (!section || addr + len > section->end || !load_image_data(ss))
 		return false;
 	return !memcmp(section->data + addr - section->start, code, len);
+}
+
+static bool find_alt_call_site(const struct sym_store *ss, uint64_t addr,
+			       size_t len, uint64_t *site)
+{
+	size_t high = ss->nr_alt_call_sites;
+	size_t low = 0;
+
+	if (!len || addr > UINT64_MAX - len)
+		return false;
+	while (low < high) {
+		size_t mid = low + (high - low) / 2;
+
+		if (ss->alt_call_sites[mid] <= addr)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	if (!low)
+		return false;
+	*site = ss->alt_call_sites[low - 1];
+	return addr >= *site && addr + len <= *site + 6;
+}
+
+bool sym_instruction_matches(void **store, uint64_t addr,
+			     const uint8_t *code, size_t len)
+{
+	static const uint8_t poison[6] = {
+		0x0f, 0x0b, 0x0f, 0x0b, 0x0f, 0x0b,
+	};
+	struct sym_store *ss = *store;
+	struct image_section *section;
+	const uint8_t *original;
+	uint64_t site;
+
+	if (sym_code_matches(store, addr, code, len))
+		return true;
+	if (!ss || !ss->x86_64 || !code
+	    || !find_alt_call_site(ss, addr, len, &site)
+	    || !load_image_data(ss))
+		return false;
+	section = image_section_find(ss, site);
+	if (!section || site + 6 > section->end)
+		return false;
+	original = section->data + site - section->start;
+	if (original[0] != 0xff || original[1] != 0x15)
+		return false;
+
+	if (addr == site && len == 6 && code[0] == 0x2e && code[1] == 0xe8) {
+		uint32_t raw;
+		int32_t displacement;
+		uint64_t target;
+
+		memcpy(&raw, code + 2, sizeof(raw));
+		raw = GUINT32_FROM_LE(raw);
+		memcpy(&displacement, &raw, sizeof(displacement));
+		return add_relative_s32(site + 6, displacement, &target)
+			&& sym_address_is_executable(store, target);
+	}
+	return ((addr == site && len == sizeof(poison))
+		|| (len == 2 && !((addr - site) & 1)))
+		&& !memcmp(code, poison + addr - site, len);
 }
 
 size_t sym_find_code_matches(void **store, const uint8_t *code, size_t len,

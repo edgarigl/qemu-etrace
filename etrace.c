@@ -1050,9 +1050,10 @@ static uint16_t matching_instruction_prefix(
 	for (i = 0; i < definition->insn_count; i++) {
 		const struct etrace_tb_insn *insn = &definition->insns[i];
 
-		if (!sym_code_matches(t->tr.sym_tree, linked + insn->offset,
-				      definition->code + insn->offset,
-				      insn->size))
+		if (!sym_instruction_matches(t->tr.sym_tree,
+					     linked + insn->offset,
+					     definition->code + insn->offset,
+					     insn->size))
 			break;
 	}
 	return i;

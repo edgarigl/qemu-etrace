@@ -243,6 +243,12 @@ code can use explicit or linked-address mappings for coverage, but cannot seed
 physical bindings. There is no minimum code length for verification at an
 established address, including short entries.
 
+On x86-64, registered alternative-call slots can also be validated through the
+ELF's `__alt_call_sites_start` and `__alt_call_sites_end` table. Only the linked
+indirect call, an in-image direct-call replacement, or the documented `ud2`
+poison form is accepted inside each six-byte slot. See
+[Runtime-patched code](coverage-scenarios/runtime-patched-code.md).
+
 Once a definition resolves, pending execution aggregates are replayed through
 the normal execution-range coverage path. Repeated executions with the same
 prefix are combined without changing coverage counts or accumulated duration.

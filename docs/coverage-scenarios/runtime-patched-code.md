@@ -112,6 +112,29 @@ alternatives region. Object branch coverage must either:
 It must not decode the static NOP bytes and claim that the runtime interval has
 no branches.
 
+## Registered x86 alternative calls
+
+An x86-64 ELF may publish alternative-call sites through the boundary symbols
+`__alt_call_sites_start` and `__alt_call_sites_end`. The table contains signed
+32-bit offsets relative to each table entry. qemu-etrace accepts the metadata
+only when every resulting six-byte range is executable and begins with the
+linked indirect-call encoding `ff 15 disp32`.
+
+For a TB already owned by a trusted image mapping, a registered call
+instruction can match one of these runtime forms:
+
+- the original indirect call from the ELF;
+- `2e e8 disp32`, when the direct destination lies in an executable section of
+  the selected ELF, including a destination immediately after `endbr64`;
+- the six-byte poison sequence `0f 0b 0f 0b 0f 0b`, observed as either the
+  complete range or its individual two-byte `ud2` instructions.
+
+All bytes outside registered slots retain exact instruction validation. An
+unknown slot encoding or an out-of-image direct target stops validation at
+that instruction and leaves the rest of the execution unresolved. Recognized
+patches do not create or extend image mappings. ELFs without both boundary
+symbols retain ordinary byte matching, while malformed tables are rejected.
+
 ## Safety interpretation
 
 The result is valid dispatched-instruction evidence with imprecise source
