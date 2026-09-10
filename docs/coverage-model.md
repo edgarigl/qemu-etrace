@@ -114,6 +114,12 @@ addresses before coverage is credited. An incomplete early context can use
 that established ownership after its architecture and TB bytes are checked;
 an explicitly different privilege level remains excluded.
 
+For an image-owned TB with a runtime code change, validation proceeds by
+complete instruction. Matching instructions before the first unexplained
+mismatch contribute coverage; the mismatching instruction and remainder form
+an unresolved execution boundary. A partially matching TB never supplies
+image-ownership evidence for another TB.
+
 With `--auto-map`, unmatched TB executions are aggregated until their code and
 physical mappings can be associated with the input ELF. Resolution replays the
 aggregates through the same range processor. Ambiguous or unrelated TBs are

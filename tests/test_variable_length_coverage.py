@@ -604,6 +604,104 @@ def test_v1_context_anchor_recovers_incomplete_early_context(
         assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 
+@pytest.mark.parametrize("ordered", [False, True])
+def test_v1_owned_mapping_credits_matching_instruction_prefix(
+    run_etrace, tmp_path, x86_fixture, ordered
+):
+    physical = 0x200000
+    changed = x86_fixture.code[:-1] + b"\xcc"
+    anchor_offset, anchor_size = x86_fixture.instructions[1]
+    trace = tmp_path / f"partial-owned-{ordered}.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1,
+            pc=physical,
+            architecture=62,
+            privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=physical,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, len(changed), physical),),
+            code=changed,
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1,
+            insn_count=len(x86_fixture.instructions),
+        )
+        + etrace_tb_def(
+            tb_id=2,
+            vaddr=x86_fixture.start + anchor_offset,
+            insns=((0, anchor_size),),
+            mappings=((0, anchor_size, physical + anchor_offset),),
+            code=x86_fixture.code[anchor_offset:anchor_offset + anchor_size],
+        )
+        + etrace_tb_exec(
+            tb_id=2, sequence=2, context_id=1, insn_count=1,
+        )
+    )
+    extra_args = ["--auto-map", "--elf-context", "x86_64:cpl0"]
+    if ordered:
+        extra_args.append("--preserve-order")
+
+    result, (lines, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, *extra_args
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 1
+    assert lines[10] == lines[12] == lines[13] == lines[14] == 1
+    assert lines[11] == 2
+    assert lines[15] == 0
+    assert "1 partially verified execution events" in result.stderr
+    if ordered:
+        assert "retained 1 unresolved execution boundaries" in result.stderr
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_v1_partial_match_does_not_establish_mapping(
+    run_etrace, tmp_path, x86_fixture, ordered
+):
+    physical = 0x200000
+    changed = x86_fixture.code[:-1] + b"\xcc"
+    trace = tmp_path / f"partial-unowned-{ordered}.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1,
+            pc=x86_fixture.start,
+            architecture=62,
+            privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=1,
+            vaddr=x86_fixture.start,
+            insns=tuple(x86_fixture.instructions),
+            mappings=((0, len(changed), physical),),
+            code=changed,
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1,
+            insn_count=len(x86_fixture.instructions),
+        )
+    )
+    extra_args = ["--auto-map", "--elf-context", "x86_64:cpl0"]
+    if ordered:
+        extra_args.append("--preserve-order")
+
+    result, (_, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace, *extra_args
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 0
+    assert "partially verified" not in result.stderr
+
+
 def test_v1_context_anchor_releases_ordered_journal(
     run_etrace, tmp_path, x86_fixture
 ):

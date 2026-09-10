@@ -75,6 +75,7 @@ struct etracer {
 	uint64_t resolved_events;
 	uint64_t ambiguous_tbs;
 	uint64_t code_candidates;
+	uint64_t partial_events;
 	FILE *event_spool;
 	struct event_journal *journal;
 	uint64_t journal_counts[3];
@@ -101,6 +102,7 @@ struct etrace_tb_definition {
 	uint64_t code_hash;
 	uint32_t size;
 	uint16_t insn_count;
+	uint16_t verified_insn_count;
 	uint16_t mapping_count;
 	struct etrace_tb_insn *insns;
 	struct etrace_tb_mapping *mappings;
@@ -734,14 +736,20 @@ void etrace_process_tb(struct etracer *t)
 	}
 }
 
-static void etrace_emit_tb_execution(struct etracer *t,
-				     const struct etrace_tb_definition *definition,
-				     const struct pending_tb_exec *pending,
-				     enum cov_format cov_fmt)
+static bool etrace_emit_tb_execution(
+	struct etracer *t, const struct etrace_tb_definition *definition,
+	const struct pending_tb_exec *pending, enum cov_format cov_fmt)
 {
 	struct tracer linked_tracer = t->tr;
-	uint16_t last = pending->insn_count - 1;
-	struct trace_exec exec = {
+	uint16_t verified = MIN(pending->insn_count,
+				definition->verified_insn_count);
+	uint16_t last;
+	struct trace_exec exec;
+
+	if (!verified)
+		return true;
+	last = verified - 1;
+	exec = (struct trace_exec) {
 		.time = pending->first_time,
 		.start = definition->resolved ? definition->linked_vaddr
 			: definition->vaddr,
@@ -764,6 +772,7 @@ static void etrace_emit_tb_execution(struct etracer *t,
 		trace_process_exec(&t->tr, cov_fmt, &exec, etrace_output_exec,
 				   NULL);
 	}
+	return verified != pending->insn_count;
 }
 
 static bool binding_lookup(const struct etracer *t, uint64_t physical_start,
@@ -1030,48 +1039,86 @@ static bool resolve_from_physical(const struct etracer *t,
 	return true;
 }
 
+static uint16_t matching_instruction_prefix(
+	const struct etracer *t, const struct etrace_tb_definition *definition,
+	uint64_t linked)
+{
+	uint16_t i;
+
+	if (!definition->code)
+		return 0;
+	for (i = 0; i < definition->insn_count; i++) {
+		const struct etrace_tb_insn *insn = &definition->insns[i];
+
+		if (!sym_code_matches(t->tr.sym_tree, linked + insn->offset,
+				      definition->code + insn->offset,
+				      insn->size))
+			break;
+	}
+	return i;
+}
+
 static bool resolve_tb_definition(struct etracer *t,
 				  struct etrace_tb_definition *definition)
 {
-	uint64_t linked = definition->vaddr;
+	uint64_t direct_linked = definition->vaddr;
+	uint64_t physical_linked = 0;
 	uint64_t mapped_end;
+	uint16_t verified = 0;
+	bool direct_mapping;
+	bool physical_mapping;
 	bool explicit_map;
 	bool trusted_code = false;
 
 	if (definition->resolved)
 		return false;
 	explicit_map = address_map_translate(t->tr.address_map,
-					     definition->vaddr, &linked);
+					     definition->vaddr, &direct_linked);
 	if (explicit_map) {
 		uint64_t runtime_end = definition->vaddr + definition->size - 1;
 
 		if (!address_map_translate(t->tr.address_map, runtime_end,
 					   &mapped_end)
-		    || mapped_end - linked != definition->size - 1)
+		    || mapped_end - direct_linked != definition->size - 1)
 			explicit_map = false;
 	}
-	if (linked <= UINT64_MAX - definition->size
-	    && (explicit_map || linked == definition->vaddr)
-	    && sym_range_is_executable(t->tr.sym_tree, linked,
-					linked + definition->size)) {
-		trusted_code = definition->code
-			&& sym_code_matches(t->tr.sym_tree, linked,
-					    definition->code, definition->size);
-		if (definition->code && !trusted_code)
+	direct_mapping = direct_linked <= UINT64_MAX - definition->size
+		&& (explicit_map || direct_linked == definition->vaddr)
+		&& sym_range_is_executable(t->tr.sym_tree, direct_linked,
+					   direct_linked + definition->size);
+	physical_mapping = resolve_from_physical(t, definition, &physical_linked)
+		&& physical_linked <= UINT64_MAX - definition->size
+		&& sym_range_is_executable(t->tr.sym_tree, physical_linked,
+					   physical_linked + definition->size);
+
+	if (direct_mapping) {
+		if (!definition->code) {
+			verified = definition->insn_count;
+		} else if (sym_code_matches(t->tr.sym_tree, direct_linked,
+					   definition->code, definition->size)) {
+			verified = definition->insn_count;
+			trusted_code = true;
+		} else if (explicit_map
+			   || (physical_mapping
+			       && physical_linked == direct_linked)) {
+			verified = matching_instruction_prefix(t, definition,
+						       direct_linked);
+		} else {
 			return false;
-		definition->resolved = true;
-		definition->linked_vaddr = linked;
-		definition->owned_mapping = explicit_map;
-	} else if (resolve_from_physical(t, definition, &linked)
-		   && linked <= UINT64_MAX - definition->size
-		   && sym_range_is_executable(t->tr.sym_tree, linked,
-					      linked + definition->size)
-		   && definition->code
-		   && sym_code_matches(t->tr.sym_tree, linked,
-					    definition->code, definition->size)) {
-		definition->resolved = true;
-		definition->linked_vaddr = linked;
-		definition->owned_mapping = true;
+		}
+		if (verified) {
+			definition->resolved = true;
+			definition->linked_vaddr = direct_linked;
+			definition->owned_mapping = explicit_map || physical_mapping;
+		}
+	} else if (physical_mapping && definition->code) {
+		verified = matching_instruction_prefix(t, definition,
+						       physical_linked);
+		if (verified) {
+			definition->resolved = true;
+			definition->linked_vaddr = physical_linked;
+			definition->owned_mapping = true;
+		}
 	} else if (!definition->code_searched && definition->code
 		   && definition->size >= 8) {
 		size_t count = sym_find_code_matches(t->tr.sym_tree,
@@ -1088,6 +1135,7 @@ static bool resolve_tb_definition(struct etracer *t,
 	}
 	if (!definition->resolved)
 		return false;
+	definition->verified_insn_count = verified;
 
 	if (definition->code_candidate) {
 		definition->code_candidate = false;
@@ -1118,7 +1166,9 @@ static void replay_pending(struct etracer *t,
 
 		if (execution_context_matches_elf(t, definition,
 						 pending->context_id)) {
-			etrace_emit_tb_execution(t, definition, pending, cov_fmt);
+			if (etrace_emit_tb_execution(t, definition, pending,
+						     cov_fmt))
+				t->partial_events += pending->count;
 			t->resolved_events += pending->count;
 		}
 		t->unresolved_events -= pending->count;
@@ -1186,6 +1236,7 @@ static bool etrace_process_tb_def(struct etracer *t, enum cov_format cov_fmt)
 	if (!t->auto_map) {
 		definition->resolved = true;
 		definition->linked_vaddr = definition->vaddr;
+		definition->verified_insn_count = definition->insn_count;
 	}
 	g_hash_table_insert(t->tb_defs, &definition->tb_id, definition);
 
@@ -1343,7 +1394,11 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 		.insn_count = tb_exec->insn_count,
 		.flags = tb_exec->flags,
 	};
-	etrace_emit_tb_execution(t, definition, &execution, cov_fmt);
+	if (etrace_emit_tb_execution(t, definition, &execution, cov_fmt)) {
+		t->partial_events++;
+		if (t->preserve_order)
+			goto ordered_unresolved;
+	}
 	return true;
 
 ordered_unresolved:
@@ -1719,6 +1774,7 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 		{
 			const struct etrace_tb_exec *tb_exec = &t->pkg->tb_exec;
 			struct etrace_tb_definition *definition;
+			bool unresolved = true;
 
 			counts[0]++;
 
@@ -1745,9 +1801,12 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 					.flags = tb_exec->flags,
 				};
 
-				etrace_emit_tb_execution(t, definition, &execution,
-							 cov_fmt);
-			} else {
+				unresolved = etrace_emit_tb_execution(
+					t, definition, &execution, cov_fmt);
+				if (unresolved)
+					t->partial_events++;
+			}
+			if (unresolved) {
 				t->ordered_unresolved++;
 				if (t->tr.fp_out) {
 					fprintf(t->tr.fp_out,
@@ -2081,6 +2140,12 @@ void etrace_show(int fd, FILE *fp_out,
 			"Automatic mapping replayed %" PRIu64
 			" deferred execution events\n",
 			t.resolved_events);
+	}
+	if (t.auto_map && t.partial_events) {
+		fprintf(stderr,
+			"Automatic mapping retained unresolved suffixes for %" PRIu64
+			" partially verified execution events\n",
+			t.partial_events);
 	}
 	if (t.auto_map && t.inferred_image_mappings) {
 		fprintf(stderr,

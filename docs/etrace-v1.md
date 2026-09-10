@@ -234,9 +234,14 @@ including when an earlier execution was already resolved. The converter does
 not choose a claimant based on arrival or lookup order.
 
 Captured code that contradicts an explicit or linked-address mapping leaves
-the TB unresolved. TBs without captured code can use those address mappings
-for coverage, but cannot seed physical bindings. There is no minimum code
-length for verification at an established address, including short entries.
+the mismatching instruction and following TB suffix unresolved. When an
+explicit map or an existing physical image binding already owns the address,
+complete instructions before the first mismatch can contribute coverage.
+Their partial match never creates or extends a physical binding. A mismatch in
+the first instruction leaves the complete TB unresolved. TBs without captured
+code can use explicit or linked-address mappings for coverage, but cannot seed
+physical bindings. There is no minimum code length for verification at an
+established address, including short entries.
 
 Once a definition resolves, pending execution aggregates are replayed through
 the normal execution-range coverage path. Repeated executions with the same
