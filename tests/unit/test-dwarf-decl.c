@@ -32,6 +32,15 @@ static const char info[] =
 " DW_AT_decl_file 0x00000001\n"
 " DW_AT_decl_line 0x00000009\n"
 " DW_AT_low_pc 0x00001200\n"
+"< 1><0x000000e0 GOFF=0x000000e0> DW_TAG_subprogram\n"
+" DW_AT_name ranged\n"
+" DW_AT_decl_file 0x00000001\n"
+" DW_AT_decl_line 0x0000000c\n"
+" DW_AT_low_pc (addr_index: 0x00000000)0x00000000\n"
+" DW_AT_ranges 0x00000010\n"
+" [ 0] start,end 0x00001400 0x00001410\n"
+" [ 1] range entry 0x00001500 0x00001510\n"
+" [ 2] end-of-list\n"
 "COMPILE_UNIT<header overall offset = 0x00000100>:\n"
 "< 0><0x0000000c GOFF=0x0000010c> DW_TAG_compile_unit\n"
 " DW_AT_name src/two.c\n"
@@ -50,7 +59,7 @@ static void test_declarations(void)
 	g_assert_nonnull(fp);
 	g_assert_true(dwarf_declarations_parse(fp, &decls));
 	fclose(fp);
-	g_assert_cmpuint(decls.count, ==, 4);
+	g_assert_cmpuint(decls.count, ==, 7);
 
 	g_assert_cmphex(decls.entries[0].address, ==, 0x1000);
 	g_assert_cmpstr(decls.entries[0].name, ==, "specified");
@@ -68,10 +77,20 @@ static void test_declarations(void)
 	g_assert_cmpstr(decls.entries[2].filename, ==, "/build/src/one.c");
 	g_assert_cmpuint(decls.entries[2].line, ==, 9);
 
-	g_assert_cmphex(decls.entries[3].address, ==, 0x1300);
-	g_assert_cmpstr(decls.entries[3].name, ==, "second_cu");
-	g_assert_cmpstr(decls.entries[3].filename, ==, "/other/src/two.c");
-	g_assert_cmpuint(decls.entries[3].line, ==, 11);
+	g_assert_cmphex(decls.entries[3].address, ==, 0);
+	g_assert_cmpstr(decls.entries[3].name, ==, "ranged");
+	g_assert_cmpuint(decls.entries[3].line, ==, 12);
+	g_assert_cmphex(decls.entries[4].address, ==, 0x1400);
+	g_assert_cmpstr(decls.entries[4].name, ==, "ranged");
+	g_assert_cmpuint(decls.entries[4].line, ==, 12);
+	g_assert_cmphex(decls.entries[5].address, ==, 0x1500);
+	g_assert_cmpstr(decls.entries[5].name, ==, "ranged");
+	g_assert_cmpuint(decls.entries[5].line, ==, 12);
+
+	g_assert_cmphex(decls.entries[6].address, ==, 0x1300);
+	g_assert_cmpstr(decls.entries[6].name, ==, "second_cu");
+	g_assert_cmpstr(decls.entries[6].filename, ==, "/other/src/two.c");
+	g_assert_cmpuint(decls.entries[6].line, ==, 11);
 
 	dwarf_declarations_destroy(&decls);
 }

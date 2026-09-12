@@ -215,10 +215,11 @@ def test_function_entry_line_policy_is_explicit_and_uses_function_count(
     assert line_counts(outputs["function-entry"])[10] == 3
 
 
+@pytest.mark.parametrize("compiler_name", ["g++", "clang++-18"])
 def test_lcov_resolves_dwarf_specification_declaration(
-    run_etrace, tmp_path
+    run_etrace, tmp_path, compiler_name
 ):
-    compiler = shutil.which("g++") or shutil.which("c++")
+    compiler = shutil.which(compiler_name)
     if compiler is None or shutil.which("dwarfdump") is None:
         pytest.skip("C++ compiler and dwarfdump are required")
     binary = tmp_path / "function-declarations"

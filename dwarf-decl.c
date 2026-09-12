@@ -27,6 +27,8 @@ struct dwarf_decl_die {
 	uint64_t specification;
 	char *name;
 	char *linkage_name;
+	uint64_t *ranges;
+	size_t nr_ranges;
 	unsigned int file;
 	unsigned int line;
 	size_t cu;
@@ -56,6 +58,12 @@ static char *copy_value(const char *line, const char *attribute)
 	value += strlen(attribute);
 	while (isspace((unsigned char)*value))
 		value++;
+	if (!strncmp(value, "(indexed string:", 16)) {
+		value = strchr(value, ')');
+		if (!value)
+			return NULL;
+		value++;
+	}
 	end = value + strlen(value);
 	while (end > value && isspace((unsigned char)end[-1]))
 		end--;
@@ -99,6 +107,12 @@ static bool parse_attribute_hex(const char *line, const char *attribute,
 	start += strlen(attribute);
 	while (isspace((unsigned char)*start))
 		start++;
+	if (!strncmp(start, "(addr_index:", 12)) {
+		start = strchr(start, ')');
+		if (!start)
+			return false;
+		start++;
+	}
 	errno = 0;
 	*value = strtoull(start, &end, 0);
 	if (errno || end == start)
@@ -134,7 +148,7 @@ static bool remember_file(struct dwarf_decl_cu *cu, unsigned int index,
 	char *copy;
 	size_t i;
 
-	if (!index || !name || !*name)
+	if (!name || !*name)
 		return true;
 	for (i = 0; i < cu->nr_files; i++) {
 		if (cu->files[i].index != index)
@@ -206,6 +220,29 @@ static int die_compare(const void *a, const void *b)
 	return da->offset < db->offset ? -1 : da->offset > db->offset;
 }
 
+static bool append_range(struct dwarf_decl_die *die, const char *line)
+{
+	const char *start = strstr(line, "start,end");
+	uint64_t address;
+	uint64_t end_address;
+	uint64_t *ranges;
+	const char *end;
+
+	if (!start)
+		start = strstr(line, "range entry");
+	if (!start || !parse_hex_after(start, "0x", &address, &end)
+	    || !parse_hex_after(end, "0x", &end_address, NULL)
+	    || end_address <= address)
+		return false;
+	ranges = realloc(die->ranges,
+		(die->nr_ranges + 1) * sizeof(*die->ranges));
+	if (!ranges)
+		return false;
+	die->ranges = ranges;
+	die->ranges[die->nr_ranges++] = address;
+	return true;
+}
+
 static const struct dwarf_decl_die *find_die(
 	const struct dwarf_decl_parse *parse, uint64_t offset)
 {
@@ -272,6 +309,7 @@ static void clear_parse(struct dwarf_decl_parse *parse)
 	for (i = 0; i < parse->nr_dies; i++) {
 		free(parse->dies[i].name);
 		free(parse->dies[i].linkage_name);
+		free(parse->dies[i].ranges);
 	}
 	free(parse->cus);
 	free(parse->dies);
@@ -295,6 +333,7 @@ bool dwarf_declarations_parse(FILE *fp, struct dwarf_declarations *decls)
 	struct dwarf_decl_cu *cu = NULL;
 	struct dwarf_decl_die *die = NULL;
 	bool cu_root = false;
+	bool in_ranges = false;
 	char *line = NULL;
 	size_t capacity = 0;
 	ssize_t length;
@@ -318,11 +357,13 @@ bool dwarf_declarations_parse(FILE *fp, struct dwarf_declarations *decls)
 			memset(cu, 0, sizeof(*cu));
 			die = NULL;
 			cu_root = false;
+			in_ranges = false;
 			continue;
 		}
 		if (strstr(line, "DW_TAG_")) {
 			die = NULL;
 			cu_root = cu && strstr(line, "DW_TAG_compile_unit");
+			in_ranges = false;
 			if (!cu || !strstr(line, "DW_TAG_subprogram")
 			    || !parse_hex_after(line, "GOFF=0x", &value, NULL))
 				continue;
@@ -342,6 +383,21 @@ bool dwarf_declarations_parse(FILE *fp, struct dwarf_declarations *decls)
 		}
 		if (!cu)
 			continue;
+		if (die && strstr(line, "DW_AT_ranges")) {
+			in_ranges = true;
+			continue;
+		}
+		if (die && in_ranges
+		    && (strstr(line, "start,end") || strstr(line, "range entry"))) {
+			if (!append_range(die, line))
+				goto fail;
+			continue;
+		}
+		if (in_ranges
+		    && (strstr(line, "end of list") || strstr(line, "end-of-list"))) {
+			in_ranges = false;
+			continue;
+		}
 		if (cu_root && (text = copy_value(line, "DW_AT_name"))) {
 			free(cu->name);
 			cu->name = text;
@@ -382,6 +438,10 @@ bool dwarf_declarations_parse(FILE *fp, struct dwarf_declarations *decls)
 					       NULL)) {
 			die->address = value;
 			die->have_address = true;
+		} else if (parse_attribute_hex(line, "DW_AT_entry_pc", &value,
+					       NULL)) {
+			die->address = value;
+			die->have_address = true;
 		} else if (strstr(line, "DW_AT_abstract_origin")) {
 			/* The -G dwarfdump output supplies the global reference. */
 			if (parse_hex_after(line, "GOFF=0x", &value, NULL)) {
@@ -409,25 +469,37 @@ bool dwarf_declarations_parse(FILE *fp, struct dwarf_declarations *decls)
 		struct dwarf_decl *entry;
 		struct dwarf_decl *new_entries;
 
-		if (!candidate->have_address)
+		if (!candidate->have_address && !candidate->nr_ranges)
 			continue;
 		resolve_die(&parse, candidate, &resolved, 0);
 		if ((!resolved.name && !resolved.linkage_name)
 		    || !resolved.filename || !resolved.line)
 			continue;
-		new_entries = realloc(decls->entries,
-			(decls->count + 1) * sizeof(*decls->entries));
-		if (!new_entries)
-			goto fail_no_line;
-		decls->entries = new_entries;
-		entry = &decls->entries[decls->count++];
-		entry->address = candidate->address;
-		entry->name = strdup(resolved.linkage_name
-			? resolved.linkage_name : resolved.name);
-		entry->filename = strdup(resolved.filename);
-		entry->line = resolved.line;
-		if (!entry->name || !entry->filename)
-			goto fail_no_line;
+		{
+			size_t nr_addresses = candidate->nr_ranges
+				+ candidate->have_address;
+			size_t j;
+
+			for (j = 0; j < nr_addresses; j++) {
+				new_entries = realloc(decls->entries,
+					(decls->count + 1)
+					* sizeof(*decls->entries));
+				if (!new_entries)
+					goto fail_no_line;
+				decls->entries = new_entries;
+				entry = &decls->entries[decls->count++];
+				entry->address = candidate->have_address && !j
+					? candidate->address
+					: candidate->ranges[
+						j - candidate->have_address];
+				entry->name = strdup(resolved.linkage_name
+					? resolved.linkage_name : resolved.name);
+				entry->filename = strdup(resolved.filename);
+				entry->line = resolved.line;
+				if (!entry->name || !entry->filename)
+					goto fail_no_line;
+			}
+		}
 	}
 	clear_parse(&parse);
 	return true;

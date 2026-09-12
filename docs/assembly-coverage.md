@@ -41,10 +41,13 @@ source declaration. qemu-etrace first uses `DW_AT_decl_file` and
 `DW_AT_decl_line` from the matching `DW_TAG_subprogram`, following global
 `DW_AT_abstract_origin` and `DW_AT_specification` references when attributes
 are inherited. The concrete DIE address and resolved name must map
-unambiguously to an ELF function symbol. If no such declaration is available,
-qemu-etrace scans forward to the first eligible non-inlined line-table row as a
-fallback. This keeps assembly functions, which commonly have no subprogram
-DIE, in the function inventory.
+unambiguously to an ELF function symbol. Concrete `DW_AT_low_pc`,
+`DW_AT_entry_pc`, and range-list start addresses are considered. Indexed
+DWARF 5 strings, addresses, and zero-based file indices are resolved from
+`dwarfdump` output. If no such declaration is available, qemu-etrace scans
+forward to the first eligible non-inlined line-table row as a fallback. This
+keeps assembly functions, which commonly have no subprogram DIE, in the
+function inventory.
 
 An explicit nonzero ELF symbol size is preferred. A zero-sized symbol receives
 an inferred range only when all of the following hold:
