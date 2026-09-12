@@ -37,9 +37,14 @@ has zero size or is not typed as a function.
 ## Functions
 
 LCOV `FN` records require an ELF function symbol with a defensible range and a
-non-inlined DWARF source location inside that range. Leading padding or
-alternative bytes do not suppress a function: qemu-etrace scans forward to the
-first eligible body location for the declaration line.
+source declaration. qemu-etrace first uses `DW_AT_decl_file` and
+`DW_AT_decl_line` from the matching `DW_TAG_subprogram`, following global
+`DW_AT_abstract_origin` and `DW_AT_specification` references when attributes
+are inherited. The concrete DIE address and resolved name must map
+unambiguously to an ELF function symbol. If no such declaration is available,
+qemu-etrace scans forward to the first eligible non-inlined line-table row as a
+fallback. This keeps assembly functions, which commonly have no subprogram
+DIE, in the function inventory.
 
 An explicit nonzero ELF symbol size is preferred. A zero-sized symbol receives
 an inferred range only when all of the following hold:
@@ -76,7 +81,8 @@ qemu-etrace \
 
 Each object records the symbol name, hexadecimal address and size, ELF-derived
 kind, binding, executable section, size provenance, selected source location
-and its confidence, entry hit count, and one of these statuses:
+and its confidence (`dwarf-declaration`, `dwarf-line`, or `none`), entry hit
+count, and one of these statuses:
 
 - `emitted`: eligible for an LCOV function record;
 - `deduplicated-alias`: represented by an earlier equivalent function;

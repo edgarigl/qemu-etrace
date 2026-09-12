@@ -41,6 +41,7 @@
 
 #include "config.h"
 #include "filename.h"
+#include "dwarf-decl.h"
 #include "dwarf-lines.h"
 #include "util.h"
 #include "safeio.h"
@@ -111,6 +112,9 @@ struct sym_store {
 	bool x86_64;
 	bool xen_alt_metadata;
 };
+
+static struct sym *find_bfd_symbol(struct sym_store *ss, const char *name,
+				   uint64_t addr);
 
 static uint16_t elf16(const uint8_t *data, bool big_endian)
 {
@@ -594,6 +598,65 @@ static void materialize_line_ranges(struct sym_store *ss)
 			}
 		}
 	}
+}
+
+static void set_function_declaration(struct sym_store *ss,
+				     const struct dwarf_decl *declaration)
+{
+	struct sym *sym = find_bfd_symbol(ss, declaration->name,
+					  declaration->address);
+	char *filename;
+
+	if (!sym || !(sym->flags & SYM_F_FUNCTION)
+	    || !(sym->flags & SYM_F_EXECUTABLE) || sym->declaration_ambiguous)
+		return;
+	filename = filename_sanitize(declaration->filename);
+	if (sym->declaration.filename) {
+		if (sym->declaration.linenr == declaration->line
+		    && !strcmp(sym->declaration.filename, filename)) {
+			free(filename);
+			return;
+		}
+		free((void *)sym->declaration.filename);
+		memset(&sym->declaration, 0, sizeof(sym->declaration));
+		sym->declaration_ambiguous = true;
+		free(filename);
+		return;
+	}
+	sym->declaration.filename = filename;
+	sym->declaration.linenr = declaration->line;
+}
+
+static void read_function_declarations(struct sym_store *ss,
+				       const char *dwarfdump, const char *elf)
+{
+	char *argv[] = { (char *)dwarfdump, "-i", "-G", (char *)elf, NULL };
+	struct dwarf_declarations declarations;
+	int stdio[3] = { STDIN_FILENO, -1, STDERR_FILENO };
+	FILE *output = tmpfile();
+	pid_t child;
+	int status;
+	size_t i;
+
+	if (!output) {
+		perror("tmpfile");
+		exit(EXIT_FAILURE);
+	}
+	stdio[1] = fileno(output);
+	child = run(argv[0], argv, stdio);
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status)
+	    || WEXITSTATUS(status) != 0 || fseek(output, 0, SEEK_SET) != 0) {
+		fprintf(stderr, "dwarfdump failed\n");
+		exit(EXIT_FAILURE);
+	}
+	if (!dwarf_declarations_parse(output, &declarations)) {
+		fprintf(stderr, "Unable to parse DWARF function declarations\n");
+		exit(EXIT_FAILURE);
+	}
+	for (i = 0; i < declarations.count; i++)
+		set_function_declaration(ss, &declarations.entries[i]);
+	dwarf_declarations_destroy(&declarations);
+	fclose(output);
 }
 
 const struct sym_source_range *sym_get_source_ranges(void **store,
@@ -1864,6 +1927,7 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 	free(filename);
 	fclose(fp);
 	materialize_line_ranges(ss);
+	read_function_declarations(ss, dwarfdump, elf);
 	if (!num_lines) {
 		fprintf(stderr, "WARNING: Unable to create linemap\n");
 	}
@@ -1883,11 +1947,12 @@ static void sym_update_source_hits(struct sym_store *ss, const char *name,
 
 	for (i = 0; i < ss->nr_stored; i++) {
 		struct sym *sym = &ss->allsyms[i];
+		const char *source = sym->declaration.filename
+			? sym->declaration.filename : sym->src_filename;
 
 		if (sym->namelen != name_len
 		    || strncmp(sym->name, name, name_len)
-		    || !sym->src_filename
-		    || strcmp(sym->src_filename, filename))
+		    || !source || strcmp(source, filename))
 			continue;
 		if (hits > sym->source_hits)
 			sym->source_hits = hits;

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import shutil
 import subprocess
 
@@ -8,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / ".test-build" / "inline-function-fixture"
 DUPLICATE_FIXTURE = ROOT / ".test-build" / "duplicate-inline-fixture"
+DECLARATION_SOURCE = ROOT / "tests" / "fixtures" / "function-declarations.cc"
 
 
 def symbol_range(name, binary=FIXTURE):
@@ -72,6 +74,15 @@ def function_records(output, name):
     ]
 
 
+def function_declarations(output):
+    declarations = {}
+    for line in output.read_text(encoding="utf-8").splitlines():
+        if line.startswith("FN:"):
+            number, name = line[3:].split(",", 1)
+            declarations[name] = int(number)
+    return declarations
+
+
 def run_coverage(run_etrace, tmp_path, policy, address, *extra_args,
                  binary=FIXTURE, objdump=None):
     trace = tmp_path / f"{policy}.hex"
@@ -120,6 +131,85 @@ def test_source_policy_counts_inlined_function_body(run_etrace, tmp_path):
     assert entry_counts["inline_helper"] == 0
     assert source_counts["inline_helper"] > 0
     assert source_counts["call_inline_helper"] > 0
+
+
+def test_lcov_uses_dwarf_subprogram_declaration_coordinates(
+    run_etrace, tmp_path
+):
+    if shutil.which("dwarfdump") is None:
+        pytest.skip("dwarfdump is required")
+    start, _ = symbol_range("call_inline_helper")
+    trace = tmp_path / "declaration.hex"
+    output = tmp_path / "declaration.info"
+    inventory = tmp_path / "declaration.jsonl"
+    trace.write_text(f"{start:x}\n", encoding="ascii")
+
+    result = run_etrace(
+        "--trace", trace,
+        "--trace-in-format", "ascii-hex",
+        "--trace-output", "none",
+        "--elf", FIXTURE,
+        "--dwarfdump", shutil.which("dwarfdump"),
+        "--coverage-format", "lcov",
+        "--coverage-output", output,
+        "--coverage-inventory", inventory,
+    )
+
+    assert result.returncode == 0, result.stderr
+    declarations = function_declarations(output)
+    assert declarations["inline_helper"] == 1
+    assert declarations["call_inline_helper"] == 10
+    assert declarations["main"] == 15
+    records = {
+        record["name"]: record
+        for line in inventory.read_text(encoding="utf-8").splitlines()
+        if (record := json.loads(line))
+    }
+    assert records["call_inline_helper"]["line"] == 10
+    assert records["call_inline_helper"]["source_confidence"] == (
+        "dwarf-declaration"
+    )
+
+
+def test_lcov_resolves_dwarf_specification_declaration(
+    run_etrace, tmp_path
+):
+    compiler = shutil.which("g++") or shutil.which("c++")
+    if compiler is None or shutil.which("dwarfdump") is None:
+        pytest.skip("C++ compiler and dwarfdump are required")
+    binary = tmp_path / "function-declarations"
+    build = subprocess.run(
+        [compiler, "-O2", "-g", "-fno-pie", "-no-pie",
+         "-Wl,--build-id=none", DECLARATION_SOURCE, "-o", binary],
+        text=True, capture_output=True,
+    )
+    if build.returncode:
+        pytest.skip(f"compiler cannot build declaration fixture: {build.stderr}")
+    symbols = subprocess.run(
+        ["nm", "-S", "-C", binary], text=True, capture_output=True, check=True
+    ).stdout.splitlines()
+    name, start = next(
+        (fields[3], int(fields[0], 16))
+        for line in symbols
+        if len(fields := line.split(maxsplit=3)) == 4
+        and fields[3] == "Worker::run(int)"
+    )
+    trace = tmp_path / "specification.hex"
+    output = tmp_path / "specification.info"
+    trace.write_text(f"{start:x}\n", encoding="ascii")
+
+    result = run_etrace(
+        "--trace", trace,
+        "--trace-in-format", "ascii-hex",
+        "--trace-output", "none",
+        "--elf", binary,
+        "--dwarfdump", shutil.which("dwarfdump"),
+        "--coverage-format", "lcov",
+        "--coverage-output", output,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert function_declarations(output)[name] == 7
 
 
 def test_source_policy_ignores_jump_into_inline_range(run_etrace, tmp_path):

@@ -86,6 +86,8 @@ struct sym
 	/* For gcov, only counts entries no time.  */
 	struct sym_coverage *cov_ent;
 	uint64_t source_hits;
+	struct sym_src_loc declaration;
+	bool declaration_ambiguous;
 	int namelen;
 	char name[128];
 };

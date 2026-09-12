@@ -813,7 +813,16 @@ static void gcov_process_sym(struct sym *s)
 	uint64_t addr;
 	uint64_t end = s->addr + s->size;
 
-	if (!(s->flags & SYM_F_FUNCTION) || !s->linemap)
+	if (!(s->flags & SYM_F_FUNCTION) || !s->size)
+		return;
+	if (s->declaration.filename) {
+		struct gcov_file *f = gcov_find_file_no_fail(
+			s->declaration.filename, s->declaration.linenr + 1);
+
+		gcov_file_add_sym(f, s);
+		return;
+	}
+	if (!s->linemap)
 		return;
 
 	for (addr = s->addr; addr < end; addr++) {
@@ -900,6 +909,9 @@ struct sym_src_loc *gcov_find_decl_line(struct sym *s, const char *filename)
 {
 	uint64_t offset;
 
+	if (s->declaration.filename)
+		return !strcmp(filename, s->declaration.filename)
+			? &s->declaration : NULL;
 	if (!s->linemap)
 		return NULL;
 	for (offset = 0; offset < s->size; offset++) {
@@ -1024,6 +1036,8 @@ static struct sym_src_loc *gcov_find_any_decl_line(struct sym *sym)
 {
 	uint64_t offset;
 
+	if (sym->declaration.filename)
+		return &sym->declaration;
 	if (!sym->linemap)
 		return NULL;
 	for (offset = 0; offset < sym->size; offset++) {
@@ -1192,7 +1206,9 @@ static void lcov_emit_inventory(void **store, struct sym *syms,
 		else
 			fputs("null", fp);
 		fputs(",\"source_confidence\":", fp);
-		json_write_string(fp, loc ? "dwarf-line" : "none");
+		json_write_string(fp, !loc ? "none"
+			: loc == &syms[i].declaration
+			? "dwarf-declaration" : "dwarf-line");
 		fprintf(fp, ",\"line\":%u,\"hits\":%" PRIu64 "}\n",
 			loc ? loc->linenr : 0, hits);
 	}

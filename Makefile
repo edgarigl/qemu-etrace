@@ -82,6 +82,7 @@ OBJS += util.o
 OBJS += safeio.o
 OBJS += run.o
 OBJS += dwarf-lines.o
+OBJS += dwarf-decl.o
 OBJS += syms.o
 OBJS += excludes.o
 OBJS += disas.o
@@ -120,6 +121,7 @@ TEST_BINS += $(TEST_BUILD_DIR)/test-elf-context
 TEST_BINS += $(TEST_BUILD_DIR)/test-disas
 TEST_BINS += $(TEST_BUILD_DIR)/test-excludes
 TEST_BINS += $(TEST_BUILD_DIR)/test-dwarf-lines
+TEST_BINS += $(TEST_BUILD_DIR)/test-dwarf-decl
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v1
 TEST_BINS += $(TEST_BUILD_DIR)/test-plugin-v2
@@ -222,6 +224,12 @@ $(TEST_BUILD_DIR)/test-dwarf-lines: tests/unit/test-dwarf-lines.c \
 		dwarf-lines.c dwarf-lines.h | $(TEST_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
 		tests/unit/test-dwarf-lines.c dwarf-lines.c \
+		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
+
+$(TEST_BUILD_DIR)/test-dwarf-decl: tests/unit/test-dwarf-decl.c \
+		dwarf-decl.c dwarf-decl.h | $(TEST_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
+		tests/unit/test-dwarf-decl.c dwarf-decl.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
 $(TEST_BUILD_DIR)/test-plugin: tests/unit/test-plugin.c plugin/etrace-plugin.c \
@@ -327,6 +335,7 @@ check: $(TARGET) $(TEST_BINS) $(TEST_FIXTURES)
 	$(TEST_BUILD_DIR)/test-disas
 	$(TEST_BUILD_DIR)/test-excludes
 	$(TEST_BUILD_DIR)/test-dwarf-lines
+	$(TEST_BUILD_DIR)/test-dwarf-decl
 	$(TEST_BUILD_DIR)/test-filename
 	$(TEST_BUILD_DIR)/test-plugin
 	$(TEST_BUILD_DIR)/test-plugin-v1
