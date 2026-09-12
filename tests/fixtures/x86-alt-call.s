@@ -76,6 +76,34 @@ alt_unregistered_fixture:
 	ret
 	.size	alt_unregistered_fixture, .-alt_unregistered_fixture
 
+	.p2align 4
+	.globl	alt_padding_fixture
+	.type	alt_padding_fixture, @function
+alt_padding_fixture:
+	.loc	1 90 0
+	lock addq $1, alt_counter(%rip)
+	.loc	1 91 0
+.Lalt_padding:
+	.byte	0x0f, 0x1f, 0x00
+	.loc	1 92 0
+	lock addq $1, alt_counter(%rip)
+	.loc	1 93 0
+	ret
+	.size	alt_padding_fixture, .-alt_padding_fixture
+
+	.p2align 4
+	.globl	alt_padding_original_fixture
+	.type	alt_padding_original_fixture, @function
+alt_padding_original_fixture:
+	.loc	1 100 0
+.Lalt_padding_original:
+	.byte	0x90
+	.loc	1 101 0
+	.byte	0x66, 0x90
+	.loc	1 102 0
+	ret
+	.size	alt_padding_original_fixture, .-alt_padding_original_fixture
+
 	.data
 	.p2align 3
 alt_call_target_ptr:
@@ -94,6 +122,10 @@ __alt_call_sites_end:
 .Lalt_empty_replacement:
 .Lalt_empty_long_replacement:
 	.byte	0xcc
+.Lalt_padding_replacement:
+	.byte	0x0f, 0x01, 0xcb
+.Lalt_padding_original_replacement:
+	.byte	0x0f, 0x01, 0xcb
 
 	.section .altinstructions,"aw",@progbits
 	.globl	__alt_instructions
@@ -111,6 +143,20 @@ __alt_instructions:
 	.byte	5
 	.byte	0
 	.byte	0
+	.byte	0
+	.long	.Lalt_padding - .
+	.long	.Lalt_padding_replacement - .
+	.word	0x026b
+	.byte	0
+	.byte	3
+	.byte	3
+	.byte	0
+	.long	.Lalt_padding_original - .
+	.long	.Lalt_padding_original_replacement - .
+	.word	0x026b
+	.byte	1
+	.byte	3
+	.byte	2
 	.byte	0
 	.globl	__alt_instructions_end
 __alt_instructions_end:

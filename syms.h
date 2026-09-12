@@ -110,8 +110,8 @@ bool sym_address_is_executable(void **store, uint64_t addr);
 bool sym_range_is_executable(void **store, uint64_t start, uint64_t end);
 bool sym_code_matches(void **store, uint64_t addr,
 		      const uint8_t *code, size_t len);
-size_t sym_x86_alt_nop_span(void **store, uint64_t addr,
-			     const uint8_t *code, size_t len);
+size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
+			       const uint8_t *code, size_t len);
 bool sym_instruction_matches(void **store, uint64_t addr,
 			     const uint8_t *code, size_t len);
 size_t sym_find_code_matches(void **store, const uint8_t *code, size_t len,

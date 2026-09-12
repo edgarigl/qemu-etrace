@@ -63,6 +63,8 @@ def alt_call_fixture(tmp_path_factory):
         "alt_empty_fixture",
         "alt_empty_long_fixture",
         "alt_unregistered_fixture",
+        "alt_padding_fixture",
+        "alt_padding_original_fixture",
     ):
         start, size = symbols[name]
         instructions = []
@@ -117,7 +119,7 @@ def parse_lines(path):
 
 def run_patch_trace(
     run_etrace, tmp_path, fixture, function, code, insns=None,
-    vaddr=None, explicit_map=True,
+    vaddr=None, linked=None, explicit_map=True,
 ):
     trace = tmp_path / f"{function.start:x}-{len(code)}.etrace"
     coverage = trace.with_suffix(".info")
@@ -126,6 +128,8 @@ def run_patch_trace(
         insns = function.instructions
     if vaddr is None:
         vaddr = function.start
+    if linked is None:
+        linked = function.start
     trace.write_bytes(
         etrace_info(major=1)
         + etrace_tb_def(
@@ -145,7 +149,7 @@ def run_patch_trace(
     ]
     if explicit_map:
         args += [
-            "--address-map", f"{vaddr:x}:{function.start:x}:{len(code):x}",
+            "--address-map", f"{vaddr:x}:{linked:x}:{len(code):x}",
         ]
     result = run_etrace(*args)
     return result, parse_functions(coverage), decoded
@@ -412,4 +416,122 @@ def test_registered_empty_alternative_does_not_establish_mapping(
 
     assert result.returncode == 0, result.stderr
     assert functions["alt_empty_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "padding", [b"\x0f\x1f\x00", b"\x66\x66\x90"], ids=("p6", "k8")
+)
+def test_accepts_unselected_nonempty_alternative_padding(
+    run_etrace, tmp_path, alt_call_fixture, padding
+):
+    function = alt_call_fixture.functions["alt_padding_fixture"]
+    code, _ = replace_instruction(function, b"\x0f\x1f\x00", padding)
+
+    result, functions, decoded = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code
+    )
+    lines = parse_lines(decoded.with_suffix(".info"))
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_padding_fixture"] == 1
+    assert all(lines[line] == 1 for line in range(90, 94))
+    assert "partially verified" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [b"\x0f\x1f\x01", b"\x0f\x01\xcb"],
+    ids=("arbitrary-nop", "selected-stac"),
+)
+def test_rejects_unsupported_nonempty_alternative_bytes(
+    run_etrace, tmp_path, alt_call_fixture, replacement
+):
+    function = alt_call_fixture.functions["alt_padding_fixture"]
+    code, site = replace_instruction(function, b"\x0f\x1f\x00", replacement)
+
+    result, functions, decoded = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_padding_fixture"] == 1
+    assert "1 partially verified execution events" in result.stderr
+    assert f" {function.start:x} {function.start + site:x}" in (
+        decoded.read_text(encoding="ascii")
+    )
+
+
+def test_rejects_change_in_nonempty_alternative_original(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_padding_original_fixture"]
+    assert function.code[:3] == b"\x90\x66\x90"
+    code = b"\x91" + function.code[1:]
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_padding_original_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_rejects_partial_nonempty_alternative_padding(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_padding_fixture"]
+    site = function.code.index(b"\x0f\x1f\x00")
+    linked = function.start + site
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        b"\x66\x66", insns=((0, 2),), vaddr=linked, linked=linked,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_padding_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_rejects_change_outside_nonempty_alternative_padding(
+    run_etrace, tmp_path, alt_call_fixture, side
+):
+    function = alt_call_fixture.functions["alt_padding_fixture"]
+    code, site = replace_instruction(
+        function, b"\x0f\x1f\x00", b"\x66\x66\x90"
+    )
+    code = bytearray(code)
+    changed = site - 1 if side == "before" else site + 3
+    code[changed] ^= 1
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, bytes(code)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_padding_fixture"] == (side == "after")
+    if side == "after":
+        assert "partially verified" in result.stderr
+    else:
+        assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_nonempty_alternative_padding_does_not_establish_mapping(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_padding_fixture"]
+    code, _ = replace_instruction(
+        function, b"\x0f\x1f\x00", b"\x66\x66\x90"
+    )
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code,
+        explicit_map=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_padding_fixture"] == 0
     assert "1 execution events in 1 unresolved aggregates" in result.stderr

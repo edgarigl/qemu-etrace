@@ -92,6 +92,9 @@ struct sym_store {
 	struct x86_alt_patch {
 		uint64_t addr;
 		uint16_t len;
+		uint8_t original_len;
+		uint8_t padding_len;
+		bool empty_replacement;
 	} *x86_alt_patches;
 	size_t nr_x86_alt_patches;
 	uint64_t *alt_call_sites;
@@ -829,7 +832,9 @@ static void read_alt_call_sites(struct sym_store *ss, bfd *abfd)
 struct x86_alt_record {
 	uint64_t addr;
 	uint16_t len;
-	bool empty;
+	uint8_t original_len;
+	uint8_t padding_len;
+	bool empty_replacement;
 };
 
 static int x86_alt_record_compare(const void *a, const void *b)
@@ -950,7 +955,9 @@ static void read_x86_alt_instructions(struct sym_store *ss, bfd *abfd)
 		records[i] = (struct x86_alt_record) {
 			.addr = origin,
 			.len = total_len,
-			.empty = replacement_len == 0,
+			.original_len = original_len,
+			.padding_len = padding_len,
+			.empty_replacement = replacement_len == 0,
 		};
 	}
 	free(data);
@@ -959,14 +966,19 @@ static void read_x86_alt_instructions(struct sym_store *ss, bfd *abfd)
 					    * sizeof(*ss->x86_alt_patches));
 	for (i = 0; i < count;) {
 		size_t next = i + 1;
-		bool empty = records[i].empty;
+		bool empty_replacement = records[i].empty_replacement;
+		struct x86_alt_patch *patch;
 
 		while (next < count && records[next].addr == records[i].addr) {
-			if (records[next].len != records[i].len) {
+			if (records[next].len != records[i].len
+			    || records[next].original_len
+			       != records[i].original_len
+			    || records[next].padding_len
+			       != records[i].padding_len) {
 				free(records);
 				invalid_alt_instruction_metadata();
 			}
-			empty |= records[next].empty;
+			empty_replacement |= records[next].empty_replacement;
 			next++;
 		}
 		if (next < count
@@ -974,13 +986,12 @@ static void read_x86_alt_instructions(struct sym_store *ss, bfd *abfd)
 			free(records);
 			invalid_alt_instruction_metadata();
 		}
-		if (empty) {
-			struct x86_alt_patch *patch =
-				&ss->x86_alt_patches[ss->nr_x86_alt_patches++];
-
-			patch->addr = records[i].addr;
-			patch->len = records[i].len;
-		}
+		patch = &ss->x86_alt_patches[ss->nr_x86_alt_patches++];
+		patch->addr = records[i].addr;
+		patch->len = records[i].len;
+		patch->original_len = records[i].original_len;
+		patch->padding_len = records[i].padding_len;
+		patch->empty_replacement = empty_replacement;
 		i = next;
 	}
 	free(records);
@@ -1296,10 +1307,12 @@ static bool x86_nops_match(const uint8_t *code, size_t len,
 	return true;
 }
 
-size_t sym_x86_alt_nop_span(void **store, uint64_t addr,
-			     const uint8_t *code, size_t len)
+size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
+			       const uint8_t *code, size_t len)
 {
 	struct sym_store *ss = *store;
+	struct image_section *section;
+	const uint8_t *original;
 	size_t high;
 	size_t low = 0;
 	const struct x86_alt_patch *patch;
@@ -1320,8 +1333,21 @@ size_t sym_x86_alt_nop_span(void **store, uint64_t addr,
 	patch = &ss->x86_alt_patches[low];
 	if (patch->addr != addr || len < patch->len)
 		return 0;
-	return (x86_nops_match(code, patch->len, x86_p6_nops)
-		|| x86_nops_match(code, patch->len, x86_k8_nops))
+	if (patch->empty_replacement
+	    && (x86_nops_match(code, patch->len, x86_p6_nops)
+		|| x86_nops_match(code, patch->len, x86_k8_nops)))
+		return patch->len;
+	if (!load_image_data(ss))
+		return 0;
+	section = image_section_find(ss, patch->addr);
+	if (!section || patch->addr + patch->len > section->end)
+		return 0;
+	original = section->data + patch->addr - section->start;
+	if (memcmp(code, original, patch->original_len))
+		return 0;
+	code += patch->original_len;
+	return (x86_nops_match(code, patch->padding_len, x86_p6_nops)
+		|| x86_nops_match(code, patch->padding_len, x86_k8_nops))
 		? patch->len : 0;
 }
 

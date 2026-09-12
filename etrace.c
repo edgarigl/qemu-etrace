@@ -1053,7 +1053,7 @@ static uint16_t matching_instruction_prefix(
 		uint32_t patch_end;
 		uint16_t next;
 
-		patch_len = sym_x86_alt_nop_span(t->tr.sym_tree,
+		patch_len = sym_x86_alt_patch_span(t->tr.sym_tree,
 			linked + insn->offset, definition->code + insn->offset,
 			definition->size - insn->offset);
 		if (patch_len) {
