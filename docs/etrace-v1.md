@@ -260,9 +260,11 @@ byte for byte. A shorter replacement must be followed by the exact P6 or K8
 ideal-NOP padding Xen generates. Because replacement control flow can split
 the span into several TBs, an instruction-aligned slice beginning in the
 replacement is accepted at its metadata-defined offset. A padding-only slice,
-an initial relative call or jump, or a possible trailing return-thunk jump
-remains unresolved. These states likewise require a mapping that is already
-owned independently of the patched bytes.
+or a possible trailing return-thunk jump remains unresolved. An initial
+relative call or jump is accepted when its ELF target is executable and the
+displacement relocated to the metadata-defined origin fits in a signed 32-bit
+field. These states likewise require a mapping that is already owned
+independently of the patched bytes.
 
 Once a definition resolves, pending execution aggregates are replayed through
 the normal execution-range coverage path. Repeated executions with the same

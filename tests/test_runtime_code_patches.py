@@ -68,6 +68,10 @@ def alt_call_fixture(tmp_path_factory):
         "alt_selected_long_fixture",
         "alt_selected_padded_fixture",
         "alt_selected_relative_fixture",
+        "alt_selected_relative_jump_fixture",
+        "alt_call_forward_target",
+        "__x86_return_thunk",
+        "alt_selected_return_thunk_fixture",
     ):
         start, size = symbols[name]
         instructions = []
@@ -674,21 +678,119 @@ def test_selected_alternative_with_padding_does_not_establish_mapping(
     assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 
-def test_rejects_relocated_nonempty_alternative(
-    run_etrace, tmp_path, alt_call_fixture
-):
-    function = alt_call_fixture.functions["alt_selected_relative_fixture"]
-    target = alt_call_fixture.functions["alt_call_target"].start
+def relocated_branch(function, target, opcode):
     displacement = target - (function.start + 5)
-    code = b"\xe8" + struct.pack("<i", displacement) + function.code[5:]
+    assert -(1 << 31) <= displacement < (1 << 31)
+    return bytes([opcode]) + struct.pack("<i", displacement)
+
+
+@pytest.mark.parametrize(
+    "name,target_name,opcode,size,positive", [
+        (
+            "alt_selected_relative_fixture",
+            "alt_call_target", 0xE8, 8, False,
+        ),
+        (
+            "alt_selected_relative_jump_fixture",
+            "alt_call_forward_target", 0xE9, 5, True,
+        ),
+    ],
+    ids=("call", "jump"),
+)
+def test_accepts_relocated_nonempty_alternative(
+    run_etrace, tmp_path, alt_call_fixture, name, target_name, opcode, size,
+    positive,
+):
+    function = alt_call_fixture.functions[name]
+    target = alt_call_fixture.functions[target_name].start
+    assert (target - (function.start + 5) > 0) == positive
+    code = relocated_branch(function, target, opcode)
+    if size > 5:
+        code += b"\x48\x89\xe0"
+    code += function.code[size:]
 
     result, functions, _ = run_patch_trace(
         run_etrace, tmp_path, alt_call_fixture, function, code,
-        insns=((0, 5), (5, 1)),
+        insns=((0, 5),) + (((5, 3),) if size > 5 else ())
+        + ((size, 1),),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions[name] == 1
+    assert "partially verified" not in result.stderr
+
+
+@pytest.mark.parametrize("offset,size", [(0, 5), (5, 3)])
+def test_accepts_relocated_nonempty_alternative_slice(
+    run_etrace, tmp_path, alt_call_fixture, offset, size
+):
+    function = alt_call_fixture.functions["alt_selected_relative_fixture"]
+    target = alt_call_fixture.functions["alt_call_target"].start
+    replacement = relocated_branch(function, target, 0xE8) + b"\x48\x89\xe0"
+    linked = function.start + offset
+
+    result, _, decoded = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        replacement[offset:offset + size], insns=((0, size),),
+        vaddr=linked, linked=linked,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "partially verified" not in result.stderr
+    assert f" {linked:x} {linked + size:x}" in decoded.read_text(
+        encoding="ascii"
+    )
+
+
+def test_rejects_wrong_relocated_nonempty_alternative_target(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_selected_relative_fixture"]
+    target = alt_call_fixture.functions["alt_call_target"].start + 1
+    code = relocated_branch(function, target, 0xE8) + b"\x48\x89\xe0"
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code,
+        insns=((0, 5), (5, 3)),
     )
 
     assert result.returncode == 0, result.stderr
     assert functions["alt_selected_relative_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_relocated_nonempty_alternative_does_not_establish_mapping(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_selected_relative_fixture"]
+    target = alt_call_fixture.functions["alt_call_target"].start
+    code = relocated_branch(function, target, 0xE8) + b"\x48\x89\xe0"
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code,
+        insns=((0, 5), (5, 3)), explicit_map=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_relative_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_rejects_relocated_return_thunk_alternative(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_selected_return_thunk_fixture"]
+    target = alt_call_fixture.functions["__x86_return_thunk"].start
+    displacement = target - (function.start + 7)
+    code = b"\x90\x90\xe9" + struct.pack("<i", displacement)
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code,
+        insns=((0, 1), (1, 1), (2, 5)),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_return_thunk_fixture"] == 0
     assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 

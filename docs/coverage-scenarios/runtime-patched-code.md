@@ -165,10 +165,14 @@ QEMU splits into several TBs. Every observed byte must match the replacement
 and padding at its metadata-defined offset. A slice containing only the
 generated padding remains unresolved under the partial-NOP policy.
 
-Replacements with an initial relative call or jump, or a possible trailing
-jump to `__x86_return_thunk` remain unresolved. General alternatives are
-considered only inside an explicit or already owned image mapping, so a
-patched span or slice cannot establish or extend a physical image mapping.
+For a replacement beginning with a relative call or jump, qemu-etrace derives
+the linked target from the replacement bytes and encodes the displacement from
+the metadata-defined origin. The target must remain inside an executable ELF
+section and the relocated displacement must fit in a signed 32-bit field.
+A possible trailing jump to `__x86_return_thunk` remains unresolved. General
+alternatives are considered only inside an explicit or already owned image
+mapping, so a patched span or slice cannot establish or extend a physical
+image mapping.
 
 ## Safety interpretation
 

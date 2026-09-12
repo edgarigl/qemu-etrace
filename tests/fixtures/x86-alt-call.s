@@ -133,10 +133,47 @@ alt_selected_padded_fixture:
 alt_selected_relative_fixture:
 	.loc	1 120 0
 .Lalt_selected_relative:
-	.byte	0x0f, 0x1f, 0x44, 0x00, 0x00
+	.byte	0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00
 	.loc	1 121 0
 	ret
 	.size	alt_selected_relative_fixture, .-alt_selected_relative_fixture
+
+	.p2align 4
+	.globl	alt_selected_relative_jump_fixture
+	.type	alt_selected_relative_jump_fixture, @function
+alt_selected_relative_jump_fixture:
+	.loc	1 125 0
+.Lalt_selected_relative_jump:
+	.byte	0x0f, 0x1f, 0x44, 0x00, 0x00
+	.loc	1 126 0
+	ret
+	.size	alt_selected_relative_jump_fixture, .-alt_selected_relative_jump_fixture
+
+	.p2align 4
+	.globl	alt_call_forward_target
+	.type	alt_call_forward_target, @function
+alt_call_forward_target:
+	.byte	0xf3, 0x0f, 0x1e, 0xfa
+	ret
+	.size	alt_call_forward_target, .-alt_call_forward_target
+
+	.p2align 4
+	.globl	__x86_return_thunk
+	.type	__x86_return_thunk, @function
+__x86_return_thunk:
+	ret
+	.size	__x86_return_thunk, .-__x86_return_thunk
+
+	.p2align 4
+	.globl	alt_selected_return_thunk_fixture
+	.type	alt_selected_return_thunk_fixture, @function
+alt_selected_return_thunk_fixture:
+	.loc	1 130 0
+.Lalt_selected_return_thunk:
+	.byte	0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00
+	.loc	1 131 0
+	ret
+	.size	alt_selected_return_thunk_fixture, .-alt_selected_return_thunk_fixture
 
 	.data
 	.p2align 3
@@ -171,6 +208,13 @@ __alt_call_sites_end:
 	nop
 .Lalt_selected_relative_replacement:
 	call	alt_call_target
+	mov	%rsp, %rax
+.Lalt_selected_relative_jump_replacement:
+	jmp	alt_call_forward_target
+.Lalt_selected_return_thunk_replacement:
+	nop
+	nop
+	jmp	__x86_return_thunk
 
 	.section .altinstructions,"aw",@progbits
 	.globl	__alt_instructions
@@ -228,8 +272,22 @@ __alt_instructions:
 	.long	.Lalt_selected_relative_replacement - .
 	.word	0x0273
 	.byte	0
+	.byte	8
+	.byte	8
+	.byte	0
+	.long	.Lalt_selected_relative_jump - .
+	.long	.Lalt_selected_relative_jump_replacement - .
+	.word	0x0273
+	.byte	0
 	.byte	5
 	.byte	5
+	.byte	0
+	.long	.Lalt_selected_return_thunk - .
+	.long	.Lalt_selected_return_thunk_replacement - .
+	.word	0x0273
+	.byte	0
+	.byte	7
+	.byte	7
 	.byte	0
 	.globl	__alt_instructions_end
 __alt_instructions_end:

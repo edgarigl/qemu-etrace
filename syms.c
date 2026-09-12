@@ -1365,22 +1365,69 @@ static bool x86_nops_slice_match(const uint8_t *code, size_t offset,
 static bool x86_alt_replacement_matches(
 	const struct x86_alt_patch *patch,
 	const struct x86_alt_replacement *replacement,
-	const uint8_t *replacement_bytes, uint64_t addr,
+	const uint8_t *replacement_bytes, const uint8_t *relocated_prefix,
+	uint64_t addr,
 	const uint8_t *code, size_t span, const uint8_t *nops)
 {
 	size_t offset = addr - patch->addr;
 	size_t replacement_span;
+	size_t relocated_span = 0;
 
 	/* A padding-only fragment retains the existing partial-NOP policy. */
 	if (offset >= replacement->len)
 		return false;
 	replacement_span = MIN(span, replacement->len - offset);
-	if (memcmp(code, replacement_bytes + offset, replacement_span))
+	if (relocated_prefix && offset < 5) {
+		relocated_span = MIN(replacement_span, 5 - offset);
+		if (memcmp(code, relocated_prefix + offset, relocated_span))
+			return false;
+	}
+	if (memcmp(code + relocated_span,
+		   replacement_bytes + offset + relocated_span,
+		   replacement_span - relocated_span))
 		return false;
 	if (replacement_span == span)
 		return true;
 	return x86_nops_slice_match(code + replacement_span, 0,
 		span - replacement_span, patch->len - replacement->len, nops);
+}
+
+static bool x86_alt_relocated_prefix(
+	struct sym_store *ss, const struct x86_alt_patch *patch,
+	const struct x86_alt_replacement *replacement,
+	const uint8_t *bytes, uint8_t relocated[5])
+{
+	uint64_t replacement_next = replacement->addr + 5;
+	uint64_t origin_next = patch->addr + 5;
+	uint64_t target;
+	uint64_t distance;
+	uint32_t raw;
+	int32_t displacement;
+	void *store = ss;
+
+	memcpy(&raw, bytes + 1, sizeof(raw));
+	raw = GUINT32_FROM_LE(raw);
+	memcpy(&displacement, &raw, sizeof(displacement));
+	if (!add_relative_s32(replacement_next, displacement, &target)
+	    || !sym_address_is_executable(&store, target))
+		return false;
+	if (target >= origin_next) {
+		distance = target - origin_next;
+		if (distance > INT32_MAX)
+			return false;
+		displacement = distance;
+	} else {
+		distance = origin_next - target;
+		if (distance > (uint64_t)INT32_MAX + 1)
+			return false;
+		displacement = distance == (uint64_t)INT32_MAX + 1
+			? INT32_MIN : -(int32_t)distance;
+	}
+	relocated[0] = bytes[0];
+	memcpy(&raw, &displacement, sizeof(raw));
+	raw = GUINT32_TO_LE(raw);
+	memcpy(relocated + 1, &raw, sizeof(raw));
+	return true;
 }
 
 static size_t x86_alt_replacement_span(struct sym_store *ss,
@@ -1399,25 +1446,31 @@ static size_t x86_alt_replacement_span(struct sym_store *ss,
 			&ss->x86_alt_replacements[patch->first_replacement + i];
 		struct image_section *section;
 		const uint8_t *bytes;
+		const uint8_t *relocated_prefix = NULL;
+		uint8_t relocated[5];
+		bool initial_relative;
 
-		/*
-		 * Xen adjusts an external call/jump at the start of a replacement,
-		 * and may adjust a trailing jump to __x86_return_thunk.  Leave both
-		 * forms unresolved until their relocated bytes are validated.
-		 */
 		section = image_section_find(ss, replacement->addr);
 		if (!section
 		    || replacement->addr + replacement->len > section->end)
 			continue;
 		bytes = section->data + replacement->addr - section->start;
-		if ((replacement->len >= 5 && (bytes[0] & 0xfe) == 0xe8)
-		    || (replacement->len > 5
-			&& bytes[replacement->len - 5] == 0xe9))
+		initial_relative = replacement->len >= 5
+			&& (bytes[0] & 0xfe) == 0xe8;
+		if (initial_relative) {
+			if (!x86_alt_relocated_prefix(ss, patch, replacement,
+						 bytes, relocated))
+				continue;
+			relocated_prefix = relocated;
+		} else if (replacement->len > 5
+			   && bytes[replacement->len - 5] == 0xe9) {
+			/* Xen may relocate a trailing jump to __x86_return_thunk. */
 			continue;
+		}
 		if (x86_alt_replacement_matches(patch, replacement, bytes,
-			addr, code, span, x86_p6_nops)
+			relocated_prefix, addr, code, span, x86_p6_nops)
 		    || x86_alt_replacement_matches(patch, replacement, bytes,
-			addr, code, span, x86_k8_nops))
+			relocated_prefix, addr, code, span, x86_k8_nops))
 			return span;
 	}
 	return 0;
