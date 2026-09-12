@@ -17,6 +17,14 @@ An instrumented source line is hit when an executed byte address maps to the
 line through DWARF line information. A single address can map to several source
 locations when code is inlined.
 
+This address-based rule is the default. `--line-hit-policy=function-entry`
+also propagates each reported function's selected hit count to its DWARF
+declaration line. This opt-in policy makes function-declaration lines comparable
+with compiler-instrumented reports while retaining address-derived hits for all
+other lines. It uses the selected `--function-hit-policy`, so `entry` propagates
+retained-symbol entry counts and `source` can propagate a validated inline
+instance entry.
+
 Coverage counters and DWARF locations are indexed by byte offset from the
 containing ELF symbol. An execution range marks every byte in its half-open
 `[start,end)` interval. This handles both fixed-width and variable-length

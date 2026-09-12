@@ -951,8 +951,62 @@ static bool lcov_same_function(struct gcov_file *f, unsigned int first,
 		&& gcov_find_decl_line(f->syms[second], f->filename);
 }
 
+static bool lcov_function_record(void **store, struct gcov_file *f,
+				 unsigned int index,
+				 enum function_hit_policy function_policy,
+				 unsigned int *decl_line, uint64_t *hits)
+{
+	struct sym_src_loc *loc = gcov_find_decl_line(f->syms[index],
+						      f->filename);
+	unsigned int i;
+
+	if (!loc)
+		return false;
+	for (i = 0; i < index; i++)
+		if (lcov_same_function(f, i, index))
+			return false;
+	*decl_line = loc->linenr;
+	*hits = lcov_function_hits(store, f->syms[index], function_policy);
+	for (i = index + 1; i < f->nr_syms; i++) {
+		uint64_t alias_hits;
+		struct sym_src_loc *alias_loc;
+
+		if (!lcov_same_function(f, index, i))
+			continue;
+		alias_loc = gcov_find_decl_line(f->syms[i], f->filename);
+		if (alias_loc->linenr < *decl_line)
+			*decl_line = alias_loc->linenr;
+		alias_hits = lcov_function_hits(store, f->syms[i],
+						function_policy);
+		if (alias_hits > *hits)
+			*hits = alias_hits;
+	}
+	return true;
+}
+
+static void lcov_apply_function_entry_lines(
+	void **store, struct gcov_file *f,
+	enum function_hit_policy function_policy)
+{
+	unsigned int i;
+
+	for (i = 0; i < f->nr_syms; i++) {
+		unsigned int decl_line;
+		uint64_t hits;
+
+		if (!lcov_function_record(store, f, i, function_policy,
+					  &decl_line, &hits)
+		    || !decl_line || decl_line > f->nr_lines)
+			continue;
+		f->instr_lines[decl_line - 1] = true;
+		if (hits > f->lines[decl_line - 1])
+			f->lines[decl_line - 1] = hits;
+	}
+}
+
 void lcov_emit_info(void **store, struct gcov_file *f, FILE *fp, void *exclude,
-		    enum function_hit_policy function_policy)
+		    enum function_hit_policy function_policy,
+		    enum line_hit_policy line_policy)
 {
 	unsigned int i;
 	unsigned int instr_lines = 0;
@@ -964,6 +1018,8 @@ void lcov_emit_info(void **store, struct gcov_file *f, FILE *fp, void *exclude,
 
 	fprintf(fp, "TN:\n");
 	fprintf(fp, "SF:%s\n", f->filename);
+	if (line_policy == LINE_HIT_FUNCTION_ENTRY)
+		lcov_apply_function_entry_lines(store, f, function_policy);
 
 	if (exclude) {
 		file_has_excludes = excludes_match(exclude, f->filename, -1);
@@ -972,38 +1028,12 @@ void lcov_emit_info(void **store, struct gcov_file *f, FILE *fp, void *exclude,
 
 	if (!filename_is_likely_header(f->filename) || 1) {
 		for (i = 0; i < f->nr_syms; i++) {
-			struct sym_src_loc *loc;
 			uint64_t hits;
 			unsigned int decl_line;
-			unsigned int j;
 
-			loc = gcov_find_decl_line(f->syms[i], f->filename);
-			if (!loc) {
+			if (!lcov_function_record(store, f, i, function_policy,
+						  &decl_line, &hits))
 				continue;
-			}
-			for (j = 0; j < i; j++) {
-				if (lcov_same_function(f, j, i))
-					break;
-			}
-			if (j != i)
-				continue;
-
-			decl_line = loc->linenr;
-			hits = lcov_function_hits(store, f->syms[i], function_policy);
-			for (j = i + 1; j < f->nr_syms; j++) {
-				uint64_t alias_hits;
-				struct sym_src_loc *alias_loc;
-
-				if (!lcov_same_function(f, i, j))
-					continue;
-				alias_loc = gcov_find_decl_line(f->syms[j], f->filename);
-				if (alias_loc->linenr < decl_line)
-					decl_line = alias_loc->linenr;
-				alias_hits = lcov_function_hits(store, f->syms[j],
-							 function_policy);
-				if (alias_hits > hits)
-					hits = alias_hits;
-			}
 
 			fprintf(fp, "FN:%u,%s\n", decl_line, f->syms[i]->name);
 			fprintf(fp, "FNDA:%" PRIu64 ",%s\n",
@@ -1223,6 +1253,7 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 		const char *gcov_strip, const char *gcov_prefix,
 		enum cov_format fmt,
 		void *exclude, enum function_hit_policy function_policy,
+		enum line_hit_policy line_policy,
 		const char *inventory_filename)
 {
 	struct gcov_file *f;
@@ -1238,7 +1269,8 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 			if (fmt == QCOV)
 				gcov_emit_qcov_file(f, gcov_strip, gcov_prefix);
 			else
-				lcov_emit_info(store, f, fp, exclude, function_policy);
+				lcov_emit_info(store, f, fp, exclude, function_policy,
+					       line_policy);
 			f = f->next;
 		}
 		if (fmt == LCOV)

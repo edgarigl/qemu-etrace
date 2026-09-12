@@ -169,4 +169,5 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 			const char *gcov_strip, const char *gcov_prefix,
 			enum cov_format fmt, void *exclude,
 			enum function_hit_policy function_policy,
+			enum line_hit_policy line_policy,
 			const char *inventory_filename);

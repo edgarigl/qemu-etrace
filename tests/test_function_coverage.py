@@ -83,6 +83,15 @@ def function_declarations(output):
     return declarations
 
 
+def line_counts(output):
+    lines = {}
+    for line in output.read_text(encoding="utf-8").splitlines():
+        if line.startswith("DA:"):
+            number, count, *_ = line[3:].split(",")
+            lines[int(number)] = int(count)
+    return lines
+
+
 def run_coverage(run_etrace, tmp_path, policy, address, *extra_args,
                  binary=FIXTURE, objdump=None):
     trace = tmp_path / f"{policy}.hex"
@@ -169,6 +178,41 @@ def test_lcov_uses_dwarf_subprogram_declaration_coordinates(
     assert records["call_inline_helper"]["source_confidence"] == (
         "dwarf-declaration"
     )
+
+
+def test_function_entry_line_policy_is_explicit_and_uses_function_count(
+    run_etrace, tmp_path
+):
+    if shutil.which("dwarfdump") is None:
+        pytest.skip("dwarfdump is required")
+    start, _ = symbol_range("call_inline_helper")
+    trace = tmp_path / "line-policy.hex"
+    trace.write_text(f"{start:x}\n" * 3, encoding="ascii")
+
+    outputs = {}
+    for policy in (None, "address", "function-entry"):
+        output = tmp_path / f"line-policy-{policy or 'default'}.info"
+        arguments = [
+            "--trace", trace,
+            "--trace-in-format", "ascii-hex",
+            "--trace-output", "none",
+            "--elf", FIXTURE,
+            "--dwarfdump", shutil.which("dwarfdump"),
+            "--coverage-format", "lcov",
+            "--coverage-output", output,
+        ]
+        if policy is not None:
+            arguments += ["--line-hit-policy", policy]
+        result = run_etrace(*arguments)
+        assert result.returncode == 0, result.stderr
+        outputs[policy] = output
+
+    assert outputs[None].read_bytes() == outputs["address"].read_bytes()
+    assert 10 not in line_counts(outputs[None])
+    assert function_counts(outputs["function-entry"])[
+        "call_inline_helper"
+    ] == 3
+    assert line_counts(outputs["function-entry"])[10] == 3
 
 
 def test_lcov_resolves_dwarf_specification_declaration(

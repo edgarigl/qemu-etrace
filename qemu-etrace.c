@@ -97,6 +97,7 @@ struct
 	enum trace_format trace_out_format;
 	enum cov_format coverage_format;
 	enum function_hit_policy function_hit_policy;
+	enum line_hit_policy line_hit_policy;
 	struct address_map address_map;
 	struct elf_context elf_context;
 	bool auto_map;
@@ -126,6 +127,7 @@ struct
 	.guest_machine = NULL,
 	.coverage_format = NONE,
 	.function_hit_policy = FUNCTION_HIT_ENTRY,
+	.line_hit_policy = LINE_HIT_ADDRESS,
 	.coverage_output = NULL,
 	.coverage_inventory = NULL,
 	.gcov_strip = NULL,
@@ -158,6 +160,7 @@ static const char etrace_usagestr[] = \
 "--coverage-output      Coverage filename (if applicable).\n"
 "--coverage-inventory   Write a JSON Lines function inventory.\n"
 "--function-hit-policy Function hits: entry or source.\n"
+"--line-hit-policy     Line hits: address or function-entry.\n"
 "--address-map          Map runtime addresses to linked ELF addresses.\n"
 "--elf-context          Expected ELF execution context, such as aarch64:el2.\n"
 "--auto-map             Infer runtime addresses from TB mappings and code.\n"
@@ -229,6 +232,16 @@ static enum function_hit_policy map_function_hit_policy(const char *s)
 	exit(EXIT_FAILURE);
 }
 
+static enum line_hit_policy map_line_hit_policy(const char *s)
+{
+	if (!strcmp(s, "address"))
+		return LINE_HIT_ADDRESS;
+	if (!strcmp(s, "function-entry"))
+		return LINE_HIT_FUNCTION_ENTRY;
+	fprintf(stderr, "Invalid line hit policy %s\n", s);
+	exit(EXIT_FAILURE);
+}
+
 static void parse_arguments(int argc, char **argv)
 {
         int c;
@@ -254,6 +267,7 @@ static void parse_arguments(int argc, char **argv)
 			{"coverage-output", required_argument, 0, 'c' },
 			{"coverage-inventory", required_argument, 0, 'I' },
 			{"function-hit-policy", required_argument, 0, 'F' },
+			{"line-hit-policy", required_argument, 0, 1007 },
 			{"address-map", required_argument, 0, 'A' },
 			{"auto-map", no_argument, 0, 1000 },
 			{"unresolved-limit", required_argument, 0, 1001 },
@@ -400,6 +414,9 @@ static void parse_arguments(int argc, char **argv)
 			}
 			break;
 		}
+		case 1007:
+			args.line_hit_policy = map_line_hit_policy(optarg);
+			break;
 		case 'y':
 			args.trace_in_format = map_traceformat(optarg);
 			break;
@@ -464,6 +481,12 @@ void validate_arguments(void)
 	if (args.function_hit_policy == FUNCTION_HIT_SOURCE
 	    && (!args.elf || args.coverage_format != LCOV)) {
 		fprintf(stderr, "Source function hits require --elf and "
+			"--coverage-format lcov\n");
+		exit(EXIT_FAILURE);
+	}
+	if (args.line_hit_policy == LINE_HIT_FUNCTION_ENTRY
+	    && (!args.elf || args.coverage_format != LCOV)) {
+		fprintf(stderr, "Function-entry line hits require --elf and "
 			"--coverage-format lcov\n");
 		exit(EXIT_FAILURE);
 	}
@@ -643,6 +666,7 @@ int main(int argc, char **argv)
 				args.coverage_format,
 				args.gcov_strip, args.gcov_prefix,
 				args.exclude, args.function_hit_policy,
+				args.line_hit_policy,
 				args.coverage_inventory);
 	address_map_destroy(&args.address_map);
 

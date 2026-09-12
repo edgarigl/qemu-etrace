@@ -239,6 +239,7 @@ def run_lcov(
     *,
     inventory=None,
     policy="entry",
+    line_policy=None,
     executions=1,
 ):
     trace = tmp_path / "assembly.etrace"
@@ -265,6 +266,8 @@ def run_lcov(
     ]
     if inventory is not None:
         arguments.extend(("--coverage-inventory", inventory))
+    if line_policy is not None:
+        arguments.extend(("--line-hit-policy", line_policy))
     result = run_etrace(*arguments)
     assert result.returncode == 0, result.stderr
     return parse_lcov(output)
@@ -458,6 +461,35 @@ def test_lcov_folds_duplicate_function_names(
         "emitted",
         "deduplicated-alias",
     }
+
+
+def test_function_entry_lines_use_folded_function_record(
+    run_etrace, tmp_path, assembly_fixture
+):
+    symbols = sorted(
+        (address, size)
+        for name, address, size, _ in nm_symbol_records(assembly_fixture)
+        if name == "duplicate_local"
+    )
+    assert len(symbols) == 2
+    start, size = symbols[1]
+
+    default = run_lcov(
+        run_etrace, tmp_path, assembly_fixture, start, start + size,
+    )
+    propagated = run_lcov(
+        run_etrace, tmp_path, assembly_fixture, start, start + size,
+        line_policy="function-entry",
+    )
+    default_source = source_record(default, "duplicate-assembly.S")
+    propagated_source = source_record(propagated, "duplicate-assembly.S")
+
+    assert default_source["function_records"] == [(90, "duplicate_local")]
+    assert default_source["function_hits"]["duplicate_local"] == 1
+    assert default_source["lines"][90] == 0
+    assert default_source["lines"][91] == 1
+    assert propagated_source["lines"][90] == 1
+    assert propagated_source["lines"][91] == 1
 
 
 def test_new_sequence_retains_dwarfdump_file_context(
