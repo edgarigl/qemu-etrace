@@ -249,6 +249,12 @@ indirect call, an in-image direct-call replacement, or the documented `ud2`
 poison form is accepted inside each six-byte slot. See
 [Runtime-patched code](coverage-scenarios/runtime-patched-code.md).
 
+The Xen `__alt_instructions` table also permits complete empty-replacement
+spans encoded with valid P6 or K8 ideal NOP sequences. Validation covers the
+whole metadata-defined span before continuing at its end; partial spans and
+nonempty general replacements remain unresolved. These replacements likewise
+require a mapping that is already owned independently of the patched bytes.
+
 Once a definition resolves, pending execution aggregates are replayed through
 the normal execution-range coverage path. Repeated executions with the same
 prefix are combined without changing coverage counts or accumulated duration.

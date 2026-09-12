@@ -89,11 +89,17 @@ struct sym_store {
 	size_t nr_sections;
 	struct sym_load_segment *load_segments;
 	size_t nr_load_segments;
+	struct x86_alt_patch {
+		uint64_t addr;
+		uint16_t len;
+	} *x86_alt_patches;
+	size_t nr_x86_alt_patches;
 	uint64_t *alt_call_sites;
 	size_t nr_alt_call_sites;
 	uint16_t elf_machine;
 	bool elf_big_endian;
 	bool x86_64;
+	bool xen_alt_metadata;
 };
 
 static uint16_t elf16(const uint8_t *data, bool big_endian)
@@ -672,45 +678,65 @@ static void invalid_alt_call_metadata(void)
 	exit(EXIT_FAILURE);
 }
 
-static bool bfd_symbol_value(bfd *abfd, const char *name, uint64_t *value)
+static void invalid_alt_instruction_metadata(void)
+{
+	fprintf(stderr, "Invalid ELF alternative-instruction metadata\n");
+	exit(EXIT_FAILURE);
+}
+
+static void bfd_symbol_range(bfd *abfd,
+			     const char *start_name, uint64_t *start,
+			     const char *end_name, uint64_t *end,
+			     bool *have_start, bool *have_end,
+			     void (*invalid_metadata)(void))
 {
 	asymbol **symbols;
 	long storage;
 	long count;
 	long i;
-	bool found = false;
+
+	*have_start = false;
+	*have_end = false;
 
 	storage = bfd_get_symtab_upper_bound(abfd);
 	if (storage <= 0)
-		return false;
+		return;
 	symbols = safe_malloc(storage);
 	count = bfd_canonicalize_symtab(abfd, symbols);
 	if (count < 0) {
 		free(symbols);
-		invalid_alt_call_metadata();
+		invalid_metadata();
 	}
 	for (i = 0; i < count; i++) {
 		asymbol *symbol = symbols[i];
+		const char *name = bfd_asymbol_name(symbol);
+		uint64_t value = bfd_asymbol_value(symbol);
 
-		if (strcmp(bfd_asymbol_name(symbol), name))
-			continue;
-		if (found && *value != bfd_asymbol_value(symbol)) {
-			free(symbols);
-			invalid_alt_call_metadata();
+		if (!strcmp(name, start_name)) {
+			if (*have_start && *start != value) {
+				free(symbols);
+				invalid_metadata();
+			}
+			*start = value;
+			*have_start = true;
+		} else if (!strcmp(name, end_name)) {
+			if (*have_end && *end != value) {
+				free(symbols);
+				invalid_metadata();
+			}
+			*end = value;
+			*have_end = true;
 		}
-		*value = bfd_asymbol_value(symbol);
-		found = true;
 	}
 	free(symbols);
-	return found;
 }
 
 static void read_alt_call_sites(struct sym_store *ss, bfd *abfd)
 {
 	asection *section;
 	uint8_t *data;
-	uint64_t start;
-	uint64_t end;
+	uint64_t start = 0;
+	uint64_t end = 0;
 	size_t count;
 	size_t i;
 	bool have_start;
@@ -718,13 +744,16 @@ static void read_alt_call_sites(struct sym_store *ss, bfd *abfd)
 
 	if (!ss->x86_64)
 		return;
-	have_start = bfd_symbol_value(abfd, "__alt_call_sites_start", &start);
-	have_end = bfd_symbol_value(abfd, "__alt_call_sites_end", &end);
+	bfd_symbol_range(abfd,
+			 "__alt_call_sites_start", &start,
+			 "__alt_call_sites_end", &end,
+			 &have_start, &have_end, invalid_alt_call_metadata);
 	if (!have_start && !have_end)
 		return;
 	if (!have_start || !have_end || end < start
 	    || (end - start) % sizeof(uint32_t))
 		invalid_alt_call_metadata();
+	ss->xen_alt_metadata = true;
 	if (end == start)
 		return;
 	if (end - start > SIZE_MAX)
@@ -793,6 +822,168 @@ static void read_alt_call_sites(struct sym_store *ss, bfd *abfd)
 			invalid_alt_call_metadata();
 	}
 	ss->nr_alt_call_sites = count;
+}
+
+#define X86_ALT_RECORD_SIZE 14
+
+struct x86_alt_record {
+	uint64_t addr;
+	uint16_t len;
+	bool empty;
+};
+
+static int x86_alt_record_compare(const void *a, const void *b)
+{
+	const struct x86_alt_record *ra = a;
+	const struct x86_alt_record *rb = b;
+
+	if (ra->addr < rb->addr)
+		return -1;
+	if (ra->addr > rb->addr)
+		return 1;
+	return ra->len < rb->len ? -1 : ra->len > rb->len;
+}
+
+static bool bfd_range_has_contents(bfd *abfd, uint64_t start, size_t len)
+{
+	asection *section;
+
+	if (!len || start > UINT64_MAX - len)
+		return false;
+	for (section = abfd->sections; section; section = section->next) {
+		uint64_t section_start = bfd_section_vma(section);
+		uint64_t section_size = bfd_section_size(section);
+
+		if ((bfd_section_flags(section) & SEC_HAS_CONTENTS)
+		    && section_start <= start
+		    && section_size <= UINT64_MAX - section_start
+		    && start + len <= section_start + section_size)
+			return true;
+	}
+	return false;
+}
+
+static void read_x86_alt_instructions(struct sym_store *ss, bfd *abfd)
+{
+	struct x86_alt_record *records;
+	asection *section;
+	uint8_t *data;
+	uint64_t start = 0;
+	uint64_t end = 0;
+	size_t count;
+	size_t i;
+	bool have_start;
+	bool have_end;
+	void *image = ss;
+
+	if (!ss->x86_64 || !ss->xen_alt_metadata)
+		return;
+	bfd_symbol_range(abfd,
+			 "__alt_instructions", &start,
+			 "__alt_instructions_end", &end,
+			 &have_start, &have_end,
+			 invalid_alt_instruction_metadata);
+	if (!have_start && !have_end)
+		return;
+	if (!have_start || !have_end || end < start
+	    || (end - start) % X86_ALT_RECORD_SIZE)
+		invalid_alt_instruction_metadata();
+	if (end == start)
+		return;
+	if (end - start > SIZE_MAX)
+		invalid_alt_instruction_metadata();
+	for (section = abfd->sections; section; section = section->next) {
+		uint64_t section_start = bfd_section_vma(section);
+		uint64_t section_size = bfd_section_size(section);
+
+		if ((bfd_section_flags(section) & SEC_HAS_CONTENTS)
+		    && section_start <= start
+		    && section_size <= UINT64_MAX - section_start
+		    && end <= section_start + section_size)
+			break;
+	}
+	if (!section)
+		invalid_alt_instruction_metadata();
+	count = (end - start) / X86_ALT_RECORD_SIZE;
+	if (count > SIZE_MAX / sizeof(*records))
+		invalid_alt_instruction_metadata();
+	data = safe_malloc(end - start);
+	if (!bfd_get_section_contents(abfd, section, data,
+				      start - bfd_section_vma(section), end - start)) {
+		free(data);
+		invalid_alt_instruction_metadata();
+	}
+	records = safe_malloc(count * sizeof(*records));
+	for (i = 0; i < count; i++) {
+		const uint8_t *record = data + i * X86_ALT_RECORD_SIZE;
+		uint64_t entry = start + i * X86_ALT_RECORD_SIZE;
+		uint32_t raw_origin = elf32(record, ss->elf_big_endian);
+		uint32_t raw_replacement = elf32(record + 4,
+						 ss->elf_big_endian);
+		uint8_t original_len = record[10];
+		uint8_t replacement_len = record[11];
+		uint8_t padding_len = record[12];
+		uint16_t total_len = (uint16_t)original_len + padding_len;
+		int32_t origin_delta;
+		int32_t replacement_delta;
+		uint64_t origin;
+		uint64_t replacement;
+
+		memcpy(&origin_delta, &raw_origin, sizeof(origin_delta));
+		memcpy(&replacement_delta, &raw_replacement,
+		       sizeof(replacement_delta));
+		if (!add_relative_s32(entry, origin_delta, &origin)
+		    || !add_relative_s32(entry + 4, replacement_delta,
+					 &replacement)
+		    || !total_len || replacement_len > total_len
+		    || origin > UINT64_MAX - total_len
+		    || !sym_range_is_executable(&image, origin,
+					origin + total_len)
+		    || (replacement_len
+			&& !bfd_range_has_contents(abfd, replacement,
+						   replacement_len))
+		    || record[13]) {
+			free(records);
+			free(data);
+			invalid_alt_instruction_metadata();
+		}
+		records[i] = (struct x86_alt_record) {
+			.addr = origin,
+			.len = total_len,
+			.empty = replacement_len == 0,
+		};
+	}
+	free(data);
+	qsort(records, count, sizeof(*records), x86_alt_record_compare);
+	ss->x86_alt_patches = safe_malloc(count
+					    * sizeof(*ss->x86_alt_patches));
+	for (i = 0; i < count;) {
+		size_t next = i + 1;
+		bool empty = records[i].empty;
+
+		while (next < count && records[next].addr == records[i].addr) {
+			if (records[next].len != records[i].len) {
+				free(records);
+				invalid_alt_instruction_metadata();
+			}
+			empty |= records[next].empty;
+			next++;
+		}
+		if (next < count
+		    && records[i].addr + records[i].len > records[next].addr) {
+			free(records);
+			invalid_alt_instruction_metadata();
+		}
+		if (empty) {
+			struct x86_alt_patch *patch =
+				&ss->x86_alt_patches[ss->nr_x86_alt_patches++];
+
+			patch->addr = records[i].addr;
+			patch->len = records[i].len;
+		}
+		i = next;
+	}
+	free(records);
 }
 
 static struct sym *find_bfd_symbol(struct sym_store *ss, const char *name,
@@ -958,6 +1149,7 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 		}
 	}
 	read_alt_call_sites(ss, abfd);
+	read_x86_alt_instructions(ss, abfd);
 	for (i = 0; i < ss->nr_stored; i++) {
 		struct image_section *image;
 
@@ -1063,6 +1255,74 @@ bool sym_code_matches(void **store, uint64_t addr,
 	if (!section || addr + len > section->end || !load_image_data(ss))
 		return false;
 	return !memcmp(section->data + addr - section->start, code, len);
+}
+
+static const uint8_t x86_k8_nops[] = {
+	0x90,
+	0x66, 0x90,
+	0x66, 0x66, 0x90,
+	0x66, 0x66, 0x66, 0x90,
+	0x66, 0x66, 0x90, 0x66, 0x90,
+	0x66, 0x66, 0x90, 0x66, 0x66, 0x90,
+	0x66, 0x66, 0x66, 0x90, 0x66, 0x66, 0x90,
+	0x66, 0x66, 0x66, 0x90, 0x66, 0x66, 0x66, 0x90,
+	0x66, 0x66, 0x90, 0x66, 0x66, 0x90, 0x66, 0x66, 0x90,
+};
+
+static const uint8_t x86_p6_nops[] = {
+	0x90,
+	0x66, 0x90,
+	0x0f, 0x1f, 0x00,
+	0x0f, 0x1f, 0x40, 0x00,
+	0x0f, 0x1f, 0x44, 0x00, 0x00,
+	0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00,
+	0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00,
+	0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static bool x86_nops_match(const uint8_t *code, size_t len,
+			   const uint8_t *nops)
+{
+	while (len) {
+		size_t nop_len = MIN(len, 9);
+		size_t offset = nop_len * (nop_len - 1) / 2;
+
+		if (memcmp(code, nops + offset, nop_len))
+			return false;
+		code += nop_len;
+		len -= nop_len;
+	}
+	return true;
+}
+
+size_t sym_x86_alt_nop_span(void **store, uint64_t addr,
+			     const uint8_t *code, size_t len)
+{
+	struct sym_store *ss = *store;
+	size_t high;
+	size_t low = 0;
+	const struct x86_alt_patch *patch;
+
+	if (!ss || !code)
+		return 0;
+	high = ss->nr_x86_alt_patches;
+	while (low < high) {
+		size_t mid = low + (high - low) / 2;
+
+		if (ss->x86_alt_patches[mid].addr < addr)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	if (low == ss->nr_x86_alt_patches)
+		return 0;
+	patch = &ss->x86_alt_patches[low];
+	if (patch->addr != addr || len < patch->len)
+		return 0;
+	return (x86_nops_match(code, patch->len, x86_p6_nops)
+		|| x86_nops_match(code, patch->len, x86_k8_nops))
+		? patch->len : 0;
 }
 
 static bool find_alt_call_site(const struct sym_store *ss, uint64_t addr,

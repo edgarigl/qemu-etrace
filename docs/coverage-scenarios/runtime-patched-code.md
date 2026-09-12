@@ -135,6 +135,27 @@ that instruction and leaves the rest of the execution unresolved. Recognized
 patches do not create or extend image mappings. ELFs without both boundary
 symbols retain ordinary byte matching, while malformed tables are rejected.
 
+## Empty Xen x86 alternatives
+
+For Xen x86-64 ELFs, qemu-etrace also reads the packed 14-byte records between
+`__alt_instructions` and `__alt_instructions_end`. Each origin and replacement
+address is a signed 32-bit offset relative to its own field. The table is
+accepted only when every original span is executable, every nonempty
+replacement is present in the ELF, shared origins have equal spans, and the
+registered spans do not overlap.
+
+An alternative with an empty replacement can replace its complete original
+plus padding span with Xen's ideal NOPs. qemu-etrace accepts the P6 and K8 NOP
+sequences generated in chunks of up to nine bytes. It validates the complete
+registered span before crediting any of its runtime instructions, including
+when the replacement changes instruction boundaries, and then resumes exact
+instruction validation after the span.
+
+A partial span, an unregistered NOP, or any other byte sequence remains
+unresolved. General alternatives are considered only inside an explicit or
+already owned image mapping, so a patched span cannot establish or extend a
+physical image mapping. Nonempty general replacements are not yet accepted.
+
 ## Safety interpretation
 
 The result is valid dispatched-instruction evidence with imprecise source

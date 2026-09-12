@@ -1047,14 +1047,40 @@ static uint16_t matching_instruction_prefix(
 
 	if (!definition->code)
 		return 0;
-	for (i = 0; i < definition->insn_count; i++) {
+	for (i = 0; i < definition->insn_count;) {
 		const struct etrace_tb_insn *insn = &definition->insns[i];
+		size_t patch_len;
+		uint32_t patch_end;
+		uint16_t next;
+
+		patch_len = sym_x86_alt_nop_span(t->tr.sym_tree,
+			linked + insn->offset, definition->code + insn->offset,
+			definition->size - insn->offset);
+		if (patch_len) {
+			patch_end = insn->offset + patch_len;
+			for (next = i; next < definition->insn_count; next++) {
+				const struct etrace_tb_insn *patch_insn =
+					&definition->insns[next];
+				uint32_t insn_end = patch_insn->offset
+					+ patch_insn->size;
+
+				if (insn_end >= patch_end)
+					break;
+			}
+			if (next == definition->insn_count
+			    || definition->insns[next].offset
+			       + definition->insns[next].size != patch_end)
+				break;
+			i = next + 1;
+			continue;
+		}
 
 		if (!sym_instruction_matches(t->tr.sym_tree,
 					     linked + insn->offset,
 					     definition->code + insn->offset,
 					     insn->size))
 			break;
+		i++;
 	}
 	return i;
 }

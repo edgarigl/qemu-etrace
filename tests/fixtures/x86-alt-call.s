@@ -35,6 +35,47 @@ alt_call_target:
 	ret
 	.size	alt_call_target, .-alt_call_target
 
+	.p2align 4
+	.globl	alt_empty_fixture
+	.type	alt_empty_fixture, @function
+alt_empty_fixture:
+	.loc	1 60 0
+	lock addq $1, alt_counter(%rip)
+	.loc	1 61 0
+.Lalt_empty:
+	.byte	0x0f, 0xae, 0xe8
+	.loc	1 62 0
+	lock addq $1, alt_counter(%rip)
+	.loc	1 63 0
+	mov	%rax, %rdx
+	.loc	1 64 0
+	ret
+	.size	alt_empty_fixture, .-alt_empty_fixture
+
+	.p2align 4
+	.globl	alt_empty_long_fixture
+	.type	alt_empty_long_fixture, @function
+alt_empty_long_fixture:
+	.loc	1 70 0
+.Lalt_empty_long:
+	mov	$1, %eax
+	.loc	1 71 0
+	ret
+	.size	alt_empty_long_fixture, .-alt_empty_long_fixture
+
+	.p2align 4
+	.globl	alt_unregistered_fixture
+	.type	alt_unregistered_fixture, @function
+alt_unregistered_fixture:
+	.loc	1 80 0
+	nop
+	.loc	1 81 0
+.Lalt_unregistered:
+	.byte	0x0f, 0xae, 0xe8
+	.loc	1 82 0
+	ret
+	.size	alt_unregistered_fixture, .-alt_unregistered_fixture
+
 	.data
 	.p2align 3
 alt_call_target_ptr:
@@ -48,5 +89,35 @@ __alt_call_sites_start:
 	.long	.Lalt_call_three - .
 	.globl	__alt_call_sites_end
 __alt_call_sites_end:
+
+	.section .altinstr_replacement,"ax",@progbits
+.Lalt_empty_replacement:
+.Lalt_empty_long_replacement:
+	.byte	0xcc
+
+	.section .altinstructions,"aw",@progbits
+	.globl	__alt_instructions
+__alt_instructions:
+	.long	.Lalt_empty - .
+	.long	.Lalt_empty_replacement - .
+	.word	0x026c
+	.byte	3
+	.byte	0
+	.byte	0
+	.byte	0
+	.long	.Lalt_empty_long - .
+	.long	.Lalt_empty_long_replacement - .
+	.word	0x026c
+	.byte	5
+	.byte	0
+	.byte	0
+	.byte	0
+	.globl	__alt_instructions_end
+__alt_instructions_end:
+
+	.data
+	.p2align 3
+alt_counter:
+	.quad	0
 
 	.section .note.GNU-stack,"",@progbits
