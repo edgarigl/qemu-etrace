@@ -463,7 +463,7 @@ def test_lcov_folds_duplicate_function_names(
     }
 
 
-def test_function_entry_lines_use_folded_function_record(
+def test_function_entry_lines_ignore_line_table_fallback(
     run_etrace, tmp_path, assembly_fixture
 ):
     symbols = sorted(
@@ -488,8 +488,11 @@ def test_function_entry_lines_use_folded_function_record(
     assert default_source["function_hits"]["duplicate_local"] == 1
     assert default_source["lines"][90] == 0
     assert default_source["lines"][91] == 1
-    assert propagated_source["lines"][90] == 1
+    assert propagated_source["function_records"] == [(90, "duplicate_local")]
+    assert propagated_source["function_hits"]["duplicate_local"] == 1
+    assert propagated_source["lines"][90] == 0
     assert propagated_source["lines"][91] == 1
+    assert propagated_source["lines"] == default_source["lines"]
 
 
 def test_new_sequence_retains_dwarfdump_file_context(

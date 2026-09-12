@@ -991,12 +991,27 @@ static void lcov_apply_function_entry_lines(
 	unsigned int i;
 
 	for (i = 0; i < f->nr_syms; i++) {
-		unsigned int decl_line;
+		unsigned int decl_line = 0;
+		unsigned int record_line;
 		uint64_t hits;
+		unsigned int j;
 
 		if (!lcov_function_record(store, f, i, function_policy,
-					  &decl_line, &hits)
-		    || !decl_line || decl_line > f->nr_lines)
+					  &record_line, &hits))
+			continue;
+		for (j = i; j < f->nr_syms; j++) {
+			const struct sym_src_loc *declaration =
+				&f->syms[j]->declaration;
+
+			if (j != i && !lcov_same_function(f, i, j))
+				continue;
+			if (!declaration->filename
+			    || strcmp(declaration->filename, f->filename))
+				continue;
+			if (!decl_line || declaration->linenr < decl_line)
+				decl_line = declaration->linenr;
+		}
+		if (!decl_line || decl_line > f->nr_lines)
 			continue;
 		f->instr_lines[decl_line - 1] = true;
 		if (hits > f->lines[decl_line - 1])
