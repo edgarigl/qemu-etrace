@@ -104,6 +104,28 @@ alt_padding_original_fixture:
 	ret
 	.size	alt_padding_original_fixture, .-alt_padding_original_fixture
 
+	.p2align 4
+	.globl	alt_selected_long_fixture
+	.type	alt_selected_long_fixture, @function
+alt_selected_long_fixture:
+	.loc	1 110 0
+.Lalt_selected_long:
+	.byte	0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00
+	.loc	1 111 0
+	ret
+	.size	alt_selected_long_fixture, .-alt_selected_long_fixture
+
+	.p2align 4
+	.globl	alt_selected_relative_fixture
+	.type	alt_selected_relative_fixture, @function
+alt_selected_relative_fixture:
+	.loc	1 120 0
+.Lalt_selected_relative:
+	.byte	0x0f, 0x1f, 0x44, 0x00, 0x00
+	.loc	1 121 0
+	ret
+	.size	alt_selected_relative_fixture, .-alt_selected_relative_fixture
+
 	.data
 	.p2align 3
 alt_call_target_ptr:
@@ -126,6 +148,11 @@ __alt_call_sites_end:
 	.byte	0x0f, 0x01, 0xcb
 .Lalt_padding_original_replacement:
 	.byte	0x0f, 0x01, 0xcb
+.Lalt_selected_long_replacement:
+	mov	$16, %ecx
+	mov	%rsp, %rax
+.Lalt_selected_relative_replacement:
+	call	alt_call_target
 
 	.section .altinstructions,"aw",@progbits
 	.globl	__alt_instructions
@@ -157,6 +184,20 @@ __alt_instructions:
 	.byte	1
 	.byte	3
 	.byte	2
+	.byte	0
+	.long	.Lalt_selected_long - .
+	.long	.Lalt_selected_long_replacement - .
+	.word	0x0273
+	.byte	0
+	.byte	8
+	.byte	8
+	.byte	0
+	.long	.Lalt_selected_relative - .
+	.long	.Lalt_selected_relative_replacement - .
+	.word	0x0273
+	.byte	0
+	.byte	5
+	.byte	5
 	.byte	0
 	.globl	__alt_instructions_end
 __alt_instructions_end:

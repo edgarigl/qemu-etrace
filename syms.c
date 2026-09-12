@@ -89,12 +89,19 @@ struct sym_store {
 	size_t nr_sections;
 	struct sym_load_segment *load_segments;
 	size_t nr_load_segments;
+	struct x86_alt_replacement {
+		uint64_t addr;
+		uint8_t len;
+	} *x86_alt_replacements;
+	size_t nr_x86_alt_replacements;
 	struct x86_alt_patch {
 		uint64_t addr;
 		uint16_t len;
 		uint8_t original_len;
 		uint8_t padding_len;
 		bool empty_replacement;
+		size_t first_replacement;
+		size_t nr_replacements;
 	} *x86_alt_patches;
 	size_t nr_x86_alt_patches;
 	uint64_t *alt_call_sites;
@@ -831,8 +838,10 @@ static void read_alt_call_sites(struct sym_store *ss, bfd *abfd)
 
 struct x86_alt_record {
 	uint64_t addr;
+	uint64_t replacement;
 	uint16_t len;
 	uint8_t original_len;
+	uint8_t replacement_len;
 	uint8_t padding_len;
 	bool empty_replacement;
 };
@@ -954,8 +963,10 @@ static void read_x86_alt_instructions(struct sym_store *ss, bfd *abfd)
 		}
 		records[i] = (struct x86_alt_record) {
 			.addr = origin,
+			.replacement = replacement,
 			.len = total_len,
 			.original_len = original_len,
+			.replacement_len = replacement_len,
 			.padding_len = padding_len,
 			.empty_replacement = replacement_len == 0,
 		};
@@ -966,6 +977,7 @@ static void read_x86_alt_instructions(struct sym_store *ss, bfd *abfd)
 					    * sizeof(*ss->x86_alt_patches));
 	for (i = 0; i < count;) {
 		size_t next = i + 1;
+		size_t j;
 		bool empty_replacement = records[i].empty_replacement;
 		struct x86_alt_patch *patch;
 
@@ -992,6 +1004,23 @@ static void read_x86_alt_instructions(struct sym_store *ss, bfd *abfd)
 		patch->original_len = records[i].original_len;
 		patch->padding_len = records[i].padding_len;
 		patch->empty_replacement = empty_replacement;
+		patch->first_replacement = ss->nr_x86_alt_replacements;
+		patch->nr_replacements = 0;
+		for (j = i; j < next; j++) {
+			struct x86_alt_replacement *replacement;
+
+			if (!records[j].replacement_len)
+				continue;
+			ss->x86_alt_replacements = safe_realloc(
+				ss->x86_alt_replacements,
+				(ss->nr_x86_alt_replacements + 1)
+				* sizeof(*ss->x86_alt_replacements));
+			replacement = &ss->x86_alt_replacements[
+				ss->nr_x86_alt_replacements++];
+			replacement->addr = records[j].replacement;
+			replacement->len = records[j].replacement_len;
+			patch->nr_replacements++;
+		}
 		i = next;
 	}
 	free(records);
@@ -1307,6 +1336,45 @@ static bool x86_nops_match(const uint8_t *code, size_t len,
 	return true;
 }
 
+static size_t x86_alt_replacement_span(struct sym_store *ss,
+				       const struct x86_alt_patch *patch,
+				       uint64_t addr, const uint8_t *code,
+				       size_t len)
+{
+	size_t offset = addr - patch->addr;
+	size_t span = MIN(len, patch->len - offset);
+	size_t i;
+
+	if (!span || !load_image_data(ss))
+		return 0;
+	for (i = 0; i < patch->nr_replacements; i++) {
+		const struct x86_alt_replacement *replacement =
+			&ss->x86_alt_replacements[patch->first_replacement + i];
+		struct image_section *section;
+		const uint8_t *bytes;
+
+		/*
+		 * Xen adjusts an external call/jump at the start of a replacement,
+		 * and may adjust a trailing jump to __x86_return_thunk.  Leave both
+		 * forms unresolved until their relocated bytes are validated.
+		 */
+		if (replacement->len != patch->len)
+			continue;
+		section = image_section_find(ss, replacement->addr);
+		if (!section
+		    || replacement->addr + replacement->len > section->end)
+			continue;
+		bytes = section->data + replacement->addr - section->start;
+		if ((replacement->len >= 5 && (bytes[0] & 0xfe) == 0xe8)
+		    || (replacement->len > 5
+			&& bytes[replacement->len - 5] == 0xe9))
+			continue;
+		if (!memcmp(code, bytes + offset, span))
+			return span;
+	}
+	return 0;
+}
+
 size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
 			       const uint8_t *code, size_t len)
 {
@@ -1323,14 +1391,23 @@ size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
 	while (low < high) {
 		size_t mid = low + (high - low) / 2;
 
-		if (ss->x86_alt_patches[mid].addr < addr)
+		if (ss->x86_alt_patches[mid].addr <= addr)
 			low = mid + 1;
 		else
 			high = mid;
 	}
-	if (low == ss->nr_x86_alt_patches)
+	if (!low)
 		return 0;
-	patch = &ss->x86_alt_patches[low];
+	patch = &ss->x86_alt_patches[low - 1];
+	if (addr < patch->addr || addr - patch->addr >= patch->len)
+		return 0;
+	{
+		size_t replacement_span = x86_alt_replacement_span(
+			ss, patch, addr, code, len);
+
+		if (replacement_span)
+			return replacement_span;
+	}
 	if (patch->addr != addr || len < patch->len)
 		return 0;
 	if (patch->empty_replacement

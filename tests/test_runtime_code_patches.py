@@ -65,6 +65,8 @@ def alt_call_fixture(tmp_path_factory):
         "alt_unregistered_fixture",
         "alt_padding_fixture",
         "alt_padding_original_fixture",
+        "alt_selected_long_fixture",
+        "alt_selected_relative_fixture",
     ):
         start, size = symbols[name]
         instructions = []
@@ -439,16 +441,32 @@ def test_accepts_unselected_nonempty_alternative_padding(
     assert "partially verified" not in result.stderr
 
 
-@pytest.mark.parametrize(
-    "replacement",
-    [b"\x0f\x1f\x01", b"\x0f\x01\xcb"],
-    ids=("arbitrary-nop", "selected-stac"),
-)
-def test_rejects_unsupported_nonempty_alternative_bytes(
-    run_etrace, tmp_path, alt_call_fixture, replacement
+def test_accepts_selected_nonempty_alternative(
+    run_etrace, tmp_path, alt_call_fixture
 ):
     function = alt_call_fixture.functions["alt_padding_fixture"]
-    code, site = replace_instruction(function, b"\x0f\x1f\x00", replacement)
+    code, _ = replace_instruction(
+        function, b"\x0f\x1f\x00", b"\x0f\x01\xcb"
+    )
+
+    result, functions, decoded = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code
+    )
+    lines = parse_lines(decoded.with_suffix(".info"))
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_padding_fixture"] == 1
+    assert all(lines[line] == 1 for line in range(90, 94))
+    assert "partially verified" not in result.stderr
+
+
+def test_rejects_unknown_nonempty_alternative_bytes(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_padding_fixture"]
+    code, site = replace_instruction(
+        function, b"\x0f\x1f\x00", b"\x0f\x1f\x01"
+    )
 
     result, functions, decoded = run_patch_trace(
         run_etrace, tmp_path, alt_call_fixture, function, code
@@ -460,6 +478,78 @@ def test_rejects_unsupported_nonempty_alternative_bytes(
     assert f" {function.start:x} {function.start + site:x}" in (
         decoded.read_text(encoding="ascii")
     )
+
+
+@pytest.mark.parametrize("offset,size", [(0, 5), (5, 3)])
+def test_accepts_partial_selected_nonempty_alternative(
+    run_etrace, tmp_path, alt_call_fixture, offset, size
+):
+    function = alt_call_fixture.functions["alt_selected_long_fixture"]
+    replacement = b"\xb9\x10\x00\x00\x00\x48\x89\xe0"
+    linked = function.start + offset
+
+    result, _, decoded = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        replacement[offset:offset + size], insns=((0, size),),
+        vaddr=linked, linked=linked,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "partially verified" not in result.stderr
+    assert f" {linked:x} {linked + size:x}" in decoded.read_text(
+        encoding="ascii"
+    )
+
+
+def test_partial_selected_nonempty_alternative_does_not_establish_mapping(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_selected_long_fixture"]
+    replacement = b"\xb9\x10\x00\x00\x00"
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        replacement, insns=((0, len(replacement)),), explicit_map=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_long_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_rejects_unknown_partial_selected_nonempty_alternative(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_selected_long_fixture"]
+    replacement = bytearray(b"\xb9\x10\x00\x00\x00")
+    replacement[-1] ^= 1
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        bytes(replacement), insns=((0, len(replacement)),),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_long_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_rejects_relocated_nonempty_alternative(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_selected_relative_fixture"]
+    target = alt_call_fixture.functions["alt_call_target"].start
+    displacement = target - (function.start + 5)
+    code = b"\xe8" + struct.pack("<i", displacement) + function.code[5:]
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code,
+        insns=((0, 5), (5, 1)),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_relative_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 
 def test_rejects_change_in_nonempty_alternative_original(
@@ -495,13 +585,17 @@ def test_rejects_partial_nonempty_alternative_padding(
     assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "replacement", [b"\x66\x66\x90", b"\x0f\x01\xcb"],
+    ids=("unselected-k8", "selected-stac"),
+)
 @pytest.mark.parametrize("side", ["before", "after"])
-def test_rejects_change_outside_nonempty_alternative_padding(
-    run_etrace, tmp_path, alt_call_fixture, side
+def test_rejects_change_outside_nonempty_alternative(
+    run_etrace, tmp_path, alt_call_fixture, replacement, side
 ):
     function = alt_call_fixture.functions["alt_padding_fixture"]
     code, site = replace_instruction(
-        function, b"\x0f\x1f\x00", b"\x66\x66\x90"
+        function, b"\x0f\x1f\x00", replacement
     )
     code = bytearray(code)
     changed = site - 1 if side == "before" else site + 3
@@ -519,12 +613,16 @@ def test_rejects_change_outside_nonempty_alternative_padding(
         assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 
-def test_nonempty_alternative_padding_does_not_establish_mapping(
-    run_etrace, tmp_path, alt_call_fixture
+@pytest.mark.parametrize(
+    "replacement", [b"\x66\x66\x90", b"\x0f\x01\xcb"],
+    ids=("unselected-k8", "selected-stac"),
+)
+def test_nonempty_alternative_does_not_establish_mapping(
+    run_etrace, tmp_path, alt_call_fixture, replacement
 ):
     function = alt_call_fixture.functions["alt_padding_fixture"]
     code, _ = replace_instruction(
-        function, b"\x0f\x1f\x00", b"\x66\x66\x90"
+        function, b"\x0f\x1f\x00", replacement
     )
 
     result, functions, _ = run_patch_trace(

@@ -155,11 +155,18 @@ qemu-etrace validates the complete registered span before crediting any of its
 runtime instructions, including when NOP encoding changes instruction
 boundaries, and then resumes exact instruction validation after the span.
 
-A partial span, an unregistered NOP, or any other byte sequence remains
-unresolved. General alternatives are considered only inside an explicit or
-already owned image mapping, so a patched span cannot establish or extend a
-physical image mapping. Selected nonempty general replacements are not yet
-accepted unless their bytes are identical to a legal unselected state.
+A partial NOP span, an unregistered NOP, or any other unknown byte sequence
+remains unresolved. Selected nonempty replacements which fill the complete
+patch span and need no relocation are also accepted. An image-owned TB may
+contain an instruction-aligned slice of such a replacement, which is needed
+for alternatives containing control flow that QEMU splits into several TBs.
+Every observed byte must match the replacement at the metadata-defined offset.
+
+Replacements with trailing padding, an initial relative call or jump, or a
+possible trailing jump to `__x86_return_thunk` remain unresolved. General
+alternatives are considered only inside an explicit or already owned image
+mapping, so a patched span or slice cannot establish or extend a physical
+image mapping.
 
 ## Safety interpretation
 
