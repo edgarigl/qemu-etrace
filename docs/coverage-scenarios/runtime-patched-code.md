@@ -156,17 +156,19 @@ runtime instructions, including when NOP encoding changes instruction
 boundaries, and then resumes exact instruction validation after the span.
 
 A partial NOP span, an unregistered NOP, or any other unknown byte sequence
-remains unresolved. Selected nonempty replacements which fill the complete
-patch span and need no relocation are also accepted. An image-owned TB may
-contain an instruction-aligned slice of such a replacement, which is needed
-for alternatives containing control flow that QEMU splits into several TBs.
-Every observed byte must match the replacement at the metadata-defined offset.
+remains unresolved. Selected nonempty replacements which need no relocation
+are also accepted. When the replacement is shorter than the patch span, its
+remaining bytes must be the P6 or K8 ideal-NOP padding Xen generates. An
+image-owned TB may contain an instruction-aligned slice beginning in the
+replacement, which is needed for alternatives containing control flow that
+QEMU splits into several TBs. Every observed byte must match the replacement
+and padding at its metadata-defined offset. A slice containing only the
+generated padding remains unresolved under the partial-NOP policy.
 
-Replacements with trailing padding, an initial relative call or jump, or a
-possible trailing jump to `__x86_return_thunk` remain unresolved. General
-alternatives are considered only inside an explicit or already owned image
-mapping, so a patched span or slice cannot establish or extend a physical
-image mapping.
+Replacements with an initial relative call or jump, or a possible trailing
+jump to `__x86_return_thunk` remain unresolved. General alternatives are
+considered only inside an explicit or already owned image mapping, so a
+patched span or slice cannot establish or extend a physical image mapping.
 
 ## Safety interpretation
 

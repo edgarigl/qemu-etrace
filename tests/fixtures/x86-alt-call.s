@@ -116,6 +116,18 @@ alt_selected_long_fixture:
 	.size	alt_selected_long_fixture, .-alt_selected_long_fixture
 
 	.p2align 4
+	.globl	alt_selected_padded_fixture
+	.type	alt_selected_padded_fixture, @function
+alt_selected_padded_fixture:
+	.loc	1 115 0
+.Lalt_selected_padded:
+	.byte	0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00
+	.byte	0x0f, 0x1f, 0x00
+	.loc	1 116 0
+	ret
+	.size	alt_selected_padded_fixture, .-alt_selected_padded_fixture
+
+	.p2align 4
 	.globl	alt_selected_relative_fixture
 	.type	alt_selected_relative_fixture, @function
 alt_selected_relative_fixture:
@@ -151,6 +163,12 @@ __alt_call_sites_end:
 .Lalt_selected_long_replacement:
 	mov	$16, %ecx
 	mov	%rsp, %rax
+.Lalt_selected_padded_replacement_one:
+	mov	%rsp, %rax
+	nop
+.Lalt_selected_padded_replacement_two:
+	mov	%rax, %rsp
+	nop
 .Lalt_selected_relative_replacement:
 	call	alt_call_target
 
@@ -191,6 +209,20 @@ __alt_instructions:
 	.byte	0
 	.byte	8
 	.byte	8
+	.byte	0
+	.long	.Lalt_selected_padded - .
+	.long	.Lalt_selected_padded_replacement_one - .
+	.word	0x0273
+	.byte	0
+	.byte	4
+	.byte	12
+	.byte	0
+	.long	.Lalt_selected_padded - .
+	.long	.Lalt_selected_padded_replacement_two - .
+	.word	0x0274
+	.byte	0
+	.byte	4
+	.byte	12
 	.byte	0
 	.long	.Lalt_selected_relative - .
 	.long	.Lalt_selected_relative_replacement - .

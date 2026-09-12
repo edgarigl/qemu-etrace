@@ -66,6 +66,7 @@ def alt_call_fixture(tmp_path_factory):
         "alt_padding_fixture",
         "alt_padding_original_fixture",
         "alt_selected_long_fixture",
+        "alt_selected_padded_fixture",
         "alt_selected_relative_fixture",
     ):
         start, size = symbols[name]
@@ -531,6 +532,145 @@ def test_rejects_unknown_partial_selected_nonempty_alternative(
 
     assert result.returncode == 0, result.stderr
     assert functions["alt_selected_long_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "replacement", [b"\x48\x89\xe0\x90", b"\x48\x89\xc4\x90"],
+    ids=("first", "second"),
+)
+@pytest.mark.parametrize(
+    "padding,insns", [
+        (b"\x0f\x1f\x84\x00\x00\x00\x00\x00", ((4, 8),)),
+        (b"\x66\x66\x66\x90\x66\x66\x66\x90", ((4, 4), (8, 4))),
+    ],
+    ids=("p6", "k8"),
+)
+def test_accepts_selected_alternative_with_padding(
+    run_etrace, tmp_path, alt_call_fixture, replacement, padding, insns
+):
+    function = alt_call_fixture.functions["alt_selected_padded_fixture"]
+    code = replacement + padding + function.code[12:]
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code,
+        insns=((0, 3), (3, 1)) + insns + ((12, 1),),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_padded_fixture"] == 1
+    assert "partially verified" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "replacement", [b"\x48\x89\xe0\x90", b"\x48\x89\xc4\x90"],
+    ids=("first", "second"),
+)
+def test_accepts_slice_inside_selected_padded_replacement(
+    run_etrace, tmp_path, alt_call_fixture, replacement
+):
+    function = alt_call_fixture.functions["alt_selected_padded_fixture"]
+
+    result, _, decoded = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        replacement[:3], insns=((0, 3),),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "partially verified" not in result.stderr
+    assert f" {function.start:x} {function.start + 3:x}" in (
+        decoded.read_text(encoding="ascii")
+    )
+
+
+@pytest.mark.parametrize(
+    "padding,insns", [
+        (b"\x0f\x1f\x84\x00\x00\x00\x00\x00", ((0, 1), (1, 8))),
+        (b"\x66\x66\x66\x90", ((0, 1), (1, 4))),
+    ],
+    ids=("p6", "k8"),
+)
+def test_accepts_selected_replacement_slice_crossing_into_padding(
+    run_etrace, tmp_path, alt_call_fixture, padding, insns
+):
+    function = alt_call_fixture.functions["alt_selected_padded_fixture"]
+    linked = function.start + 3
+
+    result, _, decoded = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        b"\x90" + padding, insns=insns,
+        vaddr=linked, linked=linked,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "partially verified" not in result.stderr
+    assert f" {linked:x} {linked + 1 + len(padding):x}" in decoded.read_text(
+        encoding="ascii"
+    )
+
+
+@pytest.mark.parametrize(
+    "padding,insns", [
+        (b"\x0f\x1f\x84\x00\x00\x00\x00\x00", ((0, 8),)),
+        (b"\x66\x66\x66\x90\x66\x66\x66\x90", ((0, 4), (4, 4))),
+    ],
+    ids=("p6", "k8"),
+)
+def test_rejects_padding_only_selected_replacement_slice(
+    run_etrace, tmp_path, alt_call_fixture, padding, insns
+):
+    function = alt_call_fixture.functions["alt_selected_padded_fixture"]
+    linked = function.start + 4
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function,
+        padding, insns=insns, vaddr=linked, linked=linked,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_padded_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "offset", [2, 7], ids=("replacement", "padding")
+)
+def test_rejects_unknown_selected_alternative_with_padding(
+    run_etrace, tmp_path, alt_call_fixture, offset
+):
+    function = alt_call_fixture.functions["alt_selected_padded_fixture"]
+    code = bytearray(
+        b"\x48\x89\xe0\x90\x0f\x1f\x84\x00\x00\x00\x00\x00"
+        + function.code[12:]
+    )
+    code[offset] ^= 1
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, bytes(code),
+        insns=((0, 3), (3, 1), (4, 8), (12, 1)),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_padded_fixture"] == 0
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_selected_alternative_with_padding_does_not_establish_mapping(
+    run_etrace, tmp_path, alt_call_fixture
+):
+    function = alt_call_fixture.functions["alt_selected_padded_fixture"]
+    code = (
+        b"\x48\x89\xe0\x90\x0f\x1f\x84\x00\x00\x00\x00\x00"
+        + function.code[12:]
+    )
+
+    result, functions, _ = run_patch_trace(
+        run_etrace, tmp_path, alt_call_fixture, function, code,
+        insns=((0, 3), (3, 1), (4, 8), (12, 1)), explicit_map=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["alt_selected_padded_fixture"] == 0
     assert "1 execution events in 1 unresolved aggregates" in result.stderr
 
 

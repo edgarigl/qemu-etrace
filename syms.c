@@ -1336,6 +1336,53 @@ static bool x86_nops_match(const uint8_t *code, size_t len,
 	return true;
 }
 
+static bool x86_nops_slice_match(const uint8_t *code, size_t offset,
+				  size_t len, size_t total,
+				  const uint8_t *nops)
+{
+	size_t end;
+	size_t pos = 0;
+
+	if (offset > total || len > total - offset)
+		return false;
+	end = offset + len;
+	while (pos < total) {
+		size_t nop_len = MIN(total - pos, 9);
+		size_t nop_offset = nop_len * (nop_len - 1) / 2;
+		size_t match_start = MAX(pos, offset);
+		size_t match_end = MIN(pos + nop_len, end);
+
+		if (match_start < match_end
+		    && memcmp(code + match_start - offset,
+			      nops + nop_offset + match_start - pos,
+			      match_end - match_start))
+			return false;
+		pos += nop_len;
+	}
+	return true;
+}
+
+static bool x86_alt_replacement_matches(
+	const struct x86_alt_patch *patch,
+	const struct x86_alt_replacement *replacement,
+	const uint8_t *replacement_bytes, uint64_t addr,
+	const uint8_t *code, size_t span, const uint8_t *nops)
+{
+	size_t offset = addr - patch->addr;
+	size_t replacement_span;
+
+	/* A padding-only fragment retains the existing partial-NOP policy. */
+	if (offset >= replacement->len)
+		return false;
+	replacement_span = MIN(span, replacement->len - offset);
+	if (memcmp(code, replacement_bytes + offset, replacement_span))
+		return false;
+	if (replacement_span == span)
+		return true;
+	return x86_nops_slice_match(code + replacement_span, 0,
+		span - replacement_span, patch->len - replacement->len, nops);
+}
+
 static size_t x86_alt_replacement_span(struct sym_store *ss,
 				       const struct x86_alt_patch *patch,
 				       uint64_t addr, const uint8_t *code,
@@ -1358,8 +1405,6 @@ static size_t x86_alt_replacement_span(struct sym_store *ss,
 		 * and may adjust a trailing jump to __x86_return_thunk.  Leave both
 		 * forms unresolved until their relocated bytes are validated.
 		 */
-		if (replacement->len != patch->len)
-			continue;
 		section = image_section_find(ss, replacement->addr);
 		if (!section
 		    || replacement->addr + replacement->len > section->end)
@@ -1369,7 +1414,10 @@ static size_t x86_alt_replacement_span(struct sym_store *ss,
 		    || (replacement->len > 5
 			&& bytes[replacement->len - 5] == 0xe9))
 			continue;
-		if (!memcmp(code, bytes + offset, span))
+		if (x86_alt_replacement_matches(patch, replacement, bytes,
+			addr, code, span, x86_p6_nops)
+		    || x86_alt_replacement_matches(patch, replacement, bytes,
+			addr, code, span, x86_k8_nops))
 			return span;
 	}
 	return 0;

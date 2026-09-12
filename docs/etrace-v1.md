@@ -255,13 +255,14 @@ alternative, the ELF original must remain exact while its build-time padding
 may use either ideal-NOP encoding. Validation covers the whole metadata-defined
 span before continuing at its end; partial NOP spans remain unresolved.
 
-A selected nonempty replacement which fills the complete span and needs no
-relocation may be validated byte for byte. Because replacement control flow
-can split the span into several TBs, an instruction-aligned slice is accepted
-at its metadata-defined offset. Replacements with trailing padding, an initial
-relative call or jump, or a possible trailing return-thunk jump remain
-unresolved. These states likewise require a mapping that is already owned
-independently of the patched bytes.
+A selected nonempty replacement which needs no relocation may be validated
+byte for byte. A shorter replacement must be followed by the exact P6 or K8
+ideal-NOP padding Xen generates. Because replacement control flow can split
+the span into several TBs, an instruction-aligned slice beginning in the
+replacement is accepted at its metadata-defined offset. A padding-only slice,
+an initial relative call or jump, or a possible trailing return-thunk jump
+remains unresolved. These states likewise require a mapping that is already
+owned independently of the patched bytes.
 
 Once a definition resolves, pending execution aggregates are replayed through
 the normal execution-range coverage path. Repeated executions with the same
