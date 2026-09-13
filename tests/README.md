@@ -32,6 +32,20 @@ own include and library paths, and external programs are found through `PATH`.
 The staged-install test also runs the installed `etrace-view` launcher against
 its installed Python modules.
 
+Cross-ISA tests also need the guest decoder in the linked Binutils libraries.
+Installing an x86 cross compiler and `objdump` on an ARM host does not add an
+x86 decoder to the system `libopcodes`. The x86 disassembler unit test reports
+a skip in that configuration, while x86 fallthrough-mapping integration tests
+require the decoder. Use a multi-target Binutils build for those checks:
+
+```sh
+make binutils                 # Build the local fallback if needed.
+make -j4 USE_LOCAL_BINUTILS=1 check
+```
+
+Keep `USE_LOCAL_BINUTILS=1` on subsequent make invocations to retain local mode;
+a plain `make check` selects the system libraries again.
+
 The x86 variable-length fixture uses explicit instruction encodings and DWARF
 line records. Its tests verify byte-precise line and function coverage for
 short and unaligned translation blocks, as well as the textual ETrace coverage
