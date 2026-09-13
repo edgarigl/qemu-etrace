@@ -130,8 +130,7 @@ struct etrace_tb_definition {
 	bool bindings_seeded;
 	bool infer_image_mapping;
 	bool owned_mapping;
-	bool fallthrough_owned;
-	uint64_t fallthrough_context_id;
+	GArray *fallthrough_contexts;
 };
 
 struct pending_tb_exec {
@@ -206,15 +205,29 @@ static bool context_is_incomplete_for_elf(const struct etracer *t,
 		&& !(context->flags & ETRACE_CONTEXT_F_PRIVILEGE_VALID);
 }
 
+static bool fallthrough_context_is_owned(
+	const struct etrace_tb_definition *definition, uint64_t context_id)
+{
+	unsigned int i;
+
+	for (i = 0; definition->fallthrough_contexts
+		     && i < definition->fallthrough_contexts->len; i++) {
+		if (g_array_index(definition->fallthrough_contexts, uint64_t, i)
+		    == context_id)
+			return true;
+	}
+	return false;
+}
+
 static bool execution_context_matches_elf(
 	const struct etracer *t, const struct etrace_tb_definition *definition,
 	uint64_t context_id)
 {
-	if (definition->fallthrough_owned
-	    && context_id != definition->fallthrough_context_id)
+	if (definition->fallthrough_contexts
+	    && !fallthrough_context_is_owned(definition, context_id))
 		return false;
 	return context_matches_elf(t, context_id)
-		|| ((definition->owned_mapping || definition->fallthrough_owned)
+		|| ((definition->owned_mapping || definition->fallthrough_contexts)
 		    && context_is_incomplete_for_elf(t, context_id));
 }
 
@@ -284,6 +297,8 @@ static void etrace_tb_definition_free(void *opaque)
 		return;
 	if (definition->pending)
 		g_array_free(definition->pending, true);
+	if (definition->fallthrough_contexts)
+		g_array_free(definition->fallthrough_contexts, true);
 	free(definition->code);
 	free(definition->mappings);
 	free(definition->insns);
@@ -1191,6 +1206,18 @@ static uint16_t matching_instruction_prefix(
 	return i;
 }
 
+static void add_fallthrough_context(
+	struct etrace_tb_definition *definition, uint64_t context_id)
+{
+	if (fallthrough_context_is_owned(definition, context_id))
+		return;
+	if (!definition->fallthrough_contexts)
+		definition->fallthrough_contexts = g_array_new(
+			false, false, sizeof(context_id));
+	/* At most one entry per declared trace context is retained. */
+	g_array_append_val(definition->fallthrough_contexts, context_id);
+}
+
 static bool resolve_from_fallthrough(
 	struct etracer *t, struct etrace_tb_definition *definition,
 	const struct etrace_tb_exec *execution, uint16_t unit_id)
@@ -1201,13 +1228,18 @@ static bool resolve_from_fallthrough(
 	uint16_t verified;
 
 	if (!t->auto_map || !t->ordered_execution
-	    || definition->resolved || !previous->valid
+	    || !previous->valid
 	    || previous->sequence == UINT64_MAX
 	    || execution->sequence != previous->sequence + 1
 	    || !execution->context_id
+	    || fallthrough_context_is_owned(definition,
+					      execution->context_id)
 	    || execution->context_id != previous->context_id
 	    || definition->vaddr != previous->runtime_next
 	    || !definition->code
+	    || (definition->resolved
+		&& (!definition->fallthrough_contexts
+		    || definition->linked_vaddr != previous->linked_next))
 	    || (definition->vaddr != previous->linked_next
 		&& sym_address_is_executable(t->tr.sym_tree, definition->vaddr))
 	    || definition->vaddr > UINT64_MAX - definition->size
@@ -1245,18 +1277,19 @@ static bool resolve_from_fallthrough(
 				previous->linked_next + mapping->offset);
 		}
 	}
-	definition->resolved = true;
-	definition->linked_vaddr = previous->linked_next;
-	definition->verified_insn_count = verified;
-	definition->fallthrough_owned = true;
-	definition->fallthrough_context_id = execution->context_id;
-	definition->owned_mapping = definition->mapping_count != 0;
-	definition->bindings_seeded = definition->mapping_count != 0;
-	if (definition->code_candidate) {
-		definition->code_candidate = false;
-		t->code_candidates--;
+	if (!definition->resolved) {
+		definition->resolved = true;
+		definition->linked_vaddr = previous->linked_next;
+		definition->verified_insn_count = verified;
+		definition->owned_mapping = definition->mapping_count != 0;
+		definition->bindings_seeded = definition->mapping_count != 0;
+		if (definition->code_candidate) {
+			definition->code_candidate = false;
+			t->code_candidates--;
+		}
+		t->fallthrough_resolutions++;
 	}
-	t->fallthrough_resolutions++;
+	add_fallthrough_context(definition, execution->context_id);
 	return true;
 }
 

@@ -236,9 +236,11 @@ vCPU change, discontinuity, filtered-context gap, noncontiguous address, or
 mapping conflict breaks the chain. An explicit map at the successor takes
 precedence. Observed physical mappings on a fully validated successor are
 bound only for that TB's spans; fallthrough does not infer a whole-image load
-bias. Fallthrough attribution remains local to the observed context, and
-runtime-patched bytes never become an image-mapping anchor. If libopcodes
-cannot decode the ELF architecture, the predecessor remains ineligible.
+bias. Fallthrough attribution remains local to the observed context. A shared
+TB definition used by another context remains ineligible there until that
+context independently proves the same ordered fallthrough. Runtime-patched
+bytes never become an image-mapping anchor. If libopcodes cannot decode the
+ELF architecture, the predecessor remains ineligible.
 
 Linked-address anchors assume the selected trace address space belongs to the
 input ELF at those virtual addresses. Explicit maps assert the corresponding

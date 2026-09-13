@@ -1072,6 +1072,88 @@ def test_v1_fallthrough_mapping_remains_context_local(
 
 
 @pytest.mark.parametrize(
+    ("second_proof", "expected_count"),
+    [
+        ("same-context-vcpu", 2),
+        ("no-predecessor", 1),
+        ("context-change", 1),
+        ("vcpu-change", 1),
+    ],
+)
+def test_v1_fallthrough_mapping_requires_per_context_proof(
+    run_etrace, tmp_path, x86_fixture, second_proof, expected_count
+):
+    linked = x86_fixture.start
+    runtime = 0x30800000
+    anchor, anchor_len = fallthrough_definition(
+        x86_fixture, 1, runtime, 0, 2, context_id=1
+    )
+    successor, _ = fallthrough_definition(
+        x86_fixture, 2, runtime + anchor_len, 2, 4, context_id=1
+    )
+    packets = [
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT),
+        etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        ),
+        etrace_context(
+            context_id=2, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        ),
+        anchor,
+        successor,
+        etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1, insn_count=2,
+        ),
+        etrace_tb_exec(
+            tb_id=2, sequence=2, context_id=1, insn_count=2,
+        ),
+    ]
+    if second_proof == "same-context-vcpu":
+        packets.append(etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=2, insn_count=2, unit_id=1,
+        ))
+        successor_unit = 1
+        successor_sequence = 2
+    elif second_proof == "no-predecessor":
+        successor_unit = 1
+        successor_sequence = 1
+    elif second_proof == "context-change":
+        packets.append(etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1, insn_count=2, unit_id=1,
+        ))
+        successor_unit = 1
+        successor_sequence = 2
+    else:
+        packets.append(etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=2, insn_count=2, unit_id=1,
+        ))
+        successor_unit = 2
+        successor_sequence = 1
+    packets.append(etrace_tb_exec(
+        tb_id=2, sequence=successor_sequence, context_id=2,
+        insn_count=2, unit_id=successor_unit,
+    ))
+    trace = tmp_path / f"fallthrough-shared-{second_proof}.etrace"
+    trace.write_bytes(b"".join(packets))
+
+    result, (lines, _) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map", "--elf-context", "x86_64:cpl0",
+        "--address-map", f"{runtime:x}:{linked:x}:{anchor_len:x}",
+        "--preserve-order",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert lines[12] == lines[13] == expected_count
+    assert "resolved 1 translation block by exact fallthrough" in result.stderr
+    assert ("retained 1 unresolved execution boundaries" in result.stderr) == (
+        expected_count == 1
+    )
+
+
+@pytest.mark.parametrize(
     "boundary",
     [
         "discontinuity-unknown",
