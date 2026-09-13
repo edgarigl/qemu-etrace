@@ -89,3 +89,6 @@ execution, inconsistent RTL/listing/ELF inputs, and unchanged LCOV output.
 When qemu-x86_64 is available, real one-instruction-per-TB logs verify return
 witnesses and identical PC sequences for different branchless outcomes.
 Those runs are user-mode fixtures, not an uninstrumented Xen IOCHK run.
+
+The retained Xen block-7 study, its separate source premise, and synthetic
+accounting results are described in [gcc-provenance-block7.md](gcc-provenance-block7.md).
