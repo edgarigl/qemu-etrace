@@ -12,6 +12,7 @@ def test_help_lists_trace_and_coverage_formats(run_etrace):
     assert "--function-hit-policy" in result.stdout
     assert "--line-hit-policy" in result.stdout
     assert "--coverage-inventory" in result.stdout
+    assert "--coverage-attribution" in result.stdout
     assert "--auto-map" in result.stdout
     assert "--elf-context" in result.stdout
     assert "--preserve-order" in result.stdout
@@ -42,6 +43,22 @@ def test_coverage_inventory_requires_elf_and_lcov(run_etrace, tmp_path):
 
     assert result.returncode != 0
     assert "Coverage inventory requires --elf" in result.stderr
+
+
+@pytest.mark.parametrize("with_elf,coverage_format", [(False, "lcov"), (True, "none")])
+def test_coverage_attribution_requires_elf_and_lcov(
+    run_etrace, tmp_path, with_elf, coverage_format
+):
+    trace = tmp_path / "empty.etrace"
+    trace.write_bytes(b"")
+    extra = ("--elf", tmp_path / "unused.elf") if with_elf else ()
+    result = run_etrace(
+        "--trace", trace, "--coverage-format", coverage_format,
+        "--coverage-output", tmp_path / "coverage.info",
+        "--coverage-attribution", tmp_path / "attribution.jsonl", *extra,
+    )
+    assert result.returncode != 0
+    assert "Coverage attribution requires --elf and --coverage-format lcov" in result.stderr
 
 
 def test_function_entry_line_hits_require_elf_and_lcov(run_etrace, tmp_path):

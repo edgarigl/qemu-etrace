@@ -42,6 +42,11 @@ leading bytes without source rows, repeated line mappings, macro-generated
 functions, zero-sized labels and functions, and linker-discarded executable
 sections. It also verifies JSON Lines function-inventory diagnostics.
 
+`test_coverage_attribution.py` checks JSON Lines DWARF evidence from an
+uninstrumented assembly fixture: columns, discriminators, statement markers,
+equal-address aliases, partial counts, discarded code, exclusions, output
+errors, and unchanged LCOV reports with the diagnostic enabled.
+
 `tests/xen_assembly_validation.py` validates a regenerated report from the
 retained Xen x86 audit. The multi-gigabyte trace is intentionally not part of
 the normal test suite; its checked summary is stored in

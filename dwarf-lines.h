@@ -7,6 +7,7 @@
 struct dwarf_line_row {
 	uint64_t address;
 	unsigned int line;
+	unsigned int column;
 	unsigned int discriminator;
 	bool is_stmt;
 	bool end_sequence;

@@ -241,6 +241,11 @@ $ qemu-etrace ... \
     --coverage-output coverage.info \
     --coverage-inventory functions.jsonl
 
+Add `--coverage-attribution attribution.jsonl` to export DWARF source ranges,
+columns, discriminators, statement markers, and observed byte-address counts.
+This diagnostic leaves LCOV hits unchanged and requires no GCOV instrumentation
+or GCC build dumps. See `docs/coverage-model.md` for its format and limits.
+
 Lcov info files need to be furthered processed by lcov tools, in this case
 genhtml to create beautiful html reports.
 

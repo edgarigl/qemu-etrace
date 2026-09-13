@@ -82,7 +82,7 @@ bool dwarf_line_parse(const char *text, struct dwarf_line_row *row)
 	const char *uri;
 	const char *s;
 	char *end;
-	unsigned long line;
+	unsigned long value;
 
 	memset(row, 0, sizeof(*row));
 	if (strncmp(text, "0x", 2))
@@ -101,13 +101,27 @@ bool dwarf_line_parse(const char *text, struct dwarf_line_row *row)
 		s++;
 
 	errno = 0;
-	line = strtoul(s, &end, 10);
-	if (errno || end == s || line > UINT32_MAX)
+	value = strtoul(s, &end, 10);
+	if (errno || !isdigit((unsigned char)*s) || value > UINT32_MAX)
 		return false;
-	row->line = line;
+	row->line = value;
 
-	s = strchr(end, ']');
-	if (!s)
+	s = end;
+	while (isspace((unsigned char)*s))
+		s++;
+	if (*s++ != ',')
+		return false;
+	while (isspace((unsigned char)*s))
+		s++;
+	errno = 0;
+	value = strtoul(s, &end, 10);
+	if (errno || !isdigit((unsigned char)*s) || value > UINT32_MAX)
+		return false;
+	row->column = value;
+	s = end;
+	while (isspace((unsigned char)*s))
+		s++;
+	if (*s != ']')
 		return false;
 	flags = s + 1;
 	uri = strstr(flags, "uri:");

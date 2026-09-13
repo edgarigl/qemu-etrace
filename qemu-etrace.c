@@ -109,6 +109,7 @@ struct
 	bool server;
 	char *coverage_output;
 	char *coverage_inventory;
+	char *coverage_attribution;
 	char *gcov_strip;
 	char *gcov_prefix;
 } args = {
@@ -159,6 +160,7 @@ static const char etrace_usagestr[] = \
 "--coverage-format      Kind of coverage.\n"
 "--coverage-output      Coverage filename (if applicable).\n"
 "--coverage-inventory   Write a JSON Lines function inventory.\n"
+"--coverage-attribution Write JSON Lines DWARF ranges and address counts.\n"
 "--function-hit-policy Function hits: entry or source.\n"
 "--line-hit-policy     Line hits: address or function-entry.\n"
 "--address-map          Map runtime addresses to linked ELF addresses.\n"
@@ -266,6 +268,7 @@ static void parse_arguments(int argc, char **argv)
 			{"coverage-format", required_argument, 0, 'f' },
 			{"coverage-output", required_argument, 0, 'c' },
 			{"coverage-inventory", required_argument, 0, 'I' },
+			{"coverage-attribution", required_argument, 0, 1008 },
 			{"function-hit-policy", required_argument, 0, 'F' },
 			{"line-hit-policy", required_argument, 0, 1007 },
 			{"address-map", required_argument, 0, 'A' },
@@ -417,6 +420,9 @@ static void parse_arguments(int argc, char **argv)
 		case 1007:
 			args.line_hit_policy = map_line_hit_policy(optarg);
 			break;
+		case 1008:
+			args.coverage_attribution = optarg;
+			break;
 		case 'y':
 			args.trace_in_format = map_traceformat(optarg);
 			break;
@@ -493,6 +499,12 @@ void validate_arguments(void)
 	if (args.coverage_inventory
 	    && (!args.elf || args.coverage_format != LCOV)) {
 		fprintf(stderr, "Coverage inventory requires --elf and "
+			"--coverage-format lcov\n");
+		exit(EXIT_FAILURE);
+	}
+	if (args.coverage_attribution
+	    && (!args.elf || args.coverage_format != LCOV)) {
+		fprintf(stderr, "Coverage attribution requires --elf and "
 			"--coverage-format lcov\n");
 		exit(EXIT_FAILURE);
 	}
@@ -667,7 +679,8 @@ int main(int argc, char **argv)
 				args.gcov_strip, args.gcov_prefix,
 				args.exclude, args.function_hit_policy,
 				args.line_hit_policy,
-				args.coverage_inventory);
+				args.coverage_inventory,
+				args.coverage_attribution);
 	address_map_destroy(&args.address_map);
 
 	return EXIT_SUCCESS;

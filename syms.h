@@ -29,6 +29,7 @@ struct sym_coverage {
 
 enum loc_flags {
 	LOC_F_INLINED = (1 << 0),
+	LOC_F_STMT = (1 << 1),
 };
 
 enum sym_flags {
@@ -45,6 +46,7 @@ struct sym_src_loc {
 	struct sym_src_loc *next;
 	const char *filename;
 	unsigned int linenr;
+	unsigned int column;
 	unsigned int discriminator;
 	uint32_t flags;
 };

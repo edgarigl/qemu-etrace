@@ -37,6 +37,70 @@ Line coverage does not imply GCC branch or MC/DC coverage. GCC measures arcs
 selected from its compiler control-flow graph; qemu-etrace does not reconstruct
 those counters.
 
+## Attribution diagnostic
+
+Add `--coverage-attribution FILE` to an ELF-backed LCOV run to export the
+DWARF line-table evidence behind address-based coverage:
+
+```sh
+qemu-etrace --trace run.etrace --elf program.elf --trace-output none \
+    --coverage-format lcov --coverage-output coverage.info \
+    --coverage-attribution attribution.jsonl
+```
+
+This optional output requires neither GCOV runtime instrumentation nor GCC
+build dumps. It does not change the coverage policies or LCOV output. Keep
+the exact ELF/debug information used for the trace; addresses and debug
+coordinates from an instrumented build must not be applied to another build.
+Use distinct paths for the diagnostic and other inputs/outputs.
+
+Each JSON Lines record describes one source location and one half-open span
+with a constant executable status and byte-address hit count. For example:
+
+```json
+{"version":1,"kind":"dwarf-line","source":"/src/example.c","line":10,"column":3,"discriminator":7,"is_stmt":true,"range_start":"0x401000","range_end":"0x401003","start":"0x401000","end":"0x401002","executable":true,"hits":4,"excluded":false}
+```
+
+- `source`, `line`, `column`, `discriminator`, and `is_stmt` preserve the
+  location metadata, using the analyzer's normalized source path. Zero line
+  or column values retain DWARF's unspecified coordinates. `is_stmt` is the
+  DWARF statement marker, not proof that a source statement executed.
+- `range_start` and `range_end` identify the original attribution interval
+  built from the DWARF rows and sequence boundaries. All source aliases at
+  an equal address are retained as separate records, even when they share
+  a line but differ in column, discriminator, or statement marker.
+- `start` and `end` identify a span inside that interval. Addresses are hex
+  strings in linked ELF coordinates, after any trace address normalization.
+  A partially observed interval therefore has separate hit and missed spans.
+- `executable` indicates membership in an allocated executable ELF section.
+  Nonexecutable intervals, including stale ranges for discarded sections,
+  remain visible with zero hits but do not contribute LCOV lines.
+- `hits` is the accumulated execution-range count at each byte in the span.
+  Do not sum the records to obtain line, instruction, or function counts:
+  aliases duplicate evidence, and every byte of an instruction is credited.
+  Address-based LCOV takes the maximum count across a line's executable ranges.
+- `excluded` indicates an exact source-file/line exclusion. Excluded evidence
+  remains in this diagnostic even though LCOV omits the line.
+
+The output is raw line-table evidence, not an inline-stack report or a list
+of all source statements. It does not include declaration-line hits inferred
+by `--line-hit-policy=function-entry`; use `--coverage-inventory` alongside it
+to inspect function attribution. An ELF with no usable line ranges produces
+an empty diagnostic. Output creation/write failures are fatal. Large images
+can produce large files; collection is opt-in and scans all DWARF ranges.
+
+A zero hit count does not identify the cause: the code may be unexecuted,
+filtered from the trace, or unresolved by image matching. Conversely, an
+observed range cannot disambiguate multiple source paths that the compiler
+folded into the same code. In particular, a `DW_TAG_label` address alone is
+not enough to credit that source label; see
+[Folded source labels](coverage-scenarios/folded-source-labels.md).
+
+The uninstrumented assembly fixture in
+[`tests/test_coverage_attribution.py`](../tests/test_coverage_attribution.py)
+checks equal-address aliases, partial counts, discarded code, exclusions,
+output errors, and unchanged LCOV output.
+
 ## Function coverage
 
 `--function-hit-policy=entry` is the default. It counts a function when the

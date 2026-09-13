@@ -452,6 +452,7 @@ static void sym_alloc_linemap(struct sym *sym)
 
 static struct sym_src_loc *new_source_loc(const char *filename,
 					  unsigned int linenr,
+					  unsigned int column,
 					  unsigned int discriminator,
 					  uint32_t flags)
 {
@@ -459,6 +460,7 @@ static struct sym_src_loc *new_source_loc(const char *filename,
 
 	loc->filename = strdup(filename);
 	loc->linenr = linenr;
+	loc->column = column;
 	loc->discriminator = discriminator;
 	loc->flags = flags;
 	return loc;
@@ -539,6 +541,7 @@ static void sym_add_source_loc(struct sym *sym, uint64_t offset,
 	}
 	loc->filename = source->filename;
 	loc->linenr = source->linenr;
+	loc->column = source->column;
 	loc->discriminator = source->discriminator;
 	loc->flags = source->flags;
 }
@@ -1917,8 +1920,9 @@ void sym_build_linemap(void **store, const char *dwarfdump, const char *elf)
 			pending.valid = true;
 		}
 		append_source_loc(&pending.locs,
-			new_source_loc(filename, row.line, row.discriminator,
-				       0));
+			new_source_loc(filename, row.line, row.column,
+				       row.discriminator,
+				       row.is_stmt ? LOC_F_STMT : 0));
 		num_lines++;
 		dwarf_line_row_clear(&row);
 	}

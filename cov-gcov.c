@@ -1263,13 +1263,79 @@ static void lcov_emit_inventory(void **store, struct sym *syms,
 	}
 }
 
+static void lcov_emit_attribution(void **store, const char *filename,
+				  void *exclude)
+{
+	const struct sym_source_range *ranges;
+	size_t nr_ranges;
+	size_t i;
+	FILE *fp;
+	bool failed;
+
+	if (!filename)
+		return;
+	fp = fopen(filename, "w");
+	if (!fp) {
+		perror(filename);
+		exit(EXIT_FAILURE);
+	}
+	ranges = sym_get_source_ranges(store, &nr_ranges);
+	for (i = 0; i < nr_ranges; i++) {
+		const struct sym_source_range *range = &ranges[i];
+		uint64_t start = range->start;
+
+		while (start < range->end) {
+			const struct sym_src_loc *loc;
+			bool executable = sym_address_is_executable(store, start);
+			uint64_t hits = executable
+				? sym_image_coverage_at(store, start) : 0;
+			uint64_t end = start + 1;
+
+			/* Preserve exact per-byte evidence, including missed suffixes. */
+			while (end < range->end
+			       && sym_address_is_executable(store, end) == executable
+			       && (!executable
+				   || sym_image_coverage_at(store, end) == hits))
+				end++;
+			for (loc = range->locs; loc; loc = loc->next) {
+				bool excluded = exclude && loc->linenr
+					&& excludes_match(exclude, loc->filename,
+							  loc->linenr);
+
+				fputs("{\"version\":1,\"kind\":\"dwarf-line\",\"source\":", fp);
+				json_write_string(fp, loc->filename);
+				fprintf(fp, ",\"line\":%u,\"column\":%u,"
+					"\"discriminator\":%u,\"is_stmt\":%s,"
+					"\"range_start\":\"0x%" PRIx64 "\","
+					"\"range_end\":\"0x%" PRIx64 "\","
+					"\"start\":\"0x%" PRIx64 "\","
+					"\"end\":\"0x%" PRIx64 "\","
+					"\"executable\":%s,\"hits\":%" PRIu64 ","
+					"\"excluded\":%s}\n",
+					loc->linenr, loc->column, loc->discriminator,
+					loc->flags & LOC_F_STMT ? "true" : "false",
+					range->start, range->end, start, end,
+					executable ? "true" : "false", hits,
+					excluded ? "true" : "false");
+			}
+			start = end;
+		}
+	}
+	failed = ferror(fp);
+	if (fclose(fp) != 0 || failed) {
+		perror(filename);
+		exit(EXIT_FAILURE);
+	}
+}
+
 void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 		struct sym *unknown, FILE *fp,
 		const char *gcov_strip, const char *gcov_prefix,
 		enum cov_format fmt,
 		void *exclude, enum function_hit_policy function_policy,
 		enum line_hit_policy line_policy,
-		const char *inventory_filename)
+		const char *inventory_filename,
+		const char *attribution_filename)
 {
 	struct gcov_file *f;
 	int i;
@@ -1288,9 +1354,11 @@ void gcov_emit_gcov(void **store, struct sym *s, size_t nr_syms,
 					       line_policy);
 			f = f->next;
 		}
-		if (fmt == LCOV)
+		if (fmt == LCOV) {
 			lcov_emit_inventory(store, s, nr_syms, inventory_filename,
 					    function_policy);
+			lcov_emit_attribution(store, attribution_filename, exclude);
+		}
 	}
 
 	if (fmt == GCOV)
