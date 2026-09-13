@@ -210,7 +210,8 @@ $(TEST_BUILD_DIR)/test-elf-context: tests/unit/test-elf-context.c \
 		$(shell $(PKGCONFIG) --libs glib-2.0) -o $@
 
 $(TEST_BUILD_DIR)/test-disas: tests/unit/test-disas.c disas.c disas.h \
-		run.c run.h safeio.c safeio.h util.c util.h | $(TEST_BUILD_DIR)
+		run.c run.h safeio.c safeio.h util.c util.h $(BINUTILS_MODE_STAMP) \
+		| $(TEST_BUILD_DIR) check-local-binutils
 	$(CC) $(CPPFLAGS) $(filter-out -MMD,$(CFLAGS)) -I. \
 		tests/unit/test-disas.c disas.c run.c safeio.c util.c \
 		$(LDFLAGS) $(LDLIBS) -o $@

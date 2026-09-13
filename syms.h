@@ -125,5 +125,6 @@ const struct sym_source_range *sym_get_source_ranges(void **store,
 const struct sym_load_segment *sym_get_executable_load_segments(
 	void **store, size_t *nr_segments);
 uint16_t sym_get_elf_machine(void **store);
+const char *sym_get_machine_name(void **store);
 
 #endif

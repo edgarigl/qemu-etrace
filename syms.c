@@ -108,6 +108,7 @@ struct sym_store {
 	uint64_t *alt_call_sites;
 	size_t nr_alt_call_sites;
 	uint16_t elf_machine;
+	char *machine_name;
 	bool elf_big_endian;
 	bool x86_64;
 	bool xen_alt_metadata;
@@ -273,6 +274,13 @@ uint16_t sym_get_elf_machine(void **store)
 	struct sym_store *ss = *store;
 
 	return ss ? ss->elf_machine : EM_NONE;
+}
+
+const char *sym_get_machine_name(void **store)
+{
+	struct sym_store *ss = *store;
+
+	return ss ? ss->machine_name : NULL;
 }
 
 void sym_show(const char *prefix, const struct sym *s)
@@ -1214,6 +1222,8 @@ static void read_executable_sections(struct sym_store *ss, const char *elf)
 			elf, bfd_errmsg(bfd_get_error()));
 		exit(EXIT_FAILURE);
 	}
+	if (bfd_get_arch_info(abfd) && bfd_get_arch_info(abfd)->printable_name)
+		ss->machine_name = strdup(bfd_get_arch_info(abfd)->printable_name);
 	{
 		uint8_t header[20];
 		FILE *fp = fopen(elf, "rb");

@@ -180,6 +180,41 @@ static void test_unknown_machine(void)
 					   &result));
 }
 
+static void test_x86_fallthrough(void)
+{
+	static const struct {
+		const uint8_t code[9];
+		size_t size;
+		bool fallthrough;
+	} tests[] = {
+		{ { 0x90 }, 1, true },
+		{ { 0xf0, 0x48, 0x83, 0x05, 0, 0, 0, 0, 1 }, 9, true },
+		{ { 0x75, 0 }, 2, true },
+		{ { 0xeb, 0 }, 2, false },
+		{ { 0xe8, 0, 0, 0, 0 }, 5, false },
+		{ { 0xc3 }, 1, false },
+	};
+	struct disas_insn result;
+	size_t i;
+
+	if (!disas_insn_classify("i386:x86-64", false, 0x1000,
+				 tests[0].code, tests[0].size, &result)) {
+		g_test_skip("x86-64 libopcodes target is unavailable");
+		return;
+	}
+	for (i = 0; i < G_N_ELEMENTS(tests); i++) {
+		g_assert_true(disas_insn_classify("i386:x86-64", false, 0x1000,
+						  tests[i].code, tests[i].size,
+						  &result));
+		g_assert_cmpuint(result.size, ==, tests[i].size);
+		g_assert_cmpint(result.fallthrough_valid, ==,
+				tests[i].fallthrough);
+		if (tests[i].fallthrough)
+			g_assert_cmphex(result.fallthrough, ==,
+					0x1000 + tests[i].size);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	size_t i;
@@ -192,6 +227,7 @@ int main(int argc, char **argv)
 		g_free(path);
 	}
 	g_test_add_func("/disas/unknown-machine", test_unknown_machine);
+	g_test_add_func("/disas/x86/fallthrough", test_x86_fallthrough);
 
 	return g_test_run();
 }

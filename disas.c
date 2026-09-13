@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
@@ -37,6 +38,7 @@
 #include <fcntl.h>
 
 #include <search.h>
+#include <glib.h>
 
 #include "config.h"
 #include "util.h"
@@ -68,21 +70,44 @@ fprintf_styled(void *fp, enum disassembler_style style,
   return r;
 }
 
-static int fprintf_discard(void *stream, const char *fmt, ...)
+struct disas_capture {
+	char text[128];
+	size_t len;
+};
+
+static int fprintf_capture(void *stream, const char *fmt, ...)
 {
-	(void) stream;
-	(void) fmt;
-	return 0;
+	struct disas_capture *capture = stream;
+	va_list ap;
+	int written;
+
+	va_start(ap, fmt);
+	written = vsnprintf(capture->text + capture->len,
+			    sizeof(capture->text) - capture->len, fmt, ap);
+	va_end(ap);
+	if (written > 0)
+		capture->len = MIN(sizeof(capture->text) - 1,
+			capture->len + (size_t)written);
+	return written;
 }
 
-static int fprintf_styled_discard(void *stream,
+static int fprintf_styled_capture(void *stream,
 				  enum disassembler_style style,
 				  const char *fmt, ...)
 {
-	(void) stream;
-	(void) style;
-	(void) fmt;
-	return 0;
+	struct disas_capture *capture = stream;
+	va_list ap;
+	int written;
+
+	(void)style;
+	va_start(ap, fmt);
+	written = vsnprintf(capture->text + capture->len,
+			    sizeof(capture->text) - capture->len, fmt, ap);
+	va_end(ap);
+	if (written > 0)
+		capture->len = MIN(sizeof(capture->text) - 1,
+			capture->len + (size_t)written);
+	return written;
 }
 
 static void set_fallthrough(struct disas_insn *result, uint64_t addr)
@@ -151,6 +176,93 @@ static void classify_libopcode(const struct disassemble_info *inf,
 		result->kind = DISAS_INSN_UNKNOWN;
 		result->directness = DISAS_DIRECTNESS_UNKNOWN;
 		break;
+	}
+}
+
+static bool mnemonic_is(const char *mnemonic, size_t len, const char *value)
+{
+	return strlen(value) == len && !strncmp(mnemonic, value, len);
+}
+
+static bool mnemonic_starts(const char *mnemonic, size_t len,
+			    const char *prefix)
+{
+	size_t prefix_len = strlen(prefix);
+
+	return len >= prefix_len && !strncmp(mnemonic, prefix, prefix_len);
+}
+
+static void classify_x86_text(const char *text, uint64_t addr,
+			      struct disas_insn *result)
+{
+	static const char *const prefixes[] = {
+		"lock", "rep", "repe", "repz", "repne", "repnz", "bnd",
+		"notrack", "data16", "addr32", "cs", "ds", "es", "fs",
+		"gs", "ss",
+	};
+	const char *mnemonic = text;
+	size_t len;
+	size_t i;
+
+	while (isspace((unsigned char)*mnemonic))
+		mnemonic++;
+	for (;;) {
+		const char *end = mnemonic;
+		bool prefix = false;
+
+		while (*end && !isspace((unsigned char)*end))
+			end++;
+		len = end - mnemonic;
+		for (i = 0; i < G_N_ELEMENTS(prefixes); i++)
+			if (mnemonic_is(mnemonic, len, prefixes[i])) {
+				prefix = true;
+				break;
+			}
+		if (!prefix)
+			break;
+		mnemonic = end;
+		while (isspace((unsigned char)*mnemonic))
+			mnemonic++;
+	}
+	if (!len || mnemonic_is(mnemonic, len, "(bad)")
+	    || mnemonic[0] == '.')
+		return;
+	result->provider = DISAS_PROVIDER_LIBOPCODES;
+	result->confidence = DISAS_CONFIDENCE_METADATA;
+	if (mnemonic_starts(mnemonic, len, "jmp")
+	    || mnemonic_starts(mnemonic, len, "ljmp")) {
+		result->kind = DISAS_INSN_JUMP;
+	} else if (mnemonic[0] == 'j'
+		   || mnemonic_starts(mnemonic, len, "loop")) {
+		result->kind = DISAS_INSN_CONDITIONAL_BRANCH;
+		set_fallthrough(result, addr);
+	} else if (mnemonic_starts(mnemonic, len, "call")
+		   || mnemonic_starts(mnemonic, len, "lcall")) {
+		result->kind = DISAS_INSN_CALL;
+	} else if (mnemonic_starts(mnemonic, len, "ret")
+		   || mnemonic_starts(mnemonic, len, "lret")
+		   || mnemonic_starts(mnemonic, len, "iret")) {
+		result->kind = DISAS_INSN_RETURN;
+	} else if (mnemonic_starts(mnemonic, len, "int")
+		   || mnemonic_starts(mnemonic, len, "ud")
+		   || mnemonic_starts(mnemonic, len, "syscall")
+		   || mnemonic_starts(mnemonic, len, "sysret")
+		   || mnemonic_starts(mnemonic, len, "sysenter")
+		   || mnemonic_starts(mnemonic, len, "sysexit")
+		   || mnemonic_starts(mnemonic, len, "vmcall")
+		   || mnemonic_starts(mnemonic, len, "vmmcall")
+		   || mnemonic_starts(mnemonic, len, "vmrun")
+		   || mnemonic_starts(mnemonic, len, "vmlaunch")
+		   || mnemonic_starts(mnemonic, len, "vmresume")
+		   || mnemonic_starts(mnemonic, len, "xabort")
+		   || mnemonic_starts(mnemonic, len, "xbegin")
+		   || mnemonic_is(mnemonic, len, "hlt")
+		   || mnemonic_is(mnemonic, len, "rsm")) {
+		result->kind = DISAS_INSN_TRAP;
+	} else {
+		result->kind = DISAS_INSN_ORDINARY;
+		result->directness = DISAS_DIRECTNESS_NONE;
+		set_fallthrough(result, addr);
 	}
 }
 
@@ -265,6 +377,7 @@ bool disas_insn_classify(const char *machine, bool big_endian,
 {
 	const bfd_arch_info_type *arch_inf;
 	struct disassemble_info inf;
+	struct disas_capture capture = { 0 };
 	disassembler_ftype disas_fn;
 	bfd *abfd;
 	int size;
@@ -285,8 +398,8 @@ bool disas_insn_classify(const char *machine, bool big_endian,
 		return false;
 	abfd->arch_info = arch_inf;
 
-	init_disassemble_info(&inf, NULL, fprintf_discard,
-			      fprintf_styled_discard);
+	init_disassemble_info(&inf, &capture, fprintf_capture,
+			      fprintf_styled_capture);
 	inf.buffer = (bfd_byte *)buf;
 	inf.buffer_vma = addr;
 	inf.buffer_length = len;
@@ -317,6 +430,8 @@ bool disas_insn_classify(const char *machine, bool big_endian,
 	result->size = (size_t)size;
 	if (inf.insn_info_valid)
 		classify_libopcode(&inf, addr, result);
+	if (!inf.insn_info_valid && bfd_get_arch(abfd) == bfd_arch_i386)
+		classify_x86_text(capture.text, addr, result);
 	if (inf.insn_info_valid && bfd_get_arch(abfd) == bfd_arch_aarch64
 	    && result->size == 4)
 		classify_aarch64(addr, buf, result);
