@@ -47,6 +47,11 @@ uninstrumented assembly fixture: columns, discriminators, statement markers,
 equal-address aliases, partial counts, discarded code, exclusions, output
 errors, and unchanged LCOV reports with the diagnostic enabled.
 
+`test_gcc_provenance.py` checks the optional research return-block audit with
+uninstrumented x86 GCC fixtures. It requires pyelftools and an x86 objdump;
+runtime-witness tests additionally use qemu-x86_64. See
+`research/gcc-provenance.md` for supported artifacts and attribution limits.
+
 `tests/xen_assembly_validation.py` validates a regenerated report from the
 retained Xen x86 audit. The multi-gigabyte trace is intentionally not part of
 the normal test suite; its checked summary is stored in
