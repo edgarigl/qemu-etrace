@@ -93,6 +93,10 @@ source premise. It does not establish an automatic source-provenance rule or
 complete the real uninstrumented Xen acceptance criterion. A production
 sidecar importer and new coverage policy remain out of scope.
 
+The [early-return-origin follow-up](gcc-return-origins.md) tests the limits
+of replacing manual source review with GCC dumps. It preserves this study's
+terminal-return premise while rejecting a general single-return-count rule.
+
 ## Retained artifacts
 
 The original hashed bundle is unchanged. The follow-up is at:

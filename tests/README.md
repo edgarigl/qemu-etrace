@@ -52,6 +52,13 @@ uninstrumented x86 GCC fixtures. It requires pyelftools and an x86 objdump;
 runtime-witness tests additionally use qemu-x86_64. See
 `research/gcc-provenance.md` for supported artifacts and attribution limits.
 
+`test_gcc_return_origins.py` probes pre-CFG GIMPLE versus merged CFG returns
+with optional x86 GCC 13/14 builds and direct/thunk returns. It covers macro
+expansion, same-line origins, dead returns, and explicit/implicit exits;
+real QEMU runs demonstrate source paths with identical PC sequences. The
+fixed-fixture extractor is not a general source-provenance parser. See
+`research/gcc-return-origins.md` for evidence-retention instructions.
+
 `tests/xen_assembly_validation.py` validates a regenerated report from the
 retained Xen x86 audit. The multi-gigabyte trace is intentionally not part of
 the normal test suite; its checked summary is stored in

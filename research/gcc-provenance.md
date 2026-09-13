@@ -67,6 +67,12 @@ proof. An incoming edge's location does not apply to every other predecessor.
 A final compiler return may combine several original source returns. Neither
 one final return nor a nearby statement note proves one source origin.
 
+Even a single return in early GIMPLE does not exclude implicit fallthrough.
+The [early-return-origin experiment](gcc-return-origins.md) demonstrates this
+with real identical-PC executions and shows why the CFG dump is already too
+late to inventory distinct returns. A manual single-return premise must
+check that all supported normal source exits actually pass through it.
+
 All records therefore have `source_association: unresolved`,
 `execution: not-observed`, and `coverage_candidate: false`. A manually checked
 single-source-return premise may be documented separately, bound to the exact
