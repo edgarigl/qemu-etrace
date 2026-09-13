@@ -175,6 +175,22 @@ alt_selected_return_thunk_fixture:
 	ret
 	.size	alt_selected_return_thunk_fixture, .-alt_selected_return_thunk_fixture
 
+	.p2align 4
+	.globl	alt_selected_split_fixture
+	.type	alt_selected_split_fixture, @function
+alt_selected_split_fixture:
+	.loc	1 140 0
+	lock addq $1, alt_counter(%rip)
+	.loc	1 141 0
+.Lalt_selected_split:
+	.byte	0x0f, 0xae, 0xe8
+	.byte	0x66, 0x90
+	.loc	1 142 0
+	lock addq $1, alt_counter(%rip)
+	.loc	1 143 0
+	ret
+	.size	alt_selected_split_fixture, .-alt_selected_split_fixture
+
 	.data
 	.p2align 3
 alt_call_target_ptr:
@@ -215,6 +231,8 @@ __alt_call_sites_end:
 	nop
 	nop
 	jmp	__x86_return_thunk
+.Lalt_selected_split_replacement:
+	.byte	0x0f, 0x01, 0xf9
 
 	.section .altinstructions,"aw",@progbits
 	.globl	__alt_instructions
@@ -288,6 +306,13 @@ __alt_instructions:
 	.byte	0
 	.byte	7
 	.byte	7
+	.byte	0
+	.long	.Lalt_selected_split - .
+	.long	.Lalt_selected_split_replacement - .
+	.word	0x005b
+	.byte	3
+	.byte	3
+	.byte	2
 	.byte	0
 	.globl	__alt_instructions_end
 __alt_instructions_end:

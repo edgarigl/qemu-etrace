@@ -93,8 +93,11 @@ struct etracer {
 	struct fallthrough_state {
 		uint64_t sequence;
 		uint64_t context_id;
+		uint64_t linked_start;
 		uint64_t runtime_next;
 		uint64_t linked_next;
+		const uint8_t *code;
+		uint32_t size;
 		bool valid;
 	} *fallthrough;
 	struct etrace_pkg *pkg;
@@ -1139,7 +1142,7 @@ static bool resolve_from_physical(const struct etracer *t,
 
 static uint16_t matching_instruction_prefix(
 	const struct etracer *t, const struct etrace_tb_definition *definition,
-	uint64_t linked)
+	uint64_t linked, const struct fallthrough_state *previous)
 {
 	uint16_t i;
 
@@ -1154,6 +1157,11 @@ static uint16_t matching_instruction_prefix(
 		patch_len = sym_x86_alt_patch_span(t->tr.sym_tree,
 			linked + insn->offset, definition->code + insn->offset,
 			definition->size - insn->offset);
+		if (!patch_len && previous && !i)
+			patch_len = sym_x86_alt_patch_continuation_span(
+				t->tr.sym_tree, previous->linked_start,
+				previous->code, previous->size, linked,
+				definition->code, definition->size);
 		if (patch_len) {
 			patch_end = insn->offset + patch_len;
 			for (next = i; next < definition->insn_count; next++) {
@@ -1217,7 +1225,7 @@ static bool resolve_from_fallthrough(
 					previous->linked_next, linked_end))
 		return false;
 	verified = matching_instruction_prefix(t, definition,
-					       previous->linked_next);
+					       previous->linked_next, previous);
 	if (verified != definition->insn_count)
 		return false;
 	if (definition->mapping_count) {
@@ -1289,8 +1297,11 @@ static void remember_fallthrough(
 	*state = (struct fallthrough_state) {
 		.sequence = sequence,
 		.context_id = execution->context_id,
+		.linked_start = definition->linked_vaddr,
 		.runtime_next = runtime_next,
 		.linked_next = linked_next,
+		.code = definition->code,
+		.size = definition->size,
 		.valid = true,
 	};
 }
@@ -1339,7 +1350,7 @@ static bool resolve_tb_definition(struct etracer *t,
 			   || (physical_mapping
 			       && physical_linked == direct_linked)) {
 			verified = matching_instruction_prefix(t, definition,
-						       direct_linked);
+						       direct_linked, NULL);
 		} else {
 			return false;
 		}
@@ -1350,7 +1361,7 @@ static bool resolve_tb_definition(struct etracer *t,
 		}
 	} else if (physical_mapping && definition->code) {
 		verified = matching_instruction_prefix(t, definition,
-						       physical_linked);
+						       physical_linked, NULL);
 		if (verified) {
 			definition->resolved = true;
 			definition->linked_vaddr = physical_linked;

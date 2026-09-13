@@ -226,6 +226,10 @@ The successor must begin at that runtime address. Its candidate linked address
 is exactly the end of the predecessor's linked range, must be executable, and
 must validate every captured instruction against the ELF or registered
 runtime-patch metadata.
+If a registered alternative replacement and its NOP padding are split between
+the two TBs, the preceding owned bytes and the padding must together match one
+replacement and one supported NOP layout. Padding by itself does not establish
+ownership or identify a selected alternative.
 
 A partial dispatch or partial byte match, non-fallthrough branch, context or
 vCPU change, discontinuity, filtered-context gap, noncontiguous address, or

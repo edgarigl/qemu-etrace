@@ -1552,19 +1552,13 @@ static size_t x86_alt_replacement_span(struct sym_store *ss,
 	return 0;
 }
 
-size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
-			       const uint8_t *code, size_t len)
+static const struct x86_alt_patch *x86_alt_patch_find(
+	const struct sym_store *ss, uint64_t addr)
 {
-	struct sym_store *ss = *store;
-	struct image_section *section;
-	const uint8_t *original;
-	size_t high;
+	size_t high = ss->nr_x86_alt_patches;
 	size_t low = 0;
 	const struct x86_alt_patch *patch;
 
-	if (!ss || !code)
-		return 0;
-	high = ss->nr_x86_alt_patches;
 	while (low < high) {
 		size_t mid = low + (high - low) / 2;
 
@@ -1574,9 +1568,24 @@ size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
 			high = mid;
 	}
 	if (!low)
-		return 0;
+		return NULL;
 	patch = &ss->x86_alt_patches[low - 1];
-	if (addr < patch->addr || addr - patch->addr >= patch->len)
+	return addr >= patch->addr && addr - patch->addr < patch->len
+		? patch : NULL;
+}
+
+size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
+			       const uint8_t *code, size_t len)
+{
+	struct sym_store *ss = *store;
+	struct image_section *section;
+	const uint8_t *original;
+	const struct x86_alt_patch *patch;
+
+	if (!ss || !code)
+		return 0;
+	patch = x86_alt_patch_find(ss, addr);
+	if (!patch)
 		return 0;
 	{
 		size_t replacement_span = x86_alt_replacement_span(
@@ -1603,6 +1612,74 @@ size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
 	return (x86_nops_match(code, patch->padding_len, x86_p6_nops)
 		|| x86_nops_match(code, patch->padding_len, x86_k8_nops))
 		? patch->len : 0;
+}
+
+size_t sym_x86_alt_patch_continuation_span(
+	void **store, uint64_t previous_addr, const uint8_t *previous_code,
+	size_t previous_len, uint64_t addr, const uint8_t *code, size_t len)
+{
+	struct sym_store *ss = *store;
+	const struct x86_alt_patch *patch;
+	const uint8_t *prefix;
+	size_t offset;
+	size_t span;
+	size_t i;
+
+	if (!ss || !previous_code || !previous_len || !code || !len
+	    || previous_addr > UINT64_MAX - previous_len
+	    || previous_addr + previous_len != addr)
+		return 0;
+	patch = x86_alt_patch_find(ss, addr);
+	if (!patch || previous_addr > patch->addr)
+		return 0;
+	offset = addr - patch->addr;
+	prefix = previous_code + patch->addr - previous_addr;
+	span = MIN(len, patch->len - offset);
+
+	if (!load_image_data(ss))
+		return 0;
+	for (i = 0; i < patch->nr_replacements; i++) {
+		const struct x86_alt_replacement *replacement =
+			&ss->x86_alt_replacements[patch->first_replacement + i];
+		struct image_section *section;
+		const uint8_t *bytes;
+		const uint8_t *relocated_prefix = NULL;
+		uint8_t relocated[5];
+		bool initial_relative;
+
+		if (offset < replacement->len)
+			continue;
+		section = image_section_find(ss, replacement->addr);
+		if (!section
+		    || replacement->addr + replacement->len > section->end)
+			continue;
+		bytes = section->data + replacement->addr - section->start;
+		initial_relative = replacement->len >= 5
+			&& (bytes[0] & 0xfe) == 0xe8;
+		if (initial_relative) {
+			if (!x86_alt_relocated_prefix(ss, patch, replacement,
+						 bytes, relocated))
+				continue;
+			relocated_prefix = relocated;
+		} else if (replacement->len > 5
+			   && bytes[replacement->len - 5] == 0xe9) {
+			continue;
+		}
+		if ((x86_alt_replacement_matches(patch, replacement, bytes,
+				relocated_prefix, patch->addr, prefix, offset,
+				x86_p6_nops)
+		     && x86_nops_slice_match(code,
+				offset - replacement->len, span,
+				patch->len - replacement->len, x86_p6_nops))
+		    || (x86_alt_replacement_matches(patch, replacement, bytes,
+				relocated_prefix, patch->addr, prefix, offset,
+				x86_k8_nops)
+			&& x86_nops_slice_match(code,
+				offset - replacement->len, span,
+				patch->len - replacement->len, x86_k8_nops)))
+			return span;
+	}
+	return 0;
 }
 
 static bool find_alt_call_site(const struct sym_store *ss, uint64_t addr,

@@ -116,6 +116,9 @@ bool sym_code_matches(void **store, uint64_t addr,
 		      const uint8_t *code, size_t len);
 size_t sym_x86_alt_patch_span(void **store, uint64_t addr,
 			       const uint8_t *code, size_t len);
+size_t sym_x86_alt_patch_continuation_span(
+	void **store, uint64_t previous_addr, const uint8_t *previous_code,
+	size_t previous_len, uint64_t addr, const uint8_t *code, size_t len);
 bool sym_instruction_matches(void **store, uint64_t addr,
 			     const uint8_t *code, size_t len);
 size_t sym_find_code_matches(void **store, const uint8_t *code, size_t len,

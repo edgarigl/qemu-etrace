@@ -79,6 +79,7 @@ def alt_call_fixture(tmp_path_factory):
         "alt_call_forward_target",
         "__x86_return_thunk",
         "alt_selected_return_thunk_fixture",
+        "alt_selected_split_fixture",
     ):
         start, size = symbols[name]
         instructions = []
@@ -949,4 +950,86 @@ def test_fallthrough_mapping_validates_selected_alternative(
     assert lines[91] == int(matching)
     assert lines[92] == int(matching)
     assert ("by exact fallthrough" in result.stderr) == matching
+    assert ("unresolved" in result.stderr) != matching
+
+
+@pytest.mark.parametrize("physical_mappings", [False, True])
+@pytest.mark.parametrize("matching", [False, True])
+def test_fallthrough_mapping_validates_selected_padding_continuation(
+    run_etrace, tmp_path, alt_call_fixture, physical_mappings, matching
+):
+    function = alt_call_fixture.functions["alt_selected_split_fixture"]
+    site = function.code.index(b"\x0f\xae\xe8\x66\x90")
+    anchor_insns = tuple(
+        (offset, size)
+        for offset, size in function.instructions
+        if offset < site
+    )
+    tail_insns = tuple(
+        (offset - site - 3, size)
+        for offset, size in function.instructions
+        if offset >= site + 3
+    )
+    runtime = 0x33400000
+    tail = (b"\x66\x90" if matching else b"\x67\x90") + function.code[site + 5:]
+    trace = tmp_path / (
+        f"fallthrough-selected-padding-{physical_mappings}-{matching}.etrace"
+    )
+    output = trace.with_suffix(".info")
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=1, vaddr=runtime, context_id=1, insns=anchor_insns,
+            code=function.code[:site],
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1,
+            insn_count=len(anchor_insns),
+        )
+        + etrace_tb_def(
+            tb_id=2, vaddr=runtime + site, context_id=1,
+            insns=((0, 3),), code=b"\x0f\x01\xf9",
+            mappings=((0, 3, 0xa00000),) if physical_mappings else (),
+        )
+        + etrace_tb_exec(
+            tb_id=2, sequence=2, context_id=1, insn_count=1,
+        )
+        + etrace_tb_def(
+            tb_id=3, vaddr=runtime + site + 3, context_id=1,
+            insns=tail_insns, code=tail,
+            mappings=((0, len(tail), 0xa00003),)
+            if physical_mappings else (),
+        )
+        + etrace_tb_exec(
+            tb_id=3, sequence=3, context_id=1,
+            insn_count=len(tail_insns),
+        )
+    )
+    result = run_etrace(
+        "--trace", trace,
+        "--trace-output", "none",
+        "--elf", alt_call_fixture.binary,
+        "--nm", alt_call_fixture.tools["nm"],
+        "--dwarfdump", alt_call_fixture.tools["dwarfdump"],
+        "--coverage-format", "lcov",
+        "--coverage-output", output,
+        "--auto-map",
+        "--preserve-order",
+        "--elf-context", "x86_64:cpl0",
+        "--address-map", f"{runtime:x}:{function.start:x}:{site:x}",
+    )
+    lines = parse_lines(output)
+
+    assert result.returncode == 0, result.stderr
+    assert lines[140] == 1
+    assert lines[141] == int(matching)
+    assert lines[142] == int(matching)
+    assert (
+        f"resolved {2 if matching else 1} translation block"
+        in result.stderr
+    )
     assert ("unresolved" in result.stderr) != matching
