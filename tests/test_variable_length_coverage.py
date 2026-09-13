@@ -89,14 +89,14 @@ def x86_fixture(tmp_path_factory):
         capture_output=True,
         check=True,
     )
+    symbol_ranges = {}
     for line in symbols.stdout.splitlines():
         fields = line.split(maxsplit=3)
-        if len(fields) == 4 and fields[3] == "x86_coverage_fixture":
-            start = int(fields[0], 16)
-            size = int(fields[1], 16)
-            break
-    else:
+        if len(fields) == 4:
+            symbol_ranges[fields[3]] = (int(fields[0], 16), int(fields[1], 16))
+    if "x86_coverage_fixture" not in symbol_ranges:
         raise AssertionError("x86_coverage_fixture symbol not found")
+    start, size = symbol_ranges["x86_coverage_fixture"]
 
     assert start % 4 == 1
     assert size == 11
@@ -123,6 +123,8 @@ def x86_fixture(tmp_path_factory):
         tools=tools,
         instructions=instructions,
         code=bytes(code),
+        symbols=symbol_ranges,
+        disassembly=disassembly.stdout.splitlines(),
     )
 
 
@@ -193,6 +195,41 @@ def run_v1_lcov(run_etrace, tmp_path, fixture, trace, *extra_args):
         *extra_args,
     )
     return result, parse_lcov(output) if output.exists() else ({}, {})
+
+
+def instruction_slice(fixture, first, last):
+    start = fixture.instructions[first][0]
+    end = fixture.instructions[last - 1][0] + fixture.instructions[last - 1][1]
+    insns = tuple(
+        (offset - start, size)
+        for offset, size in fixture.instructions[first:last]
+    )
+    return start, end, insns, fixture.code[start:end]
+
+
+def fallthrough_definition(fixture, tb_id, runtime, first, last, **kwargs):
+    start, end, insns, code = instruction_slice(fixture, first, last)
+    return etrace_tb_def(
+        tb_id=tb_id, vaddr=runtime, insns=insns, code=code, **kwargs
+    ), end - start
+
+
+def fixture_function(fixture, name):
+    start, size = fixture.symbols[name]
+    instructions = []
+    code = bytearray()
+    for line in fixture.disassembly:
+        fields = line.split("\t")
+        if len(fields) < 3 or not fields[0].strip().endswith(":"):
+            continue
+        address = int(fields[0].strip()[:-1], 16)
+        if start <= address < start + size:
+            encoded = bytes.fromhex("".join(fields[1].split()))
+            instructions.append((address - start, len(encoded)))
+            code.extend(encoded)
+    return SimpleNamespace(
+        start=start, size=size, instructions=tuple(instructions), code=bytes(code)
+    )
 
 
 def test_etrace_coverage_uses_byte_addresses(run_etrace, tmp_path, x86_fixture):
@@ -946,6 +983,409 @@ def test_v1_auto_map_checks_short_mapped_code(
     assert functions["x86_coverage_fixture"] == int(matching)
     assert lines[10] == lines[11] == lines[12] == int(matching)
     assert ("unresolved" in result.stderr) == (not matching)
+
+
+@pytest.mark.parametrize("physical_mappings", [False, True])
+def test_v1_auto_map_propagates_exact_fallthrough(
+    run_etrace, tmp_path, x86_fixture, physical_mappings
+):
+    linked = x86_fixture.start
+    runtime = 0x30000000
+    first, first_len = fallthrough_definition(
+        x86_fixture, 1, runtime, 0, 2, context_id=1
+    )
+    second, second_len = fallthrough_definition(
+        x86_fixture, 2, runtime + first_len, 2, 4, context_id=1,
+        mappings=((0, 5, 0x800003),) if physical_mappings else (),
+    )
+    third, _ = fallthrough_definition(
+        x86_fixture, 3, runtime + first_len + second_len, 4, 6,
+        context_id=1,
+        mappings=((0, 3, 0x800008),) if physical_mappings else (),
+    )
+    trace = tmp_path / "fallthrough.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + first
+        + etrace_tb_exec(tb_id=1, sequence=1, context_id=1, insn_count=2)
+        + second
+        + etrace_tb_exec(tb_id=2, sequence=2, context_id=1, insn_count=2)
+        + third
+        + etrace_tb_exec(tb_id=3, sequence=3, context_id=1, insn_count=2)
+    )
+    result, (lines, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map", "--elf-context", "x86_64:cpl0",
+        "--address-map", f"{runtime:x}:{linked:x}:{first_len:x}",
+        "--preserve-order",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 1
+    assert all(lines[line] == 1 for line in range(10, 16))
+    assert "resolved 2 translation blocks by exact fallthrough" in result.stderr
+    assert "unresolved" not in result.stderr
+
+
+def test_v1_fallthrough_mapping_remains_context_local(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked = x86_fixture.start
+    runtime = 0x30500000
+    first, first_len = fallthrough_definition(
+        x86_fixture, 1, runtime, 0, 2, context_id=1
+    )
+    second, _ = fallthrough_definition(
+        x86_fixture, 2, runtime + first_len, 2, 4, context_id=1
+    )
+    trace = tmp_path / "fallthrough-context-local.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_context(
+            context_id=2, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + first
+        + etrace_tb_exec(tb_id=1, sequence=1, context_id=1, insn_count=2)
+        + second
+        + etrace_tb_exec(tb_id=2, sequence=2, context_id=1, insn_count=2)
+        + etrace_tb_exec(tb_id=2, sequence=3, context_id=2, insn_count=2)
+    )
+    result, (lines, _) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map", "--elf-context", "x86_64:cpl0",
+        "--address-map", f"{runtime:x}:{linked:x}:{first_len:x}",
+        "--preserve-order",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert lines[12] == 1
+    assert "1 unresolved" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "discontinuity-unknown",
+        "discontinuity-interrupt",
+        "discontinuity-exception",
+        "discontinuity-host-call",
+        "context-gap",
+        "context-change",
+        "different-vcpu",
+        "partial-dispatch",
+        "runtime-gap",
+        "runtime-page",
+        "linked-gap",
+        "wrong-bytes",
+        "explicit-overlap",
+    ],
+)
+def test_v1_auto_map_fallthrough_boundaries_fail_closed(
+    run_etrace, tmp_path, x86_fixture, boundary
+):
+    linked = x86_fixture.start
+    runtime = 0x31000FFD if boundary == "runtime-page" else 0x31000000
+    anchor_last = 3 if boundary == "partial-dispatch" else 2
+    successor_first = 3 if boundary in ("partial-dispatch", "linked-gap") else 2
+    first, first_len = fallthrough_definition(
+        x86_fixture, 1, runtime, 0, anchor_last, context_id=1
+    )
+    successor_runtime = runtime + first_len
+    if boundary == "runtime-gap":
+        successor_runtime += 1
+    successor_start, successor_end, successor_insns, successor_code = (
+        instruction_slice(x86_fixture, successor_first, successor_first + 1)
+    )
+    if boundary == "wrong-bytes":
+        successor_code = bytes([successor_code[0] ^ 1]) + successor_code[1:]
+    second = etrace_tb_def(
+        tb_id=2, vaddr=successor_runtime,
+        context_id=2 if boundary == "context-change" else 1,
+        insns=successor_insns, code=successor_code,
+    )
+    second_len = successor_end - successor_start
+    attributes = ETRACE_INFO_F_CONTEXT
+    if boundary == "context-gap":
+        attributes |= ETRACE_INFO_F_FILTERED
+    packets = [
+        etrace_info(major=1, attributes=attributes),
+        etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        ),
+        etrace_context(
+            context_id=2, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        ),
+        first,
+        etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1,
+            insn_count=2 if boundary == "partial-dispatch" else anchor_last,
+        ),
+    ]
+    sequence = 2
+    if boundary.startswith("discontinuity-"):
+        kind = {
+            "discontinuity-unknown": 0,
+            "discontinuity-interrupt": 1,
+            "discontinuity-exception": 2,
+            "discontinuity-host-call": 3,
+        }[boundary]
+        packets.append(etrace_discontinuity(
+            from_pc=runtime + first_len, to_pc=successor_runtime,
+            kind=kind,
+        ))
+    elif boundary == "context-gap":
+        packets.append(etrace_context_gap(
+            sequence=2, from_context_id=1, to_context_id=1,
+        ))
+        sequence = 3
+    packets += [
+        second,
+        etrace_tb_exec(
+            tb_id=2, sequence=1 if boundary == "different-vcpu" else sequence,
+            context_id=2 if boundary == "context-change" else 1,
+            insn_count=1,
+            unit_id=1 if boundary == "different-vcpu" else 0,
+        ),
+    ]
+    trace = tmp_path / f"fallthrough-{boundary}.etrace"
+    trace.write_bytes(b"".join(packets))
+    extra = []
+    if boundary == "explicit-overlap":
+        extra = [
+            "--address-map",
+            f"{successor_runtime + 1:x}:{linked + first_len + 1:x}:1",
+        ]
+    result, (lines, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map", "--elf-context", "x86_64:cpl0",
+        "--address-map", f"{runtime:x}:{linked:x}:{first_len:x}",
+        "--preserve-order", *extra,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 1
+    assert lines[12] == 0
+    assert "by exact fallthrough" not in result.stderr
+    assert "retained 1 unresolved execution boundaries" in result.stderr
+
+
+def test_v1_auto_map_does_not_propagate_after_nonfallthrough_branch(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked = x86_fixture.start
+    runtime = 0x32000000
+    repeated = x86_fixture.code[:3]
+    trace = tmp_path / "fallthrough-return.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=1, vaddr=runtime, context_id=1,
+            insns=((0, 1),), code=b"\xc3",
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1, insn_count=1,
+        )
+        + etrace_tb_def(
+            tb_id=2, vaddr=runtime + 1, context_id=1,
+            insns=((0, 1), (1, 2)), code=repeated,
+        )
+        + etrace_tb_exec(
+            tb_id=2, sequence=2, context_id=1, insn_count=2,
+        )
+    )
+    result, _ = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map",
+        "--address-map", f"{runtime:x}:{linked + 10:x}:1",
+        "--preserve-order",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "by exact fallthrough" not in result.stderr
+    assert "unresolved" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "fallthrough_call_fixture",
+        "fallthrough_jump_fixture",
+        "fallthrough_conditional_fixture",
+        "fallthrough_trap_fixture",
+        "fallthrough_undecodable_fixture",
+    ],
+)
+def test_v1_auto_map_rejects_nonordinary_predecessors(
+    run_etrace, tmp_path, x86_fixture, name
+):
+    function = fixture_function(x86_fixture, name)
+    runtime = 0x32300000
+    trace = tmp_path / f"fallthrough-{name}.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=1, vaddr=runtime, context_id=1,
+            insns=function.instructions, code=function.code,
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1,
+            insn_count=len(function.instructions),
+        )
+        + etrace_tb_def(
+            tb_id=2, vaddr=runtime + function.size, context_id=1,
+            insns=((0, 1),), code=b"\xc3",
+        )
+        + etrace_tb_exec(
+            tb_id=2, sequence=2, context_id=1, insn_count=1,
+        )
+    )
+
+    result, _ = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map", "--preserve-order",
+        "--address-map",
+        f"{runtime:x}:{function.start:x}:{function.size:x}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "by exact fallthrough" not in result.stderr
+    assert "retained 1 unresolved execution boundaries" in result.stderr
+
+
+def test_v1_auto_map_does_not_propagate_unordered_fallthrough(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked = x86_fixture.start
+    runtime = 0x32500000
+    first, first_len = fallthrough_definition(
+        x86_fixture, 1, runtime, 0, 2
+    )
+    second, _ = fallthrough_definition(
+        x86_fixture, 2, runtime + first_len, 2, 4
+    )
+    trace = tmp_path / "fallthrough-unordered.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + first
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=2)
+        + second
+        + etrace_tb_exec(tb_id=2, sequence=2, insn_count=2)
+    )
+
+    result, (lines, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map",
+        "--address-map", f"{runtime:x}:{linked:x}:{first_len:x}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 1
+    assert lines[12] == 0
+    assert "by exact fallthrough" not in result.stderr
+    assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+def test_v1_auto_map_fallthrough_requires_nonzero_context(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked = x86_fixture.start
+    runtime = 0x32600000
+    first, first_len = fallthrough_definition(
+        x86_fixture, 1, runtime, 0, 2
+    )
+    second, _ = fallthrough_definition(
+        x86_fixture, 2, runtime + first_len, 2, 4
+    )
+    trace = tmp_path / "fallthrough-zero-context.etrace"
+    trace.write_bytes(
+        etrace_info(major=1)
+        + first
+        + etrace_tb_exec(tb_id=1, sequence=1, insn_count=2)
+        + second
+        + etrace_tb_exec(tb_id=2, sequence=2, insn_count=2)
+    )
+
+    result, (lines, functions) = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map", "--preserve-order",
+        "--address-map", f"{runtime:x}:{linked:x}:{first_len:x}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert functions["x86_coverage_fixture"] == 1
+    assert lines[12] == 0
+    assert "by exact fallthrough" not in result.stderr
+    assert "retained 1 unresolved execution boundaries" in result.stderr
+
+
+def test_v1_fallthrough_mapping_rejects_physical_conflict(
+    run_etrace, tmp_path, x86_fixture
+):
+    linked = x86_fixture.start
+    runtime = 0x32800000
+    anchor, anchor_len = fallthrough_definition(
+        x86_fixture, 1, runtime, 0, 2
+    )
+    successor, _ = fallthrough_definition(
+        x86_fixture, 2, runtime + anchor_len, 2, 4,
+        mappings=((0, 5, 0x900000),),
+    )
+    other_start, other_end, other_insns, other_code = instruction_slice(
+        x86_fixture, 3, 6
+    )
+    trace = tmp_path / "fallthrough-physical-conflict.etrace"
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=3, vaddr=linked + other_start,
+            context_id=1,
+            insns=other_insns, mappings=((0, other_end - other_start,
+                                          0x900000),),
+            code=other_code,
+        )
+        + etrace_tb_exec(
+            tb_id=3, sequence=1, context_id=1,
+            insn_count=len(other_insns), unit_id=1,
+        )
+        + anchor
+        + etrace_tb_exec(tb_id=1, sequence=1, context_id=1, insn_count=2)
+        + successor
+        + etrace_tb_exec(tb_id=2, sequence=2, context_id=1, insn_count=2)
+    )
+
+    result, _ = run_v1_lcov(
+        run_etrace, tmp_path, x86_fixture, trace,
+        "--auto-map",
+        "--address-map", f"{runtime:x}:{linked:x}:{anchor_len:x}",
+        "--preserve-order",
+    )
+
+    assert result.returncode != 0
+    assert "conflicting physical image mappings" in result.stderr
+    assert not trace.with_suffix(".info").exists()
 
 
 @pytest.mark.parametrize("ordered", [False, True])

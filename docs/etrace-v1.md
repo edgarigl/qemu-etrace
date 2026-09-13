@@ -214,6 +214,28 @@ until independent address-mapping evidence resolves them. End-of-input
 diagnostics count the remaining unverified candidate TB definitions in both
 aggregate and ordered modes.
 
+During ordered replay and the ordered online phase that follows it, an
+immediately consecutive execution on the same vCPU and in the same nonzero
+context can
+extend ownership from a resolved TB through exact architectural fallthrough
+within one 4 KiB runtime and linked page. The
+predecessor must dispatch and validate every instruction, and its final
+instruction must decode as an ordinary instruction with a fallthrough address
+equal to the end of the TB.
+The successor must begin at that runtime address. Its candidate linked address
+is exactly the end of the predecessor's linked range, must be executable, and
+must validate every captured instruction against the ELF or registered
+runtime-patch metadata.
+
+A partial dispatch or partial byte match, non-fallthrough branch, context or
+vCPU change, discontinuity, filtered-context gap, noncontiguous address, or
+mapping conflict breaks the chain. An explicit map at the successor takes
+precedence. Observed physical mappings on a fully validated successor are
+bound only for that TB's spans; fallthrough does not infer a whole-image load
+bias. Fallthrough attribution remains local to the observed context, and
+runtime-patched bytes never become an image-mapping anchor. If libopcodes
+cannot decode the ELF architecture, the predecessor remains ineligible.
+
 Linked-address anchors assume the selected trace address space belongs to the
 input ELF at those virtual addresses. Explicit maps assert the corresponding
 runtime ownership. Without an ELF context selector, physical bindings cover

@@ -53,6 +53,9 @@
 /* Index granularity, independent of the guest's translation granule. */
 #define BINDING_INDEX_SHIFT 12
 
+/* Conservative ownership propagation never crosses a minimum-size page. */
+#define FALLTHROUGH_PAGE_SHIFT 12
+
 struct etracer {
 	struct tracer tr;
 	struct etrace_info_data info;
@@ -82,9 +85,18 @@ struct etracer {
 	uint64_t journal_reported;
 	uint64_t ordered_unresolved;
 	uint64_t inferred_image_mappings;
+	uint64_t fallthrough_resolutions;
 	bool preserve_order;
+	bool ordered_execution;
 	uint64_t *last_sequence;
 	bool *sequence_seen;
+	struct fallthrough_state {
+		uint64_t sequence;
+		uint64_t context_id;
+		uint64_t runtime_next;
+		uint64_t linked_next;
+		bool valid;
+	} *fallthrough;
 	struct etrace_pkg *pkg;
 	gzFile input;
 	bool info_seen;
@@ -115,6 +127,8 @@ struct etrace_tb_definition {
 	bool bindings_seeded;
 	bool infer_image_mapping;
 	bool owned_mapping;
+	bool fallthrough_owned;
+	uint64_t fallthrough_context_id;
 };
 
 struct pending_tb_exec {
@@ -151,6 +165,17 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 static bool etrace_finish_ordered_prefix(struct etracer *t,
 					 enum cov_format cov_fmt);
 
+static void clear_fallthrough(struct etracer *t, uint16_t unit_id)
+{
+	t->fallthrough[unit_id].valid = false;
+}
+
+static void clear_all_fallthrough(struct etracer *t)
+{
+	memset(t->fallthrough, 0,
+	       (UINT16_MAX + 1) * sizeof(*t->fallthrough));
+}
+
 static bool context_matches_elf(const struct etracer *t, uint64_t context_id)
 {
 	const struct observed_context *context;
@@ -182,8 +207,11 @@ static bool execution_context_matches_elf(
 	const struct etracer *t, const struct etrace_tb_definition *definition,
 	uint64_t context_id)
 {
+	if (definition->fallthrough_owned
+	    && context_id != definition->fallthrough_context_id)
+		return false;
 	return context_matches_elf(t, context_id)
-		|| (definition->owned_mapping
+		|| ((definition->owned_mapping || definition->fallthrough_owned)
 		    && context_is_incomplete_for_elf(t, context_id));
 }
 
@@ -208,6 +236,21 @@ static bool address_map_covers_linked_range(const struct address_map *map,
 		cursor = MIN(covered_end, end);
 	}
 	return true;
+}
+
+static bool address_map_overlaps_runtime_range(const struct address_map *map,
+					       uint64_t start, uint64_t end)
+{
+	size_t i;
+
+	for (i = 0; map && i < map->count; i++) {
+		const struct address_map_entry *entry = &map->entries[i];
+		uint64_t entry_end = entry->runtime_start + entry->size;
+
+		if (start < entry_end && end > entry->runtime_start)
+			return true;
+	}
+	return false;
 }
 
 static bool explicit_map_covers_image(const struct etracer *t)
@@ -883,6 +926,61 @@ static bool add_physical_binding(struct etracer *t, uint64_t physical_start,
 	return true;
 }
 
+static bool physical_claim_conflicts(uint64_t physical_start, uint64_t len,
+				     uint64_t linked_start,
+				     uint64_t other_physical_start,
+				     uint64_t other_physical_end,
+				     uint64_t other_linked_start)
+{
+	uint64_t physical_end = physical_start + len;
+	uint64_t overlap;
+
+	if (physical_end <= other_physical_start
+	    || physical_start >= other_physical_end)
+		return false;
+	overlap = MAX(physical_start, other_physical_start);
+	return linked_start + overlap - physical_start
+		!= other_linked_start + overlap - other_physical_start;
+}
+
+static bool fallthrough_mappings_compatible(
+	const struct etracer *t, const struct etrace_tb_definition *definition,
+	uint64_t linked_start)
+{
+	uint16_t i;
+
+	for (i = 0; i < definition->mapping_count; i++) {
+		const struct etrace_tb_mapping *mapping = &definition->mappings[i];
+		uint64_t mapping_linked = linked_start + mapping->offset;
+		unsigned int j;
+
+		for (j = 0; j < t->physical_bindings->len; j++) {
+			const struct physical_binding *other = &g_array_index(
+				t->physical_bindings, struct physical_binding, j);
+
+			if (physical_claim_conflicts(mapping->paddr, mapping->len,
+						     mapping_linked,
+						     other->physical_start,
+						     other->physical_end,
+						     other->linked_start))
+				return false;
+		}
+		for (j = 0; j < i; j++) {
+			const struct etrace_tb_mapping *other =
+				&definition->mappings[j];
+
+			if (physical_claim_conflicts(mapping->paddr, mapping->len,
+						     mapping_linked,
+						     other->paddr,
+						     other->paddr + other->len,
+						     linked_start
+						     + other->offset))
+				return false;
+		}
+	}
+	return true;
+}
+
 static bool translate_relative(uint64_t value, uint64_t input_anchor,
 			       uint64_t output_anchor, uint64_t *translated)
 {
@@ -1083,6 +1181,118 @@ static uint16_t matching_instruction_prefix(
 		i++;
 	}
 	return i;
+}
+
+static bool resolve_from_fallthrough(
+	struct etracer *t, struct etrace_tb_definition *definition,
+	const struct etrace_tb_exec *execution, uint16_t unit_id)
+{
+	const struct fallthrough_state *previous = &t->fallthrough[unit_id];
+	uint64_t runtime_end;
+	uint64_t linked_end;
+	uint16_t verified;
+
+	if (!t->auto_map || !t->ordered_execution
+	    || definition->resolved || !previous->valid
+	    || previous->sequence == UINT64_MAX
+	    || execution->sequence != previous->sequence + 1
+	    || !execution->context_id
+	    || execution->context_id != previous->context_id
+	    || definition->vaddr != previous->runtime_next
+	    || !definition->code
+	    || (definition->vaddr != previous->linked_next
+		&& sym_address_is_executable(t->tr.sym_tree, definition->vaddr))
+	    || definition->vaddr > UINT64_MAX - definition->size
+	    || previous->linked_next > UINT64_MAX - definition->size)
+		return false;
+	runtime_end = definition->vaddr + definition->size;
+	linked_end = previous->linked_next + definition->size;
+	if (address_map_overlaps_runtime_range(t->tr.address_map,
+					       definition->vaddr, runtime_end)
+	    || (previous->runtime_next - 1) >> FALLTHROUGH_PAGE_SHIFT
+	    != (runtime_end - 1) >> FALLTHROUGH_PAGE_SHIFT
+	    || (previous->linked_next - 1) >> FALLTHROUGH_PAGE_SHIFT
+	       != (linked_end - 1) >> FALLTHROUGH_PAGE_SHIFT
+	    || !sym_range_is_executable(t->tr.sym_tree,
+					previous->linked_next, linked_end))
+		return false;
+	verified = matching_instruction_prefix(t, definition,
+					       previous->linked_next);
+	if (verified != definition->insn_count)
+		return false;
+	if (definition->mapping_count) {
+		uint16_t i;
+
+		if (!fallthrough_mappings_compatible(t, definition,
+						     previous->linked_next)) {
+			t->binding_conflict = true;
+			t->ambiguous_tbs++;
+			return false;
+		}
+		for (i = 0; i < definition->mapping_count; i++) {
+			const struct etrace_tb_mapping *mapping =
+				&definition->mappings[i];
+
+			add_physical_binding(t, mapping->paddr, mapping->len,
+				previous->linked_next + mapping->offset);
+		}
+	}
+	definition->resolved = true;
+	definition->linked_vaddr = previous->linked_next;
+	definition->verified_insn_count = verified;
+	definition->fallthrough_owned = true;
+	definition->fallthrough_context_id = execution->context_id;
+	definition->owned_mapping = definition->mapping_count != 0;
+	definition->bindings_seeded = definition->mapping_count != 0;
+	if (definition->code_candidate) {
+		definition->code_candidate = false;
+		t->code_candidates--;
+	}
+	t->fallthrough_resolutions++;
+	return true;
+}
+
+static void remember_fallthrough(
+	struct etracer *t, const struct etrace_tb_definition *definition,
+	const struct pending_tb_exec *execution, uint64_t sequence)
+{
+	struct fallthrough_state *state = &t->fallthrough[execution->unit_id];
+	const struct etrace_tb_insn *last;
+	struct disas_insn decoded;
+	const char *machine;
+	uint64_t runtime_next;
+	uint64_t linked_next;
+
+	state->valid = false;
+	if (!t->ordered_execution || !definition->resolved || !definition->code
+	    || definition->verified_insn_count != definition->insn_count
+	    || execution->insn_count != definition->insn_count
+	    || !execution_context_matches_elf(t, definition,
+					      execution->context_id)
+	    || definition->vaddr > UINT64_MAX - definition->size
+	    || definition->linked_vaddr > UINT64_MAX - definition->size)
+		return;
+	last = &definition->insns[definition->insn_count - 1];
+	machine = t->tr.guest.machine
+		? t->tr.guest.machine : sym_get_machine_name(t->tr.sym_tree);
+	if (!disas_insn_classify(machine, t->arch.guest.big_endian,
+		definition->vaddr + last->offset,
+		definition->code + last->offset, last->size, &decoded)
+	    || decoded.size != last->size
+	    || decoded.kind != DISAS_INSN_ORDINARY
+	    || !decoded.fallthrough_valid)
+		return;
+	runtime_next = definition->vaddr + definition->size;
+	linked_next = definition->linked_vaddr + definition->size;
+	if (decoded.fallthrough != runtime_next)
+		return;
+	*state = (struct fallthrough_state) {
+		.sequence = sequence,
+		.context_id = execution->context_id,
+		.runtime_next = runtime_next,
+		.linked_next = linked_next,
+		.valid = true,
+	};
 }
 
 static bool resolve_tb_definition(struct etracer *t,
@@ -1368,6 +1578,19 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 			"non-consecutive per-vCPU sequence");
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = tb_exec->sequence;
+	execution = (struct pending_tb_exec) {
+		.context_id = tb_exec->context_id,
+		.count = 1,
+		.duration = tb_exec->duration,
+		.first_time = tb_exec->time,
+		.unit_id = t->pkg->hdr.unit_id,
+		.insn_count = tb_exec->insn_count,
+		.flags = tb_exec->flags,
+	};
+	resolve_from_fallthrough(t, definition, tb_exec, t->pkg->hdr.unit_id);
+	if (t->binding_conflict)
+		return etrace_invalid_pkg(t->pkg,
+			"conflicting physical image mappings");
 	if (definition->mapping_anchor && !definition->bindings_seeded
 	    && context_matches_elf(t, tb_exec->context_id)) {
 		uint64_t previous_mappings = t->inferred_image_mappings;
@@ -1396,9 +1619,12 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 			free(packet);
 			return success;
 		}
+		remember_fallthrough(t, definition, &execution,
+				     tb_exec->sequence);
 		return true;
 	}
 	if (!execution_context_matches_elf(t, definition, tb_exec->context_id)) {
+		clear_fallthrough(t, t->pkg->hdr.unit_id);
 		if (!t->preserve_order)
 			return t->auto_map && !definition->resolved
 				&& context_is_incomplete_for_elf(
@@ -1408,24 +1634,18 @@ static bool etrace_process_tb_exec(struct etracer *t, enum cov_format cov_fmt)
 		goto ordered_unresolved;
 	}
 	if (t->auto_map && !definition->resolved) {
+		clear_fallthrough(t, t->pkg->hdr.unit_id);
 		if (!t->preserve_order)
 			return append_pending_execution(t, definition, tb_exec);
 		goto ordered_unresolved;
 	}
-	execution = (struct pending_tb_exec) {
-		.context_id = tb_exec->context_id,
-		.count = 1,
-		.duration = tb_exec->duration,
-		.first_time = tb_exec->time,
-		.unit_id = t->pkg->hdr.unit_id,
-		.insn_count = tb_exec->insn_count,
-		.flags = tb_exec->flags,
-	};
 	if (etrace_emit_tb_execution(t, definition, &execution, cov_fmt)) {
 		t->partial_events++;
+		clear_fallthrough(t, t->pkg->hdr.unit_id);
 		if (t->preserve_order)
 			goto ordered_unresolved;
-	}
+	} else
+		remember_fallthrough(t, definition, &execution, tb_exec->sequence);
 	return true;
 
 ordered_unresolved:
@@ -1513,6 +1733,7 @@ static bool etrace_process_context_gap(struct etracer *t)
 			"non-consecutive per-vCPU sequence");
 	t->sequence_seen[t->pkg->hdr.unit_id] = true;
 	t->last_sequence[t->pkg->hdr.unit_id] = gap->sequence;
+	clear_fallthrough(t, t->pkg->hdr.unit_id);
 
 	if (t->preserve_order && t->journal)
 		return etrace_spool_event(t);
@@ -1756,6 +1977,7 @@ void etrace_process_discontinuity(struct etracer *t)
 {
 	struct etrace_discontinuity *discontinuity = &t->pkg->discontinuity;
 
+	clear_fallthrough(t, t->pkg->hdr.unit_id);
 	if (!t->tr.fp_out)
 		return;
 
@@ -1779,6 +2001,8 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 			event_journal_error(t->journal));
 		return false;
 	}
+	t->ordered_execution = true;
+	clear_all_fallthrough(t);
 	etrace_report_journal(t, "replay-start");
 	while ((got = event_journal_read(t->journal, &hdr, sizeof(hdr))) > 0) {
 		if (got != sizeof(hdr)) {
@@ -1815,6 +2039,12 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 				fprintf(stderr, "Ordered event references undefined TB\n");
 				return false;
 			}
+			resolve_from_fallthrough(t, definition, tb_exec, hdr.unit_id);
+			if (t->binding_conflict) {
+				fprintf(stderr,
+					"conflicting physical image mappings during ordered replay\n");
+				return false;
+			}
 			if (definition->resolved
 			    && execution_context_matches_elf(
 					t, definition, tb_exec->context_id)) {
@@ -1832,8 +2062,13 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 					t, definition, &execution, cov_fmt);
 				if (unresolved)
 					t->partial_events++;
+				else
+					remember_fallthrough(t, definition,
+							     &execution,
+							     tb_exec->sequence);
 			}
 			if (unresolved) {
+				clear_fallthrough(t, hdr.unit_id);
 				t->ordered_unresolved++;
 				if (t->tr.fp_out) {
 					fprintf(t->tr.fp_out,
@@ -1853,6 +2088,7 @@ static bool etrace_replay_ordered_events(struct etracer *t,
 				fprintf(stderr, "Short ordered context gap record\n");
 				return false;
 			}
+			clear_fallthrough(t, hdr.unit_id);
 			etrace_output_context_gap(t, hdr.unit_id,
 						  &t->pkg->context_gap);
 			break;
@@ -1974,7 +2210,8 @@ void etrace_show(int fd, FILE *fp_out,
 						free, (GDestroyNotify)g_array_unref);
 	t.last_sequence = calloc(UINT16_MAX + 1, sizeof(*t.last_sequence));
 	t.sequence_seen = calloc(UINT16_MAX + 1, sizeof(*t.sequence_seen));
-	if (!t.last_sequence || !t.sequence_seen) {
+	t.fallthrough = calloc(UINT16_MAX + 1, sizeof(*t.fallthrough));
+	if (!t.last_sequence || !t.sequence_seen || !t.fallthrough) {
 		fprintf(stderr, "Unable to allocate ETrace sequence state\n");
 		exit(EXIT_FAILURE);
 	}
@@ -2036,6 +2273,7 @@ void etrace_show(int fd, FILE *fp_out,
 			break;
 		case TYPE_DISCONTINUITY:
 			if (t.preserve_order && t.journal) {
+				clear_fallthrough(&t, t.pkg->hdr.unit_id);
 				if (!etrace_spool_event(&t)) {
 					free(t.pkg);
 					exit(EXIT_FAILURE);
@@ -2181,6 +2419,13 @@ void etrace_show(int fd, FILE *fp_out,
 			t.inferred_image_mappings,
 			t.inferred_image_mappings == 1 ? "" : "s");
 	}
+	if (t.auto_map && t.fallthrough_resolutions) {
+		fprintf(stderr,
+			"Automatic mapping resolved %" PRIu64
+			" translation block%s by exact fallthrough\n",
+			t.fallthrough_resolutions,
+			t.fallthrough_resolutions == 1 ? "" : "s");
+	}
 	if (t.auto_map && t.code_candidates) {
 		fprintf(stderr,
 			"Automatic mapping retained %" PRIu64
@@ -2199,6 +2444,7 @@ void etrace_show(int fd, FILE *fp_out,
 	g_hash_table_destroy(t.binding_buckets);
 	free(t.sequence_seen);
 	free(t.last_sequence);
+	free(t.fallthrough);
 	free(t.pkg);
 	fprintf(stderr, "done.\n");
 }

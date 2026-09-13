@@ -199,6 +199,18 @@ aggregates through the same range processor. Ambiguous or unrelated TBs are
 reported but never guessed into the coverage result; exhausting the configured
 pending-aggregate limit is fatal.
 
+During ordered replay and subsequent ordered online processing, an owned,
+fully dispatched TB can pass ownership to the immediately following TB on the
+same vCPU and in the same nonzero execution context when its decoded final
+instruction is ordinary and falls through exactly to the successor. Runtime
+and linked ranges must both be contiguous and remain within one 4 KiB page,
+and every successor instruction must validate against the ELF or registered
+patch metadata. Discontinuities, context gaps, control-flow instructions,
+partial dispatch or validation, and address or mapping conflicts break this
+propagation. Observed physical mappings are bound only for the validated
+successor spans. The resulting TB remains local to that context and never
+becomes a whole-image mapping anchor.
+
 `--preserve-order` replaces unresolved aggregation with a disk-backed dynamic
 event journal and a second replay pass. It preserves the producer's observed
 stream interleaving and per-vCPU sequence. Remaining unresolved executions are

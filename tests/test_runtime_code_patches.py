@@ -6,7 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.trace_builder import etrace_info, etrace_tb_def, etrace_tb_exec
+from tests.trace_builder import (
+    ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+    ETRACE_INFO_F_CONTEXT,
+    etrace_context,
+    etrace_info,
+    etrace_tb_def,
+    etrace_tb_exec,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -875,3 +882,71 @@ def test_nonempty_alternative_does_not_establish_mapping(
     assert result.returncode == 0, result.stderr
     assert functions["alt_padding_fixture"] == 0
     assert "1 execution events in 1 unresolved aggregates" in result.stderr
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_fallthrough_mapping_validates_selected_alternative(
+    run_etrace, tmp_path, alt_call_fixture, matching
+):
+    function = alt_call_fixture.functions["alt_padding_fixture"]
+    site = function.code.index(b"\x0f\x1f\x00")
+    anchor_insns = tuple(
+        (offset, size)
+        for offset, size in function.instructions
+        if offset < site
+    )
+    tail_insns = tuple(
+        (offset - site, size)
+        for offset, size in function.instructions
+        if offset >= site
+    )
+    runtime = 0x33000000
+    replacement = b"\x0f\x01\xcb" if matching else b"\x0f\x1f\x01"
+    tail = replacement + function.code[site + 3:]
+    trace = tmp_path / f"fallthrough-selected-{matching}.etrace"
+    output = trace.with_suffix(".info")
+    trace.write_bytes(
+        etrace_info(major=1, attributes=ETRACE_INFO_F_CONTEXT)
+        + etrace_context(
+            context_id=1, architecture=62, privilege=0,
+            flags=ETRACE_CONTEXT_F_PRIVILEGE_VALID,
+        )
+        + etrace_tb_def(
+            tb_id=1, vaddr=runtime, context_id=1, insns=anchor_insns,
+            code=function.code[:site],
+        )
+        + etrace_tb_exec(
+            tb_id=1, sequence=1, context_id=1,
+            insn_count=len(anchor_insns),
+        )
+        + etrace_tb_def(
+            tb_id=2, vaddr=runtime + site, context_id=1,
+            insns=tail_insns, code=tail,
+        )
+        + etrace_tb_exec(
+            tb_id=2, sequence=2, context_id=1,
+            insn_count=len(tail_insns),
+        )
+    )
+    args = [
+        "--trace", trace,
+        "--trace-output", "none",
+        "--elf", alt_call_fixture.binary,
+        "--nm", alt_call_fixture.tools["nm"],
+        "--dwarfdump", alt_call_fixture.tools["dwarfdump"],
+        "--coverage-format", "lcov",
+        "--coverage-output", output,
+        "--auto-map",
+        "--preserve-order",
+        "--address-map", f"{runtime:x}:{function.start:x}:{site:x}",
+    ]
+
+    result = run_etrace(*args)
+    lines = parse_lines(output)
+
+    assert result.returncode == 0, result.stderr
+    assert lines[90] == 1
+    assert lines[91] == int(matching)
+    assert lines[92] == int(matching)
+    assert ("by exact fallthrough" in result.stderr) == matching
+    assert ("unresolved" in result.stderr) != matching
