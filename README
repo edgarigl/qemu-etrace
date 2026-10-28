@@ -221,6 +221,18 @@ $ qemu-etrace --trace /tmp/elog --elf vmlinux
 To create coverage ASCII etrace style info:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.etrace --coverage-format etrace --trace-output none
 
+The legacy `etrace` coverage value is duration distributed across each byte.
+Use `etrace-v2` to report execution count and duration separately:
+
+$ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.etrace-v2 --coverage-format etrace-v2 --trace-output none
+
+The version 2 columns are `count duration address symbol source`. Count is the
+execution count attributed to the byte. Duration is the producer-supplied
+duration distributed across the range. The QEMU plugin
+records dispatch counts with zero duration because it does not observe elapsed
+guest execution time. The final `x unknown` row totals execution count and
+duration which could not be attributed to an ELF symbol.
+
 To create coverage lcov style info:
 $ qemu-etrace --trace /tmp/elog --elf vmlinux --coverage-output cov.info --coverage-format lcov --trace-output none
 

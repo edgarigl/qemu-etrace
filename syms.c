@@ -1838,14 +1838,15 @@ void sym_update_cov(struct sym *sym, uint64_t start, uint64_t end,
 	uint64_t entries;
 	uint64_t accounted = 0;
 
+	sym->total_time += time;
+	sym->total_count += count;
+
 	/* Is this the unknown sym ?? */
 	if (sym->namelen == 0)
 		return;
 
 	assert(start_offset >= 0);
 	assert(start_offset + len <= sym->size);
-
-	sym->total_time += time;
 
 	if (!sym->cov)
 		sym_alloc_cov(sym);

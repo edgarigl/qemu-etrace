@@ -57,6 +57,7 @@ struct format_map {
 struct format_map cov_fmt_map[] = {
 	{ "none", NONE },
 	{ "etrace", ETRACE },
+	{ "etrace-v2", ETRACE_V2 },
 	{ "cachegrind", CACHEGRIND },
 	{ "gcov-bad", GCOV },
 	{ "qcov", QCOV },

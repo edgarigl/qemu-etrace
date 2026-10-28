@@ -79,6 +79,7 @@ struct sym
 	uint32_t flags;
 	int hits;
 	uint64_t total_time;
+	uint64_t total_count;
 	char *src_filename;
 
 	struct sym_linemap *linemap;

@@ -74,6 +74,40 @@ static void coverage_dump(struct sym *s, size_t nr_syms,
 	fprintf(fp, "%" PRId64 " x unknown\n", unknown->total_time);
 }
 
+static void coverage_dump_v2_sym(struct sym *s, FILE *fp)
+{
+	uint64_t addr, end = s->addr + s->size;
+
+	for (addr = s->addr; addr < end; addr++) {
+		uint64_t offset = addr - s->addr;
+		uint64_t count = 0;
+		uint64_t duration = 0;
+
+		if (s->cov_ent)
+			count = s->cov_ent->counter[offset];
+		if (s->cov)
+			duration = s->cov->counter[offset];
+
+		fprintf(fp, "%" PRIu64 " %" PRIu64 " %" PRIx64 " %s %s:%d\n",
+			count, duration, addr, s->name,
+			s->src_filename ? s->src_filename : "unknown",
+			s->linemap ? s->linemap->locs[offset].linenr : 0);
+	}
+}
+
+static void coverage_dump_v2(struct sym *s, size_t nr_syms,
+			     const struct sym *unknown, FILE *fp)
+{
+	size_t i;
+
+	fprintf(fp, "# qemu-etrace coverage v2\n");
+	fprintf(fp, "# count duration address symbol source\n");
+	for (i = 0; i < nr_syms; i++)
+		coverage_dump_v2_sym(&s[i], fp);
+	fprintf(fp, "%" PRIu64 " %" PRIu64 " x unknown unknown:0\n",
+		unknown->total_count, unknown->total_time);
+}
+
 void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 			const char *gcov_strip, const char *gcov_prefix,
 			const char *exclude, enum function_hit_policy function_policy,
@@ -110,6 +144,9 @@ void coverage_emit(void **store, const char *filename, enum cov_format fmt,
 	switch (fmt) {
 	case ETRACE:
 		coverage_dump(s, nr_syms, unknown, fp);
+		break;
+	case ETRACE_V2:
+		coverage_dump_v2(s, nr_syms, unknown, fp);
 		break;
 	case CACHEGRIND:
 		cachegrind_coverage_dump(s, nr_syms, unknown, fp);

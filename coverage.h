@@ -22,6 +22,7 @@
 enum cov_format {
 	NONE = 0,
 	ETRACE,
+	ETRACE_V2,
 	CACHEGRIND,
 	GCOV,
 	QCOV,

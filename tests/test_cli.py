@@ -9,6 +9,7 @@ def test_help_lists_trace_and_coverage_formats(run_etrace):
     assert "qemu-simple" in result.stdout
     assert "Supported coverage formats:" in result.stdout
     assert "lcov" in result.stdout
+    assert "etrace-v2" in result.stdout
     assert "--function-hit-policy" in result.stdout
     assert "--line-hit-policy" in result.stdout
     assert "--coverage-inventory" in result.stdout

@@ -272,6 +272,55 @@ def test_etrace_coverage_uses_byte_addresses(run_etrace, tmp_path, x86_fixture):
     assert coverage[start + 3] == 0
 
 
+def test_etrace_v2_separates_count_and_duration(
+    run_etrace, tmp_path, x86_fixture
+):
+    start = x86_fixture.start
+    trace = tmp_path / "count-coverage.etrace"
+    output = tmp_path / "count-coverage.txt"
+    trace.write_bytes(
+        etrace_arch(guest_bits=64)
+        + etrace_exec64(duration=0, start=start + 1, end=start + 3)
+        + etrace_exec64(duration=7, start=start + 0x100000, end=start + 0x100004)
+    )
+
+    result = run_etrace(
+        "--trace",
+        trace,
+        "--trace-output",
+        "none",
+        "--elf",
+        x86_fixture.binary,
+        "--nm",
+        x86_fixture.tools["nm"],
+        "--dwarfdump",
+        x86_fixture.tools["dwarfdump"],
+        "--coverage-format",
+        "etrace-v2",
+        "--coverage-output",
+        output,
+    )
+    assert result.returncode == 0, result.stderr
+
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert lines[:2] == [
+        "# qemu-etrace coverage v2",
+        "# count duration address symbol source",
+    ]
+    coverage = {
+        int(fields[2], 16): (int(fields[0]), int(fields[1]))
+        for line in lines[2:]
+        if len(fields := line.split()) >= 4
+        and fields[3] == "x86_coverage_fixture"
+    }
+    assert len(coverage) == 11
+    assert coverage[start] == (0, 0)
+    assert coverage[start + 1] == (1, 0)
+    assert coverage[start + 2] == (1, 0)
+    assert coverage[start + 3] == (0, 0)
+    assert lines[-1] == "1 7 x unknown unknown:0"
+
+
 def test_v1_partial_tb_matches_execution_range(run_etrace, tmp_path, x86_fixture):
     if shutil.which("dwarfdump") is None:
         pytest.skip("dwarfdump is required for LCOV generation")
